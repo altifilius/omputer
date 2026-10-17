@@ -1,63 +1,67 @@
 # Omputer
 
-Android telefonundan kendi PC’ndeki OMP oturumlarını izle, kararları cevapla ve projede kaldığın yerden devam et.
+Monitor OMP sessions on your own PC from an Android phone, answer agent questions, and pick up where you left off in a project.
 
-**Bulut backend’i, hosted relay, FCM, yönetilen VPN, analitik veya uzak UI kaynağı yok.** Telefon HTTPS/WSS ile doğrudan PC’ye bağlanır. Proje hafızası ve olay günlüğü PC’de SQLite; telefon kimliği Android Keystore ile şifreli, okunan içerik telefonun özel önbelleğinde. OMP’nin mevcut model sağlayıcısı değişmez: uzaktaki modele bağlı OMP, bu uygulama sayesinde çevrimdışı model olmaz.
+**No cloud backend, hosted relay, FCM, managed VPN, analytics, or remote UI resources.** The phone connects directly to the PC over HTTPS/WSS. Project memory and the event journal are stored in SQLite on the PC. Device credentials are encrypted using Android Keystore, and previously viewed content is kept in the phone's private cache. Omputer does not change your OMP model provider: a remotely hosted model does not become an offline model by using this application.
 
-## Bileşenler
+The current application interface is in Turkish. This README uses English descriptions and includes the existing interface labels where needed.
 
-- `pc/`: Rust yerel servis ve native PC uygulaması; otomatik kurulum/başlangıç, yerel keşif, telefon onayı, TLS, cihaz yetkisi ve oturum yönetimi.
-- `bridge/`: TypeScript OMP extension; gerçek soru/izin arayüzü, subagent kontrolü ve kaynaklı checkpoint. Hosted Collab kullanmaz.
-- `mobile/`: Flutter Android uygulaması; Kotlin doğrudan bağlantı servisi, bildirim eylemleri, sertifika sabitleme ve güvenli yerel kimlik.
-- `PROTOCOL.md`, `MOBILE-CONTRACT.md`, `AUTO-CONTRACT.md`, `PAIRING-V2.md`: uygulanan arabirimler ve güven sınırları.
+## Components
 
-## İlk kullanım — komut gerekmez
+- `pc/`: Rust local service and native PC application, with automatic installation/startup, local discovery, phone approval, TLS, device authorization, and session management.
+- `bridge/`: TypeScript OMP extension for structured questions and permissions, subagent control, and source-linked checkpoints. It does not use hosted Collab.
+- `mobile/`: Flutter Android application with a Kotlin direct-connection service, notification actions, certificate pinning, and protected local credentials.
+- `PROTOCOL.md`, `MOBILE-CONTRACT.md`, `AUTO-CONTRACT.md`, `PAIRING-V2.md`: implemented interfaces and trust boundaries.
 
-1. Linux x64 PC’de **`dist/Omputer` dosyasını aç**. Dosya yöneticisi gerektiriyorsa dosya özelliklerinden çalıştırma iznini etkinleştir. Uygulama kendi OMP çalışma ortamını açar, kullanıcı hesabına kurulur ve telefon bağlantısını başlatır; Cargo, Bun, Android Studio veya terminal kurulumu gerekmez.
-2. Android telefona **`dist/omputer-android.apk` dosyasını kur ve aç**. Android’in bu kaynaktan uygulama kurma onayı sana aittir. İki cihaz aynı özel Wi-Fi / yerel ağda olmalı.
-3. Telefonda bulunan bilgisayarı seç. **PC ve telefondaki altı haneli kodu karşılaştır**; yalnızca aynıysa PC’de karşılaştırma kutusunu işaretleyip **Telefonu onayla**’ya bas. Kod farklıysa isteği reddet.
-4. Projeler ve kayıtlı oturumlar otomatik görünür. İstersen telefonun sorduğu bildirim iznini ver ve görünür bildirimli arka plan bağlantısını açık tut.
+## First use — no terminal commands
 
-Normal kullanımda servis başlatma, IP adresi yazma, JSON yapıştırma, proje kaydetme veya runtime indirme adımı yoktur. Güvenlik onayı ve Android’in izin ekranları otomatik geçilmez. Eşleştirilmiş telefon bu kullanıcı hesabıyla kod çalıştırabilir; yalnızca kendi telefonunu onayla.
+These steps use the local distribution files. The `dist/` directory is not tracked in Git; source-build instructions are below.
 
-PC penceresini kapatmak arka plan hizmetini kapatmaz. Uygulama sonraki kullanıcı oturumunda otomatik başlar; servis yöneticisi kullanılamıyorsa masaüstü otomatik başlatma kullanılır. Aynı uygulamayı tekrar açmak ikinci servis oluşturmaz. Hata sonrası kurtarma sınırlı yeniden denemelerle yapılır; bağlantı durumu ve elle yeniden deneme PC uygulamasında görünür.
+1. On your Linux x64 PC, **open `dist/Omputer`**. If your file manager requires it, enable execution permission in the file's properties. The application extracts its bundled OMP runtime, installs itself for your user account, and starts the phone connection. You do not need to install Cargo, Bun, Android Studio, or terminal tooling to run the packaged application.
+2. On your Android phone, **install and open `dist/omputer-android.apk`**. You must approve Android's installation prompt for this source. Both devices must be on the same private Wi-Fi or local network.
+3. Select the discovered PC on your phone. **Compare the six-digit code on both screens.** Only if they match, check the comparison box on the PC and select **Approve phone** (`Telefonu onayla`). Reject the request if the codes differ.
+4. Projects and saved sessions appear automatically. If desired, grant the notification permission requested by Android and keep background connectivity enabled with its visible notification.
 
-Keşif ağ tarafından engelleniyorsa PC uygulamasındaki **Telefon bilgisayarı bulamıyorsa** bölümünden tek kullanımlık QR oluştur; telefonda **Alternatif: bilgisayardaki QR’ı okut**’u seç. QR on dakika geçerli erişim sırrıdır; paylaşma. Misafir ağı / cihaz izolasyonu, firewall veya cihazlar arasında erişim olmaması QR ile aşılmaz.
+Normal use does not require starting a service manually, entering an IP address, pasting JSON, registering projects, or downloading a runtime. Security approval and Android permission prompts are never bypassed automatically. A paired phone can execute code as your PC user account; approve only your own phone.
 
-## Kurulum ve veri konumu
+Closing the PC window does not stop the background service. Startup is configured for subsequent user logins; desktop autostart is used if the user service manager is unavailable. Opening the application again does not create a second service. Recovery uses bounded retries, with connection status and a manual retry action available in the PC application.
 
-Kurulum yalnızca mevcut kullanıcı hesabına yapılır: uygulama ve gömülü runtime `$XDG_DATA_HOME/omputer/app` (varsayılan `~/.local/share/omputer/app`), özel servis verisi `$XDG_DATA_HOME/omputer`, uygulama menüsü `$XDG_DATA_HOME/applications/omputer.desktop`. Kullanıcı servisi `$XDG_CONFIG_HOME/systemd/user/omputer.service`; fallback otomatik başlangıç `$XDG_CONFIG_HOME/autostart/omputer.desktop`. Yalnızca uygulamanın kendi sahiplik kaydındaki dosyalar güncellenir; ilgisiz veya elle değiştirilmiş dosyalar ezilmez.
+If the network blocks discovery, open **If your phone cannot find the PC** (`Telefon bilgisayarı bulamıyorsa`) in the PC application to generate a one-use QR code. On your phone, select **Alternative: scan the PC's QR code** (`Alternatif: bilgisayardaki QR’ı okut`). The QR code is an access secret valid for ten minutes; do not share it. QR pairing cannot bypass guest-network isolation, a firewall, or a missing network route between devices.
 
-PC uygulaması özel IPv4 LAN arayüzünü ve boş bir portu seçer; genel Internet adresine veya bütün arayüzlere otomatik dinleyici açmaz. Özel ağ yoksa yerel hizmet loopback’te çalışır; ağ gelince yeniden bağlanır. Router, firewall ve VPN ayarlarını değiştirmez. Sertifika/PC kimliği yeniden açılışta korunur; adres değişikliği ancak kayıtlı sertifika birebir doğrulandıktan sonra kabul edilir.
+## Installation and data locations
 
-## Mevcut ve yeni OMP oturumları
+Installation is limited to the current user account. The application and bundled runtime live in `$XDG_DATA_HOME/omputer/app` (by default, `~/.local/share/omputer/app`), private service data in `$XDG_DATA_HOME/omputer`, and the application-menu entry in `$XDG_DATA_HOME/applications/omputer.desktop`. The user service is installed at `$XDG_CONFIG_HOME/systemd/user/omputer.service`; fallback autostart uses `$XDG_CONFIG_HOME/autostart/omputer.desktop`. Only files recorded as owned by this installation are updated. Unrelated or locally modified integration files are preserved.
 
-PC uygulaması OMP’nin yapılandırılmış veri dizinlerini ve profillerini tarar; geçmiş JSONL dosyalarını kaynağı değiştirmeden salt okunur içeri alır ve proje yollarını otomatik kaydeder. Yeni normal OMP açılışlarında kullanıcıya ait extension yükleyicisi köprüyü bağlar. Sistem `omp` çalıştırılabilir dosyası değiştirilmez.
+The PC application selects a private IPv4 LAN interface and an available port. It does not automatically bind to a public Internet address or all interfaces. Without a private network, the service runs on loopback and rebinds when a suitable network becomes available. It does not change router, firewall, or VPN settings. The PC identity and certificate survive restarts; an address change is accepted only after the exact stored certificate has been verified.
 
-**Önceden köprüsüz açılmış süreç sonradan enjekte edilmez veya yeniden başlatılmaz.** Böyle bir canlı oturum geçmiş olarak görünür ve köprüsüz durumu belirtilir; canlı kontrolü varmış gibi gösterilmez. İnaktif kayıt telefondan güvenle sürdürülebilir; canlı sahiplik lease’i varken ikinci resume reddedilir. Telefon bağlantısının kopması PC’deki işi durdurmaz.
+## Existing and new OMP sessions
 
-## Projede kaldığın yer
+The PC application scans configured OMP storage directories and profiles, imports saved JSONL history read-only without modifying the source, and registers project paths automatically. A user-scoped extension loader connects the bridge for future normal OMP launches. The system `omp` executable is not modified.
 
-İki farklı bilgi kaynağı gösterilir:
+**Already running processes without the bridge are not injected into or restarted.** Their history remains visible with an explicit unbridged status; live control is not falsely advertised. Inactive saved sessions can be resumed from the phone, but a second resume is rejected while a live ownership lease exists. Disconnecting the phone does not stop work on the PC.
 
-1. **Son etkinlik:** normal kullanıcı hedefi, son final asistan yanıtı, görevlerde sıradaki iş; kaynak oturum ve zaman ile. Turun bitmesi projeyi tamamlandı saymaz.
-2. **Kalıcı hafıza:** hedef, özet, sonraki adım ve kararlar. `omputer_checkpoint` araç çağrısı yerel kaydı onay aldıktan sonra bildirir; telefonda elle düzenlenebilir ve kaynak oturumu seçilebilir. Yeni model çağrısı/otomatik bulut özeti yok.
+## Project continuity
 
-## Bildirim ve bağlantı sınırları
+The application distinguishes two sources of context:
 
-Android uygulamasında **Bildirim izni** ve **Arka plan bağlantısı** aç. Bağlı-cihaz foreground service’i kalıcı görünür bildirimle doğrudan WSS bağlantısını sürdürür. Metin/editor isteklerine Android bildiriminden kısa cevap; çoklu seçim ve izinler uygulamada bağlamıyla açılır. İzin bildirimi kilit ekranında kör onay sunmaz.
+1. **Recent activity:** the user's goal, the latest final assistant response, and the next task, with the source session and timestamp. An agent turn ending does not mean the project is complete.
+2. **Persistent memory:** the goal, summary, next step, and decisions. The `omputer_checkpoint` tool reports success only after local persistence is acknowledged. Memory can also be edited on the phone and linked to a source session. No extra model request or automatic cloud summary is introduced.
 
-Doze sırasında ağ/CPU erişimi kısıtlanabilir. Uygulama içinden pil optimizasyonu ayarını incele; sürekli gerçek zamanlı erişim pil maliyeti taşır. Zorla durdurulmuş uygulama, ağsız telefon, kapanmış/uyuyan PC için teslimat garantisi yok. Bağlantı geri gelince olaylar ve güncel durum alınır; eski cevap tekrar çalıştırılmaz.
+## Notifications and connection limits
 
-Ev dışı erişim için kendine ait WireGuard/router VPN’i veya güvenli erişilebilir adres gerekir. Uygulama router portlarını, firewall’u veya VPN’i değiştirmez. CGNAT arkasındaki erişilemeyen PC’ye üçüncü taraf relay olmadan bağlantı kurulamaz. Public Internet’e doğrudan port açmak yerine kendi VPN’ini kullan.
+Enable **Notification permission** (`Bildirim izni`) and **Background connection** (`Arka plan bağlantısı`) in the Android application. A connected-device foreground service maintains the direct WSS connection with a persistent visible notification. Short text/editor responses can be sent from Android notifications; multi-select questions and permissions open in the application with their context. Permission notifications do not offer blind lock-screen approval.
 
-## Android derleme
+Doze may restrict network and CPU access. Review Android's battery-optimization settings from the application; continuous real-time access has a battery cost. Delivery is not guaranteed after force-stop, without network access, or while the PC is off or asleep. When connectivity returns, events and current state are refreshed; stale answers are not executed again.
 
-Flutter stable, JDK17, Android SDK36/NDK28.2.13676358. Bu çalışma makinesindeki izole araçlar `~/.local/share/omputer-tools/` altında; proje/sistem runtime’ı değiştirilmez.
+Access outside your local network requires your own WireGuard/router VPN or another securely reachable route. Omputer does not configure router ports, firewalls, or VPNs. An unreachable PC behind CGNAT cannot be reached without another reachable endpoint or a relay; no hosted relay is provided. Prefer your own VPN rather than exposing the service directly to the public Internet.
+
+## Building the Android application
+
+Build requirements: Flutter stable, JDK 17, Android SDK 36, and NDK 28.2.13676358. On the development workstation, isolated tools are stored under `~/.local/share/omputer-tools/`; project and system runtimes are not replaced.
 
 ```sh
 sh scripts/build-android.sh
-# Standart Flutter kurulumu olan başka bir makinede:
+# Alternatively, with a standard Flutter installation:
 cd mobile
 flutter pub get
 flutter analyze
@@ -66,27 +70,27 @@ flutter build apk --debug
 ```
 
 Debug APK: `mobile/build/app/outputs/flutter-apk/app-debug.apk`.
-Optimize edilmiş APK: `mobile/build/app/outputs/flutter-apk/app-release.apk`.
+Optimized APK: `mobile/build/app/outputs/flutter-apk/app-release.apk`.
 
-Hazır teslim dosyaları: `dist/omputer-android.apk` (arm64 + x86_64, optimize ve yerel release imzalı) ve `dist/Omputer` (Linux x64, runtime/köprü gömülü native uygulama). Kontrol toplamları `dist/SHA256SUMS` içinde.
+Local distribution files are `dist/omputer-android.apk` (arm64 + x86_64, optimized and signed with the local release key) and `dist/Omputer` (Linux x64 native application with the runtime and bridge embedded). Checksums are stored in `dist/SHA256SUMS`. These generated files are not included in the source repository.
 
-Bu makinede ayrı yerel release imza kimliği `~/.local/share/omputer-signing/android-release.p12` altında oluşturuldu; dizin 0700, anahtar/parola dosyaları ve gitignore’daki `mobile/android/key.properties` 0600. Anahtar başka bir servise yüklenmez. Uygulama güncellemeleri için bu dizini güvenli yedekle; anahtar kaybolursa mevcut kurulumun üzerine aynı kimlikle güncelleme yapılamaz. Debug ve release imzaları farklıdır; debug sürümünden geçerken uygulamayı kaldırıp yeniden eşleştirmen gerekir.
+A separate local release-signing identity was created on the development workstation at `~/.local/share/omputer-signing/android-release.p12`. Its directory has mode 0700; key/password files and the ignored `mobile/android/key.properties` have mode 0600. The key is not uploaded to another service. Back up the signing identity securely: if it is lost, updates cannot be installed over the existing application using the same identity. Debug and release signatures differ; switching from a debug installation requires uninstalling it and pairing again.
 
-Başka bir makinede release için `mobile/android/key.properties` içinde `storeFile`, `storePassword`, `keyAlias`, `keyPassword` belirt ve `sh scripts/build-android.sh --release` kullan. Debug anahtarı release diye gizlice kullanılmaz.
+To build a release on another machine, configure `storeFile`, `storePassword`, `keyAlias`, and `keyPassword` in `mobile/android/key.properties`, then run `sh scripts/build-android.sh --release`. A debug key is not silently substituted for a release key.
 
-## Geliştirici derlemesi ve tanılama
+## Developer builds and diagnostics
 
-Bu bölüm kullanıcı kurulumu değildir. Linux, Rust/Cargo, Bun >=1.3.14 ve OMP 18.10.2 kaynakları derleme sırasında gerekir:
+This section is for building from source, not end-user setup. Building requires Linux, Rust/Cargo, Bun compatible with `bridge/package.json`, and the OMP 18.10.2 sources:
 
 ```sh
 sh scripts/package-desktop.sh
 sh scripts/build-android.sh --release --target-platform android-arm64,android-x64
 ```
 
-Masaüstü paketleme script’i gömülü OMP runtime ve köprü arşivini oluşturur; sonuç `dist/Omputer` dosyasıdır. Gömülü kaynak olmadan düz Cargo build yalnızca geliştirme içindir. `omputer --help` içindeki açık CLI alt komutları isteğe bağlı tanılama içindir; komutsuz açılış native uygulamadır. Özel test verisi için `OMPUTER_STATE_DIR` / `--state-dir` kullanılabilir. Eski elle servis kurma script’i kaldırıldı; uygulama kurulum ve başlangıcın tek sahibidir.
+The desktop packaging script creates the embedded OMP runtime and bridge archive and writes `dist/Omputer`. A plain Cargo build without embedded resources is for development only. Explicit CLI subcommands listed by `omputer --help` are optional diagnostics; launching without a subcommand opens the native application. Use `OMPUTER_STATE_DIR` or `--state-dir` for isolated test data. The old manual service-installation script has been removed; the application owns installation and startup.
 
-## Güvenlik ve doğrulama
+## Security and verification
 
-Keşif bilgisi yetki değildir. İlk bağlantı iki taraflı v2 commit/reveal ve insanın kod karşılaştırmasını gerektirir; QR alternatifi tek kullanımlık gizli erişim kodu taşır. Sonraki bağlantılarda TLS sertifikası birebir sabitlenir; arbitrary self-signed kabul edilmez ve sertifika sessizce yenilenmez. Token PC’de yalnızca hash; cihaz iptali akışı kapatır. Dosya okumaları Linux `openat2 RESOLVE_BENEATH` ile köke hapsedilir. Soru kimliği/deadline ve ilk-geçerli-cevap kuralı masaüstü/telefon yarışını sınırlar. API key ve provider transport ayrıntıları snapshot’a gönderilmez; kullanıcı konuşmasının içeriği eşleştirilmiş telefona gider.
+Discovery is not authorization. Initial pairing requires two-sided v2 commit/reveal and human comparison of the codes; the alternative QR flow carries a one-use access secret. Subsequent connections pin the exact TLS certificate. Arbitrary self-signed certificates are not accepted, and identities are never silently rotated. Only device-token hashes are stored on the PC; revocation closes the device's stream. Linux `openat2 RESOLVE_BENEATH` confines file reads to registered project roots. Interaction IDs, deadlines, and first-valid-response arbitration handle competing desktop/phone answers. API keys and provider transport details are excluded from snapshots; conversation content is sent to the paired phone.
 
-Gerçek makine ve Android emülatörü üzerinde yapılan doğrulamanın güncel kapsamı `VERIFICATION.md` içinde. Fiziksel telefon pil/Doze davranışı emülatör kanıtıyla eşdeğer değildir.
+See [VERIFICATION.md](VERIFICATION.md) for exercised checks and their limits. Emulator results do not establish physical-device battery or Doze behavior.
