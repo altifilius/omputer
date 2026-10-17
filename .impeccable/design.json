@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-17T15:00:55Z",
+  "title": "Design System: Omputer Android",
+  "extensions": {
+    "colorMeta": {
+      "ink": {"role": "neutral", "displayName": "Ink"},
+      "periwinkle": {"role": "primary", "displayName": "Periwinkle"},
+      "citrus": {"role": "secondary", "displayName": "Citrus"},
+      "scheme-seed": {"role": "primary", "displayName": "Material scheme seed"},
+      "dark-surface": {"role": "neutral", "displayName": "Dusk surface"},
+      "dark-on-surface": {"role": "neutral", "displayName": "Porcelain text"},
+      "dark-secondary-container": {"role": "secondary", "displayName": "Dusk olive container"},
+      "light-primary": {"role": "primary", "displayName": "Light indigo"},
+      "light-on-primary": {"role": "neutral", "displayName": "White on indigo"},
+      "light-surface": {"role": "neutral", "displayName": "Cool paper"},
+      "light-secondary-container": {"role": "secondary", "displayName": "Pale citrus container"},
+      "light-on-secondary-container": {"role": "secondary", "displayName": "Dark olive foreground"}
+    },
+    "typographyMeta": {
+      "wayfinding": {"displayName": "Wayfinding", "purpose": "Material headlineLarge with the authored weight and tracking override."},
+      "project-title": {"displayName": "Project title", "purpose": "Material titleLarge with the authored weight override."},
+      "reading": {"displayName": "Extended reading", "purpose": "Material bodyLarge with expanded line height for activity and memory."},
+      "editor": {"displayName": "Local editor", "purpose": "System monospace for editor-method request content."}
+    },
+    "shadows": [],
+    "motion": [
+      {"name": "route-forward", "value": "220ms", "purpose": "Custom detail-route fade and horizontal translation; zero when disableAnimations is true."},
+      {"name": "route-reverse", "value": "180ms", "purpose": "Custom reverse transition; zero when disableAnimations is true."},
+      {"name": "route-easing", "value": "Cubic(0.16, 1, 0.3, 1)", "purpose": "Flutter custom route easing; reduced-motion branch returns the child directly."},
+      {"name": "route-translation", "value": "Offset(0.025, 0)", "purpose": "Normal route initial horizontal offset as a fraction of child width."},
+      {"name": "checkpoint-translation", "value": "Offset(0.045, 0)", "purpose": "Checkpoint route initial horizontal offset as a fraction of child width."}
+    ],
+    "breakpoints": [{"name": "navigation-rail", "value": "720dp"}]
+  },
+  "components": [
+    {
+      "name": "Filled action · dark",
+      "kind": "button",
+      "refersTo": "button-filled-dark",
+      "description": "Documentation-panel translation of the dark FilledButton color pair and minimum height. Browser pixels are preview-only; shipping controls use Flutter Material states and dp.",
+      "html": "<button class=\"ds-filled-dark\">Yanıtı gönder</button>",
+      "css": ".ds-filled-dark{background:#b8b9ff;color:#151d37;min-width:48px;min-height:52px;border:0;font-family:Roboto,sans-serif}.ds-filled-dark:hover,.ds-filled-dark:active{outline:1px solid currentColor}.ds-filled-dark:focus-visible{outline:2px solid currentColor;outline-offset:2px}.ds-filled-dark:disabled{opacity:.38}"
+    },
+    {
+      "name": "Filled action · light",
+      "kind": "button",
+      "refersTo": "button-filled-light",
+      "description": "Preview of the authored light FilledButton color pair. Browser state outlines are preview affordances, not extracted native state-layer tokens.",
+      "html": "<button class=\"ds-filled-light\">Yanıtı gönder</button>",
+      "css": ".ds-filled-light{background:#494bb0;color:#ffffff;min-width:48px;min-height:52px;border:0;font-family:Roboto,sans-serif}.ds-filled-light:hover,.ds-filled-light:active{outline:1px solid currentColor}.ds-filled-light:focus-visible{outline:2px solid #494bb0;outline-offset:2px}.ds-filled-light:disabled{opacity:.38}"
+    },
+    {
+      "name": "Outlined source action",
+      "kind": "button",
+      "description": "Source-session action; only the primary foreground and minimum target translate here. Native outline, shape, and state-layer values remain SDK-owned, not authored tokens.",
+      "html": "<button class=\"ds-source\">Kaynak oturuma git</button>",
+      "css": ".ds-source{color:#b8b9ff;background:#10172a;min-width:48px;min-height:52px;font-family:Roboto,sans-serif}.ds-source:hover,.ds-source:active{outline:1px solid currentColor}.ds-source:focus-visible{outline:2px solid currentColor;outline-offset:2px}"
+    },
+    {
+      "name": "Search field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Field radius and padding translation. Preview deliberately omits SDK-generated surfaceContainerHighest fill rather than inventing a hex value; native fill uses that role at 0.55 alpha.",
+      "html": "<input class=\"ds-search\" aria-label=\"Proje veya oturum ara\" placeholder=\"Proje veya oturum ara\">",
+      "css": ".ds-search{border:0;border-radius:16px;padding:16px;font-family:Roboto,sans-serif}.ds-search:hover{outline:1px solid #494bb0}.ds-search:focus-visible{outline:2px solid #494bb0;outline-offset:2px}"
+    },
+    {
+      "name": "Three-destination navigation",
+      "kind": "nav",
+      "description": "Semantic preview of the compact destinations, not a native NavigationBar reproduction. At 720dp the shipping layout uses NavigationRail. Selected indicator tone and native dimensions remain SDK-derived.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Ana gezinme\"><button aria-current=\"page\">Projeler</button><button>Gelen kutusu</button><button>Ayarlar</button></nav>",
+      "css": ".ds-nav{display:flex;background:#10172a;color:#eeeff8}.ds-nav button{flex:1;min-width:48px;min-height:48px;background:transparent;color:inherit;border:0;font-family:Roboto,sans-serif}.ds-nav button[aria-current]{font-weight:600}.ds-nav button:hover,.ds-nav button:active{outline:1px solid currentColor}.ds-nav button:focus-visible{outline:2px solid currentColor;outline-offset:-2px}"
+    },
+    {
+      "name": "Selected filter",
+      "kind": "chip",
+      "description": "Selected FilterChip secondary-container pair; native check icon, shape and state layers remain Material-owned. Preview is not an additional chip implementation.",
+      "html": "<button class=\"ds-filter\" aria-pressed=\"true\">Tümü</button>",
+      "css": ".ds-filter{background:#353e28;color:#e0ed8b;min-width:48px;min-height:48px;font-family:Roboto,sans-serif}.ds-filter:hover,.ds-filter:active{outline:1px solid currentColor}.ds-filter:focus-visible{outline:2px solid currentColor;outline-offset:2px}"
+    },
+    {
+      "name": "Waiting-decision strip",
+      "kind": "card",
+      "refersTo": "decision-strip-dark",
+      "description": "Actionable waiting-decision container, using the actual secondary-container fill, inherited dark on-surface text, 20dp radius and padding. Preview pixels represent documentation only.",
+      "html": "<button class=\"ds-decision\"><strong>Karar seni bekliyor</strong><span>Gelen kutusunu aç</span></button>",
+      "css": ".ds-decision{display:flex;flex-direction:column;text-align:left;background:#353e28;color:#eeeff8;border:0;border-radius:20px;padding:20px;font-family:Roboto,sans-serif}.ds-decision:hover,.ds-decision:active{outline:1px solid currentColor}.ds-decision:focus-visible{outline:2px solid currentColor;outline-offset:2px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Dusk atelier",
+    "overview": "A calm working companion, not a terminal compressed onto a phone. Deep blue surfaces, periwinkle actions, generous headings, and grounded rows make project context readable before exposing session mechanics. Cool paper and indigo give the light scheme its own identity.\n\nMaterial 3 supplies the interaction vocabulary. Turkish-first copy names the project, the pending decision, the source, and the freshness of a record. Recorded project memory and live conversation context remain visibly distinct; a finished agent turn is not presented as a finished project.",
+    "keyCharacteristics": [
+      "Native Material 3 controls and adaptive navigation.",
+      "Flat grouped rows with selective tonal containers.",
+      "Source-linked context and explicit connection state.",
+      "Readable, system-scaled typography without remote fonts."
+    ],
+    "rules": [
+      {"name": "The Semantic Pair Rule", "body": "Resolve light/dark roles through `Theme.of(context).colorScheme`; do not transplant a dark foreground or background into the light theme.", "section": "colors"},
+      {"name": "The Scale-With-The-Reader Rule", "body": "Keep system text scaling and wrapping. Do not replace Material roles with fixed raster text or shrink content to preserve a screenshot composition.", "section": "typography"},
+      {"name": "The First Valid Response Rule", "body": "The first valid desktop or phone answer wins. Closed or expired requests must not look actionable; disconnected answers are not silently queued. The interface explicitly tells the user to reconnect and check the current request. Tool approval includes a command/tool-context warning and separate approval/rejection choices. Cancellation requires a native confirmation dialog.", "section": "components"}
+    ],
+    "dos": [
+      "**Do** use Material color roles and preserve both authored brightness schemes.",
+      "**Do** keep native text scaling, wrapping, semantic labels, and minimum 48dp touch targets.",
+      "**Do** show connection, request status, provenance, and freshness in words as well as visual cues.",
+      "**Do** distinguish durable project memory from live session activity and link to its source when available.",
+      "**Do** honor Remove animations in custom route transitions."
+    ],
+    "donts": [
+      "**Don't** convert these dp/sp records into CSS layout rules for the Android app.",
+      "**Don't** replace flat project rows with a cramped terminal or uniform dashboard-card grid.",
+      "**Don't** add decorative glow, glass, gradients, or generated photography to this native working surface.",
+      "**Don't** make closed or disconnected requests appear submittable or imply offline answers are queued.",
+      "**Don't** claim tablet, physical-device, TalkBack, or motion verification from phone screenshots alone."
+    ]
+  }
+}

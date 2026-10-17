@@ -1,0 +1,39 @@
+[package]
+name = "omputer"
+version = "0.1.0"
+edition = "2024"
+description = "Local-only Android controller for OMP"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+eframe = { version = "0.32", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+fs2 = "0.4"
+futures-util = "0.3"
+hex = "0.4"
+libc = "0.2"
+if-addrs = "0.13"
+mdns-sd = "0.13"
+qrcode = { version = "0.14", default-features = false }
+rand = "0.8"
+rcgen = "0.13"
+parking_lot = "0.12"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rustls = { version = "0.23", features = ["ring"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+tokio = { version = "1", features = ["full"] }
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
