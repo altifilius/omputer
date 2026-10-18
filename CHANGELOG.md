@@ -13,7 +13,7 @@
 - Removed the package/journal 1 GiB admission limit from authoritative SQLite migration opens. Existing multi-GiB databases are paged by SQLite and retained; bounded backup bundles still enforce their total-byte budget. A large sparse-database regression protects upgrade startup without deleting history.
 - Source bootstrap now uses both current and previous runtime patches for conflict-detecting private-runtime upgrades. Already-running terminal closures require a normal fresh launch to activate host exports.
 
-Signed Android and self-contained Linux distribution packages were built; the final packaged desktop passed isolated native install/reopen/close/diagnostics acceptance. See `VERIFICATION.md` for exact hashes and remaining gates. An earlier same-signer 1.1.0 (4) integration APK was installed on Samsung after ownership transfer, but USB disappeared before the final APK and physical workflow matrix could be accepted.
+Signed Android and self-contained Linux distribution packages were built; the final packaged desktop passed isolated native install/reopen/close/diagnostics acceptance. Source commit `af00084` was pushed and rebuilt; final Android 1.1.0 (4) installed on Samsung with the same signer and an exact base-APK read-back hash, retaining data and pairing. Direct phone–PC LAN access failed and USB later dropped, so connected native workflow acceptance remains open. See `VERIFICATION.md` for exact evidence and limits.
 
 ## Unreleased — local Android companion
 
