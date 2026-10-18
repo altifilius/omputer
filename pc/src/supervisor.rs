@@ -34,6 +34,10 @@ pub struct Startup {
 }
 
 pub fn admin(state: &Path, action: &str, payload: Value) -> Result<Value> {
+    admin_with_pid(state, action, payload).map(|(value, _)| value)
+}
+
+fn admin_with_pid(state: &Path, action: &str, payload: Value) -> Result<(Value, libc::pid_t)> {
     let uid = unsafe { libc::geteuid() };
     let directory = fs::symlink_metadata(state)?;
     if !directory.is_dir() || directory.uid() != uid || directory.mode() & 0o077 != 0 {
@@ -63,7 +67,16 @@ pub fn admin(state: &Path, action: &str, payload: Value) -> Result<Value> {
         bail!("Local admin socket must be owner-only");
     }
     let mut stream = UnixStream::connect(&socket_path).context("Local service is not ready")?;
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.set_read_timeout(Some(
+        if matches!(
+            action,
+            "backup.create" | "backup.restore" | "update.closeIdle" | "update.resume"
+        ) {
+            Duration::from_secs(180)
+        } else {
+            Duration::from_secs(3)
+        },
+    ))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -101,13 +114,154 @@ pub fn admin(state: &Path, action: &str, payload: Value) -> Result<Value> {
                 .unwrap_or("Local service rejected the request")
         );
     }
-    Ok(frame["data"].clone())
+    Ok((frame["data"].clone(), credentials.pid))
+}
+
+pub fn update_warning(install: &Installation) -> Option<String> {
+    let (_, pid) = admin_with_pid(&install.layout.state, "status", json!({})).ok()?;
+    let running = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let installed = install.executable.canonicalize().ok()?;
+    (running != installed).then(|| "Güncelleme hazır; çalışan yerel hizmet önceki sürümde bırakıldı. Etkin oturumlar kesilmedi. Yeni hizmet bir sonraki normal hizmet başlangıcında yüklenir. Açık terminal OMP oturumları yeni köprüyü ancak kendi normal yeniden açılışlarında yükler; bellekte değiştirilmez.".into())
+}
+
+fn startup_warning(install: &Installation, additional: Option<String>) -> Option<String> {
+    let mut warnings = install.warnings.clone();
+    warnings.extend(additional);
+    (!warnings.is_empty()).then(|| warnings.join("\n"))
+}
+
+/// Port zero in the managed launcher means a stable owner-only preference,
+/// not a new ephemeral firewall target on every service start.
+pub fn automatic_port(state: &Path, requested: u16) -> Result<u16> {
+    let path = state.join("lan-port");
+    if requested != 0 {
+        setup::atomic_write(&path, requested.to_string().as_bytes(), 0o600)?;
+        return Ok(requested);
+    }
+    match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            let info = file.metadata()?;
+            if !info.is_file()
+                || info.uid() != unsafe { libc::geteuid() }
+                || info.mode() & 0o077 != 0
+                || info.len() > 5
+            {
+                bail!("Automatic LAN port must be a private owned regular file");
+            }
+            let mut value = String::new();
+            file.read_to_string(&mut value)?;
+            let port: u16 = value
+                .parse()
+                .context("Saved automatic LAN port is invalid")?;
+            if port == 0 {
+                bail!("Saved automatic LAN port cannot be zero");
+            }
+            Ok(port)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            setup::atomic_write(&path, b"8787", 0o600)?;
+            Ok(8787)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn restart_owned(install: &Installation) -> Result<()> {
+    let (prepared, pid) = admin_with_pid(&install.layout.state, "update.prepare", json!({}))
+        .context("Güncelleme bekletildi. Etkin uygulama oturumlarını tamamlayın; çalışan sürüm güvenli güncelleme hazırlığını desteklemiyorsa hizmetin normal sonraki başlangıcını bekleyin")?;
+    if prepared["prepared"] != true || prepared["managedRpcSessions"] != 0 {
+        let _ = admin(&install.layout.state, "update.cancel", json!({}));
+        bail!("Etkin uygulama oturumları korunuyor; güncelleme henüz uygulanamaz");
+    }
+    let result = (|| -> Result<()> {
+        let main_pid = systemctl_output(&[
+            "--user",
+            "show",
+            "--property=MainPID",
+            "--value",
+            "omputer.service",
+        ])
+        .ok()
+        .and_then(|value| value.trim().parse::<libc::pid_t>().ok());
+        if install.service_owned && main_pid == Some(pid) {
+            let fragment = systemctl_output(&[
+                "--user",
+                "show",
+                "--property=FragmentPath",
+                "--value",
+                "omputer.service",
+            ])?;
+            if std::path::Path::new(fragment.trim()).canonicalize()?
+                != install.layout.unit().canonicalize()?
+            {
+                bail!("Yerel hizmet farklı bir kullanıcı birimine ait; değiştirilmedi");
+            }
+            run_systemctl(&["--user", "daemon-reload"])?;
+            run_systemctl(&["--user", "restart", "omputer.service"])?;
+        } else {
+            let guard = setup::lock(&install.layout.state.join("supervisor.lock"))?;
+            if guard.try_lock_exclusive().is_ok() {
+                bail!("Çalışan hizmet Omputer arka plan yöneticisine ait değil; korunuyor");
+            }
+            setup::atomic_write(
+                &install.layout.state.join("supervisor.update"),
+                pid.to_string().as_bytes(),
+                0o600,
+            )?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(25);
+        while Instant::now() < deadline {
+            if let Ok((status, next_pid)) =
+                admin_with_pid(&install.layout.state, "status", json!({}))
+                && status["ready"] == true
+                && next_pid != pid
+                && update_warning(install).is_none()
+            {
+                if install.layout.state.join("restore-error").exists() {
+                    bail!(
+                        "{}",
+                        fs::read_to_string(install.layout.state.join("restore-error"))?
+                    );
+                }
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        bail!(
+            "Güncelleme henüz hazır değil. Yerel bağlantı bilgilerini kontrol edip yeniden deneyin; eski kaynaklar ve eşleştirme korundu"
+        )
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(install.layout.state.join("supervisor.update"));
+        let _ = admin(&install.layout.state, "update.cancel", json!({}));
+    }
+    result
+}
+
+/// Apply only the staged release; restore its predecessor if readiness fails.
+/// User data is never removed or rewritten by binary rollback.
+pub fn apply_update(install: &Installation) -> Result<()> {
+    let (_, pid) = admin_with_pid(&install.layout.state, "status", json!({}))?;
+    let previous = fs::read_link(format!("/proc/{pid}/exe"))?;
+    let result = restart_owned(install);
+    if let Err(error) = result {
+        setup::rollback_release(&install.layout, &previous)?;
+        // A failing candidate may have exited; start only our owned integration.
+        let _ = restart_owned(install).or_else(|_| ensure_running(install, true).map(|_| ()));
+        bail!("Update failed; previous executable restored, user data preserved: {error:#}");
+    }
+    Ok(())
 }
 
 pub fn ensure_running(install: &Installation, retry: bool) -> Result<Startup> {
     let already_ready =
         admin(&install.layout.state, "status", json!({})).is_ok_and(|v| v["ready"] == true);
-    let disabled = std::env::var_os("OMPUTER_DISABLE_SYSTEMD").is_some_and(|v| v == "1");
+    let disabled = !install.service_owned
+        || std::env::var_os("OMPUTER_DISABLE_SYSTEMD").is_some_and(|v| v == "1");
     let mut fallback_reason = None;
     if !disabled {
         match run_systemctl(&["--user", "show-environment"]) {
@@ -141,7 +295,7 @@ pub fn ensure_running(install: &Installation, retry: bool) -> Result<Startup> {
                 }
                 return Ok(Startup {
                     mode: "Oturum açıldığında başlayan kullanıcı hizmeti".into(),
-                    warning: None,
+                    warning: startup_warning(install, None),
                 });
             }
             Err(error) => {
@@ -179,7 +333,7 @@ pub fn ensure_running(install: &Installation, retry: bool) -> Result<Startup> {
     }
     Ok(Startup {
         mode: "Masaüstü otomatik başlatma".into(),
-        warning: fallback_reason,
+        warning: startup_warning(install, fallback_reason),
     })
 }
 
@@ -293,6 +447,8 @@ pub fn background(layout: Layout) -> Result<()> {
         runtime: current.join("resources/omp-runtime"),
         bridge: current.join("resources/bridge/index.ts"),
         layout,
+        warnings: Vec::new(),
+        service_owned: false,
     };
     let mut child: Option<Child> = None;
     let mut attempts = VecDeque::<Instant>::new();
@@ -301,6 +457,8 @@ pub fn background(layout: Layout) -> Result<()> {
     let mut retry_marker =
         fs::read(install.layout.state.join("supervisor.retry")).unwrap_or_default();
     let mut ready_at = None;
+    let mut update_marker =
+        fs::read(install.layout.state.join("supervisor.update")).unwrap_or_default();
     loop {
         if STOP.load(Ordering::Relaxed) {
             // Only the exact child we spawned is signalled. Terminal OMP work is
@@ -321,6 +479,31 @@ pub fn background(layout: Layout) -> Result<()> {
                 }
             }
             return Ok(());
+        }
+        let marker = fs::read(install.layout.state.join("supervisor.update")).unwrap_or_default();
+        if marker != update_marker {
+            update_marker = marker.clone();
+            if let Some(process) = child.as_mut()
+                && String::from_utf8_lossy(&marker).parse::<u32>().ok() == Some(process.id())
+                && let Ok((prepared, pid)) =
+                    admin_with_pid(&install.layout.state, "update.prepare", json!({}))
+                && pid as u32 == process.id()
+                && prepared["prepared"] == true
+                && prepared["managedRpcSessions"] == 0
+                && fs::read(install.layout.state.join("supervisor.update"))
+                    .ok()
+                    .as_ref()
+                    == Some(&marker)
+            {
+                // Exact owned child, authenticated preparation and no managed
+                // RPC session: never signal terminal OMP or process groups.
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
+                attempts.clear();
+                paused = false;
+                paused_until = None;
+            }
         }
         if paused_until.is_some_and(|deadline| Instant::now() >= deadline) {
             attempts.clear();
@@ -404,6 +587,9 @@ fn record(layout: &Layout, state: &str, error: Option<String>) -> Result<()> {
 }
 
 pub fn last_error(layout: &Layout) -> Option<String> {
+    if let Ok(error) = fs::read_to_string(layout.state.join("listener-error")) {
+        return Some(error);
+    }
     let status: Value =
         serde_json::from_slice(&fs::read(layout.state.join("supervisor.json")).ok()?).ok()?;
     status["error"].as_str().map(str::to_owned)
@@ -442,6 +628,34 @@ pub fn automatic_address(port: u16) -> Result<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn automatic_port_reuses_saved_value_and_honors_explicit_override() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(automatic_port(temp.path(), 0).unwrap(), 8787);
+        assert_eq!(automatic_port(temp.path(), 33975).unwrap(), 33975);
+        let busy = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = busy.local_addr().unwrap().port();
+        assert_eq!(automatic_port(temp.path(), port).unwrap(), port);
+        assert_eq!(automatic_port(temp.path(), 0).unwrap(), port);
+        assert!(std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err());
+        assert_eq!(
+            fs::read_to_string(temp.path().join("lan-port")).unwrap(),
+            port.to_string()
+        );
+    }
+
+    #[test]
+    fn automatic_port_rejects_symlinks_and_corrupt_preference() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("keep");
+        fs::write(&original, "33975").unwrap();
+        std::os::unix::fs::symlink(&original, temp.path().join("lan-port")).unwrap();
+        assert!(automatic_port(temp.path(), 0).is_err());
+        assert_eq!(fs::read_to_string(original).unwrap(), "33975");
+        fs::remove_file(temp.path().join("lan-port")).unwrap();
+        setup::atomic_write(&temp.path().join("lan-port"), b"0", 0o600).unwrap();
+        assert!(automatic_port(temp.path(), 0).is_err());
+    }
     #[test]
     fn refuses_token_symlinks_without_connecting() {
         let temp = tempfile::tempdir().unwrap();

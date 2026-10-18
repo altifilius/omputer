@@ -16,12 +16,43 @@ if [ "$actual" != "$commit" ]; then
   printf '%s\n' "Expected OMP v18.10.2 commit $commit; found $actual. Refusing to modify another runtime." >&2
   exit 1
 fi
-if git -C "$runtime" apply --check "$base/runtime.patch" 2>/dev/null; then
-  git -C "$runtime" apply "$base/runtime.patch"
-elif ! git -C "$runtime" apply --reverse --check "$base/runtime.patch" 2>/dev/null; then
-  printf '%s\n' 'Runtime export patch conflicts; preserve local changes and resolve explicitly.' >&2
-  exit 1
-fi
+# Stage pristine pinned sources and merge each patch target without touching live files.
+# This accepts both pristine and previously patched installations, retaining unrelated
+# private edits. Any conflict aborts the entire cutover before a source file changes.
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT HUP INT TERM
+git -C "$runtime" apply --numstat "$base/runtime.patch" | while IFS="$(printf '\t')" read -r added removed file; do
+  case "$file" in packages/coding-agent/src/*|packages/coding-agent/test/*|sdk/python/omp-rpc/src/omp_rpc/_wire.py|sdk/rust/omp-rpc/src/wire.rs|sdk/go/omp-rpc/wire.go) ;; *) printf '%s\n' "Unsafe runtime patch path: $file" >&2; exit 1 ;; esac
+  mkdir -p "$stage/original/$(dirname "$file")" "$stage/desired/$(dirname "$file")"
+  if git -C "$runtime" cat-file -e "HEAD:$file" 2>/dev/null; then
+    git -C "$runtime" show "HEAD:$file" > "$stage/original/$file"
+    cp "$stage/original/$file" "$stage/desired/$file"
+  else
+    : > "$stage/original/$file"
+  fi
+done
+cp -R "$stage/original" "$stage/previous"
+(cd "$stage/previous" && git apply "$base/runtime.previous.patch")
+(cd "$stage/desired" && git apply "$base/runtime.patch")
+git -C "$runtime" apply --numstat "$base/runtime.patch" | while IFS="$(printf '\t')" read -r added removed file; do
+  mkdir -p "$stage/merged/$(dirname "$file")"
+  if [ -f "$runtime/$file" ]; then
+    if cmp -s "$runtime/$file" "$stage/desired/$file"; then
+      cp "$runtime/$file" "$stage/merged/$file"
+	elif git merge-file -p "$runtime/$file" "$stage/original/$file" "$stage/desired/$file" > "$stage/merged/$file"; then
+	  :
+	elif ! git merge-file -p "$runtime/$file" "$stage/previous/$file" "$stage/desired/$file" > "$stage/merged/$file"; then
+      printf '%s\n' "Runtime patch conflicts in $file; all existing private changes are preserved. Resolve explicitly." >&2
+      exit 1
+    fi
+  else
+    cp "$stage/desired/$file" "$stage/merged/$file"
+  fi
+done
+git -C "$runtime" apply --numstat "$base/runtime.patch" | while IFS="$(printf '\t')" read -r added removed file; do
+  mkdir -p "$runtime/$(dirname "$file")"
+  cp "$stage/merged/$file" "$runtime/$file"
+done
 (cd "$runtime" && bun install --frozen-lockfile --ignore-scripts)
 # Source loading searches the workspace native directory, not the binary extraction cache.
 native_cache=${PI_NATIVES_DIR:-$HOME/.omp/natives}/18.10.2

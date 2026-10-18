@@ -123,7 +123,7 @@ export class LocalBridge {
             if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid bridge frame');
             const frame = parsed as WireFrame;
             if (frame.type === 'registered' && !this.ready) {
-              clearTimeout(deadline); this.ready = true; this.delay = 250; this.connected();
+              clearTimeout(deadline); this.ready = true; this.delay = 250; this.receive(frame); this.connected();
             } else if (this.ready) {
               const request = frame.type === 'response' && typeof frame.id === 'string' ? this.requests.get(frame.id) : undefined;
               if (request) request.resolve(frame);

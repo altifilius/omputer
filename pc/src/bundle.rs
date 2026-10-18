@@ -3,7 +3,7 @@ use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, OpenOptions},
-    io::Cursor,
+    io::{Cursor, Read},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
 };
@@ -47,8 +47,7 @@ pub fn materialize_embedded() -> Result<Option<PathBuf>> {
     if destination.exists() {
         reject_symlink(&destination)?;
         if fs::read_to_string(&complete).ok().as_deref() == Some(&digest)
-            && destination.join("resources/omp-runtime").is_file()
-            && destination.join("resources/bridge/index.ts").is_file()
+            && verify_resources(RESOURCES, &destination).is_ok()
         {
             return Ok(Some(destination));
         }
@@ -70,6 +69,7 @@ pub fn materialize_embedded() -> Result<Option<PathBuf>> {
             staging.join("resources/omp-runtime"),
             fs::Permissions::from_mode(0o700),
         )?;
+        verify_resources(RESOURCES, &staging)?;
         fs::write(staging.join(".complete"), &digest)?;
         fs::rename(&staging, &destination)?;
         Ok(())
@@ -123,6 +123,88 @@ fn extract(bytes: &[u8], destination: &Path) -> Result<()> {
         if !entry.unpack_in(destination)? {
             bail!("Paket dosyası özel kaynak dizininin dışına çıkıyor");
         }
+        let mode = if kind.is_dir() || entry.header().mode()? & 0o111 != 0 {
+            0o700
+        } else {
+            0o600
+        };
+        fs::set_permissions(destination.join(path), fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
+}
+
+fn verify_resources(bytes: &[u8], root: &Path) -> Result<()> {
+    let decoder = zstd::stream::read::Decoder::new(Cursor::new(bytes))?;
+    let mut archive = tar::Archive::new(decoder);
+    let mut expected = std::collections::BTreeSet::new();
+    let mut archive_buffer = [0u8; 64 * 1024];
+    let mut file_buffer = [0u8; 64 * 1024];
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        if path
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+            || !path.starts_with("resources")
+        {
+            bail!("Invalid cached resource path");
+        }
+        let info = fs::symlink_metadata(root.join(&path))?;
+        if info.file_type().is_symlink()
+            || info.uid() != unsafe { libc::geteuid() }
+            || info.mode() & 0o077 != 0
+        {
+            bail!("Cached resources must remain private, owned regular files");
+        }
+        if entry.header().entry_type().is_dir() {
+            if !info.is_dir() {
+                bail!("Cached resource directory changed");
+            }
+            continue;
+        }
+        if !entry.header().entry_type().is_file()
+            || !info.is_file()
+            || info.len() != entry.size()
+            || !expected.insert(path.clone())
+        {
+            bail!("Cached resource set changed");
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(root.join(path))?;
+        loop {
+            let count = entry.read(&mut archive_buffer)?;
+            if count == 0 {
+                break;
+            }
+            file.read_exact(&mut file_buffer[..count])?;
+            if archive_buffer[..count] != file_buffer[..count] {
+                bail!("Cached resources do not match this application release");
+            }
+        }
+    }
+    fn collect(
+        root: &Path,
+        path: &Path,
+        files: &mut std::collections::BTreeSet<PathBuf>,
+    ) -> Result<()> {
+        let info = fs::symlink_metadata(root.join(path))?;
+        if info.is_dir() {
+            for item in fs::read_dir(root.join(path))? {
+                collect(root, &path.join(item?.file_name()), files)?;
+            }
+        } else if info.is_file() {
+            files.insert(path.to_path_buf());
+        } else {
+            bail!("Cached resources contain a link or special file");
+        }
+        Ok(())
+    }
+    let mut actual = std::collections::BTreeSet::new();
+    collect(root, Path::new("resources"), &mut actual)?;
+    if expected != actual {
+        bail!("Cached resource set changed");
     }
     Ok(())
 }
@@ -132,6 +214,38 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_resources_must_match_archive_bytes_and_file_set() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut tar = tar::Builder::new(Vec::new());
+        for (path, bytes) in [
+            ("resources/omp-runtime", b"runtime".as_slice()),
+            ("resources/bridge/index.ts", b"bridge".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o600);
+            header.set_cksum();
+            tar.append_data(&mut header, path, bytes).unwrap();
+        }
+        let compressed =
+            zstd::stream::encode_all(Cursor::new(tar.into_inner().unwrap()), 1).unwrap();
+        extract(&compressed, temporary.path()).unwrap();
+        assert!(verify_resources(&compressed, temporary.path()).is_ok());
+        fs::write(
+            temporary.path().join("resources/bridge/index.ts"),
+            b"BROKEN",
+        )
+        .unwrap();
+        assert!(verify_resources(&compressed, temporary.path()).is_err());
+        fs::write(
+            temporary.path().join("resources/bridge/index.ts"),
+            b"bridge",
+        )
+        .unwrap();
+        fs::write(temporary.path().join("resources/extra"), b"injected").unwrap();
+        assert!(verify_resources(&compressed, temporary.path()).is_err());
+    }
     #[test]
     fn embedded_archive_rejects_links_and_outside_root() {
         for (name, link) in [("outside/file", false), ("resources/escape", true)] {

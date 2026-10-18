@@ -17,7 +17,8 @@ internal object LocalNotifications {
     private const val ACTIVITY = "omputer.activity"
     const val CONNECTION = "omputer.connection"
     const val CONNECTION_ID = 2
-    private val issued = mutableSetOf<String>()
+    private val issued = linkedMapOf<String, Long>()
+    private const val MAX_NOTIFICATIONS = 48
     fun initialize(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannels(listOf(
@@ -57,45 +58,62 @@ internal object LocalNotifications {
     }
     @Synchronized fun post(context: Context, data: JSONObject) {
         if (!LocalConnection.notificationsAuthorized()) return
-        val id = data.optString("interactionId").ifEmpty { data.optString("id", UUID.randomUUID().toString()) }
-        val target = data.optString("interactionId")
-        if (target.isNotEmpty() && data.optString("kind") in setOf("question", "approval")) {
-            val request = (LocalConnection.snapshot()["interactions"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.firstOrNull { it["id"] == target }
-            if (request != null && request["status"] != "pending") return
-        }
-        if (!issued.add(id)) return
         val kind = data.optString("kind")
+        if (!LocalConnection.notificationEnabled(data.optString("sessionId").ifBlank { null }, data.optString("projectId").ifBlank { null }, kind)) return
         val decision = kind == "question" || kind == "approval"
-        val session = data.optString("sessionId").ifEmpty { null }
-        val interaction = data.optString("interactionId").ifEmpty { null }
+        val interaction = data.optString("interactionId").ifBlank { null }
+        val request = interaction?.let { LocalConnection.pendingInteraction(it) }
+        if (decision && (request == null || !DecisionPolicy.pending(request))) return
+        val id = if (decision && interaction != null) interaction else data.optString("id").ifBlank { UUID.randomUUID().toString() }
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val active = manager.activeNotifications
+        if (id in issued && active.any { it.id == notificationId(id) }) return
+        while (issued.size >= 256) issued.remove(issued.keys.first())
+        issued[id] = System.currentTimeMillis()
+        active.filter { it.id != CONNECTION_ID }.sortedBy { it.postTime }.dropLast(MAX_NOTIFICATIONS - 1).forEach { manager.cancel(it.id) }
+        val session = data.optString("sessionId").ifBlank { null }
         val builder = Notification.Builder(context, if (decision) DECISIONS else ACTIVITY)
             .setSmallIcon(R.drawable.ic_notification).setColor(Color.rgb(111, 108, 213))
             .setContentTitle(data.optString("title", "Omputer"))
             .setContentText(data.optString("body"))
             .setStyle(Notification.BigTextStyle().bigText(data.optString("body")))
             .setContentIntent(openIntent(context, id, session, interaction)).setAutoCancel(true)
+            .setOnlyAlertOnce(true)
             .setVisibility(Notification.VISIBILITY_PRIVATE).setPublicVersion(publicNotification(context))
             .setCategory(if (decision) Notification.CATEGORY_MESSAGE else Notification.CATEGORY_STATUS)
-        if (interaction != null && kind != "approval") {
-            val request = (LocalConnection.snapshot()["interactions"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.firstOrNull { it["id"] == interaction }
-            if (request?.get("method") in listOf("input", "editor")) {
+        if (decision && request != null) {
+            val expires = request.optString("expiresAt")
+            if (expires.isNotBlank() && expires != "null") {
+                val remaining = java.time.Duration.between(java.time.Instant.now(), java.time.Instant.parse(expires)).toMillis()
+                if (remaining <= 0) return
+                builder.setTimeoutAfter(remaining)
+            }
+            if (request.optString("method") in listOf("input", "editor")) {
                 val intent = Intent(context, NotificationActionReceiver::class.java).setAction("omputer.reply")
-                    .putExtra("interactionId", interaction).putExtra("sessionId", session).putExtra("commandId", UUID.randomUUID().toString())
+                    .putExtra("interactionId", interaction).putExtra("sessionId", session)
+                    .putExtra("deviceId", LocalConnection.notificationIdentity()).putExtra("commandId", UUID.randomUUID().toString())
                 val pending = PendingIntent.getBroadcast(context, notificationId(id), intent,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
                 val reply = RemoteInput.Builder("reply").setLabel("Cevabın").build()
                 builder.addAction(Notification.Action.Builder(null, "Cevapla", pending).addRemoteInput(reply).build())
             }
         }
-        context.getSystemService(NotificationManager::class.java).notify(notificationId(id), builder.build())
+        manager.notify(notificationId(id), builder.build())
     }
     @Synchronized fun reconcile(context: Context, snapshot: JSONObject) {
         val requests = snapshot.optJSONArray("interactions") ?: return
+        val pending = linkedMapOf<String, JSONObject>()
         for (index in 0 until requests.length()) {
             val request = requests.optJSONObject(index) ?: continue
             val id = request.optString("id")
-            if (request.optString("status") != "pending") { cancelInteraction(context, id); continue }
-            if (id in issued) continue
+            if (id.isNotBlank() && DecisionPolicy.pending(request)) pending[id] = request
+            else cancelInteraction(context, id)
+        }
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val pendingIds = pending.keys.map(::notificationId).toSet()
+        manager.activeNotifications.filter { it.notification.channelId == DECISIONS && it.id !in pendingIds }.forEach { manager.cancel(it.id) }
+        pending.values.toList().takeLast(MAX_NOTIFICATIONS).forEach { request ->
+            val id = request.getString("id")
             post(context, JSONObject().put("id", id).put("interactionId", id)
                 .put("sessionId", request.optString("sessionId"))
                 .put("kind", if (request.optString("method") == "approval") "approval" else "question")
@@ -126,17 +144,32 @@ class NotificationActionReceiver : BroadcastReceiver() {
         if (intent.action != "omputer.reply") return
         val text = RemoteInput.getResultsFromIntent(intent)?.getCharSequence("reply")?.toString() ?: return
         val interaction = intent.getStringExtra("interactionId") ?: return
+        fun failed(error: Throwable) = LocalNotifications.post(context, JSONObject().put("id", UUID.randomUUID().toString()).put("kind", "error")
+            .put("title", "Cevap iletilemedi").put("body", error.message ?: "Uygulamayı açıp bağlantıyı kontrol et.")
+            .put("sessionId", intent.getStringExtra("sessionId")).put("interactionId", interaction))
+        try {
+            if (intent.getStringExtra("deviceId") != LocalConnection.notificationIdentity()) throw ApiFailure("connection_changed", "Bilgisayar eşleştirmesi değişti. Uygulamadan güncel soruyu aç.")
+            LocalConnection.requirePendingInteraction(interaction)
+        } catch (error: Exception) { LocalNotifications.cancelInteraction(context, interaction); failed(error); return }
         val pending = goAsync()
-        LocalConnection.requestAsync("POST", "/v1/commands", mapOf(
+        LocalConnection.notificationReply(mapOf(
             "id" to (intent.getStringExtra("commandId") ?: UUID.randomUUID().toString()),
             "sessionId" to intent.getStringExtra("sessionId"), "action" to "interaction.respond",
-            "payload" to mapOf("interactionId" to interaction, "value" to text))
-        ) { _, error ->
-            if (error == null) LocalNotifications.cancelInteraction(context, interaction)
-            else LocalNotifications.post(context, JSONObject().put("id", UUID.randomUUID().toString()).put("kind", "error")
-                .put("title", "Cevap iletilemedi").put("body", error.message ?: "Uygulamayı açıp bağlantıyı kontrol et.")
-                .put("sessionId", intent.getStringExtra("sessionId")).put("interactionId", interaction))
-            pending.finish()
+            "payload" to mapOf("interactionId" to interaction, "value" to text)),
+            identity = intent.getStringExtra("deviceId")
+        ) { value, error ->
+            try {
+                if (error != null) failed(error)
+                else {
+                    val response = JSONObject(value as? Map<*, *> ?: emptyMap<String, Any?>())
+                    val envelope = response.optJSONObject("result") ?: response
+                    if (DecisionPolicy.finalSuccess(envelope)) LocalNotifications.cancelInteraction(context, interaction)
+                    else LocalNotifications.post(context, JSONObject().put("id", "reply:${intent.getStringExtra("commandId")}")
+                        .put("kind", "activity").put("title", "Cevap sonucu bekleniyor")
+                        .put("body", "PC işlemi aldı; kesin sonuç için uygulamayı aç. Cevap otomatik tekrar gönderilmeyecek.")
+                        .put("sessionId", intent.getStringExtra("sessionId")))
+                }
+            } finally { pending.finish() }
         }
     }
 }

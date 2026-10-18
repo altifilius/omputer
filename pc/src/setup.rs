@@ -29,6 +29,8 @@ pub struct Installation {
     pub executable: PathBuf,
     pub runtime: PathBuf,
     pub bridge: PathBuf,
+    pub warnings: Vec<String>,
+    pub service_owned: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -118,12 +120,10 @@ pub fn install(layout: Layout, bundle: Option<&Path>) -> Result<Installation> {
     let source = match bundle {
         Some(path) => path.to_path_buf(),
         None => {
-            let sibling = own_exe.parent().unwrap().to_path_buf();
-            if sibling.join("resources").is_dir() {
-                sibling
-            } else {
-                crate::bundle::materialize_embedded()?.unwrap_or(sibling)
-            }
+            // Packaged executables must use their own embedded resources, not
+            // arbitrary files placed alongside a downloaded executable.
+            crate::bundle::materialize_embedded()?
+                .unwrap_or_else(|| own_exe.parent().unwrap().to_path_buf())
         }
     };
     let resources = source.join("resources");
@@ -191,6 +191,11 @@ pub fn install(layout: Layout, bundle: Option<&Path>) -> Result<Installation> {
             bail!("Existing release is not owned by this installation");
         }
         validate_resources(&target.join("resources"))?;
+        if bundle_digest(&target.join("omputer"), &target.join("resources"))? != release {
+            bail!(
+                "Installed release resources have changed; reopen the original application bundle"
+            );
+        }
     }
     let current = layout.current();
     if let Ok(info) = fs::symlink_metadata(&current) {
@@ -204,25 +209,59 @@ pub fn install(layout: Layout, bundle: Option<&Path>) -> Result<Installation> {
             bail!("Application current link does not belong to Omputer");
         }
     }
-    let pending = layout
-        .app
-        .join(format!(".current-{}", uuid::Uuid::new_v4()));
-    symlink(Path::new("releases").join(&release), &pending)?;
-    fs::rename(&pending, &current)?;
-    sync_directory(&layout.app)?;
-    metadata.version = 1;
-    metadata.release = release.clone();
-    metadata.installed_at = chrono::Utc::now().to_rfc3339();
-    persist_metadata(&metadata_path, &metadata)?;
-    let installation = Installation {
+    let mut installation = Installation {
         executable: current.join("omputer"),
         runtime: current.join("resources/omp-runtime"),
         bridge: current.join("resources/bridge/index.ts"),
         layout,
+        warnings: Vec::new(),
+        service_owned: false,
     };
-    install_integrations(&installation, &mut metadata)?;
+    // Complete integrations before publishing the new release. Local edits
+    // remain in place and are surfaced to the user rather than blocking startup.
+    install_integrations(&mut installation, &mut metadata)?;
+    let pending = installation
+        .layout
+        .app
+        .join(format!(".current-{}", uuid::Uuid::new_v4()));
+    symlink(Path::new("releases").join(&release), &pending)?;
+    fs::rename(&pending, &current)?;
+    sync_directory(&installation.layout.app)?;
+    metadata.version = 1;
+    metadata.release = release;
+    metadata.installed_at = chrono::Utc::now().to_rfc3339();
     persist_metadata(&metadata_path, &metadata)?;
     Ok(installation)
+}
+
+pub fn rollback_release(layout: &Layout, previous_executable: &Path) -> Result<()> {
+    validate_app_root(&layout.app)?;
+    let guard = lock(&layout.state.join("install.lock"))?;
+    guard.lock_exclusive()?;
+    let release = previous_executable
+        .parent()
+        .context("Previous executable has no release")?;
+    if release.parent() != Some(layout.app.join("releases").as_path())
+        || previous_executable.file_name() != Some(std::ffi::OsStr::new("omputer"))
+    {
+        bail!("Previous executable is not an owned installed release; rollback was not attempted");
+    }
+    let expected = fs::read_to_string(release.join(".omputer-release"))?;
+    if bundle_digest(previous_executable, &release.join("resources"))? != expected {
+        bail!("Previous release integrity changed; refusing rollback");
+    }
+    let pending = layout
+        .app
+        .join(format!(".rollback-{}", uuid::Uuid::new_v4()));
+    symlink(
+        Path::new("releases").join(release.file_name().context("Release name missing")?),
+        &pending,
+    )?;
+    fs::rename(pending, layout.current())?;
+    let mut metadata = read_owned_json(&layout.app.join("install.json"))?;
+    metadata.release = expected;
+    persist_metadata(&layout.app.join("install.json"), &metadata)?;
+    sync_directory(&layout.app)
 }
 
 fn validate_app_root(path: &Path) -> Result<()> {
@@ -380,7 +419,7 @@ fn persist_metadata(path: &Path, metadata: &Metadata) -> Result<()> {
     atomic_write(path, &serde_json::to_vec_pretty(metadata)?, 0o600)
 }
 
-fn managed_write(path: &Path, content: &str, metadata: &mut Metadata) -> Result<()> {
+fn managed_write(path: &Path, content: &str, metadata: &mut Metadata) -> Result<bool> {
     let parent = path.parent().unwrap();
     fs::create_dir_all(parent)?;
     let parent_info = fs::symlink_metadata(parent)?;
@@ -408,10 +447,7 @@ fn managed_write(path: &Path, content: &str, metadata: &mut Metadata) -> Result<
         if existing != content.as_bytes() {
             let digest = hex::encode(Sha256::digest(&existing));
             if metadata.managed.get(&key) != Some(&digest) {
-                bail!(
-                    "Existing {} was not installed by Omputer or has local edits. It was preserved.",
-                    path.display()
-                );
+                return Ok(false);
             }
         }
     }
@@ -420,14 +456,18 @@ fn managed_write(path: &Path, content: &str, metadata: &mut Metadata) -> Result<
         .managed
         .insert(key, hex::encode(Sha256::digest(content.as_bytes())));
     // Commit ownership after each integration so a partial setup is safely retryable.
-    Ok(())
+    Ok(true)
 }
 
-fn install_integrations(install: &Installation, metadata: &mut Metadata) -> Result<()> {
+fn install_integrations(install: &mut Installation, metadata: &mut Metadata) -> Result<()> {
     let layout = &install.layout;
     let metadata_path = layout.app.join("install.json");
     let icon = layout.data.join("icons/hicolor/scalable/apps/omputer.svg");
-    managed_write(&icon, ICON, metadata)?;
+    if !managed_write(&icon, ICON, metadata)? {
+        install
+            .warnings
+            .push(format!("Yerel düzenlemeler korundu: {}", icon.display()));
+    }
     persist_metadata(&metadata_path, metadata)?;
     let desktop = format!(
         "# Managed by Omputer desktop application\n[Desktop Entry]\nType=Application\nVersion=1.0\nName=Omputer\nComment=OMP oturumları ve telefon bağlantısı\nExec={} --state-dir {}\nIcon={}\nTerminal=false\nCategories=Development;Utility;\nStartupNotify=true\nStartupWMClass=omputer\n",
@@ -435,11 +475,13 @@ fn install_integrations(install: &Installation, metadata: &mut Metadata) -> Resu
         desktop_quote(&layout.state)?,
         icon.display()
     );
-    managed_write(
-        &layout.data.join("applications/omputer.desktop"),
-        &desktop,
-        metadata,
-    )?;
+    let desktop_path = layout.data.join("applications/omputer.desktop");
+    if !managed_write(&desktop_path, &desktop, metadata)? {
+        install.warnings.push(format!(
+            "Yerel düzenlemeler korundu: {}",
+            desktop_path.display()
+        ));
+    }
     persist_metadata(&metadata_path, metadata)?;
     let loader = format!(
         "// Managed by Omputer desktop application. Existing terminal sessions are not modified.\nimport type {{ ExtensionAPI }} from '@oh-my-pi/pi-coding-agent';\nimport omputer from {};\nexport default function(api: ExtensionAPI) {{\n  if (process.env.OMPUTER_RPC_MANAGED === '1') return;\n  process.env.OMPUTER_STATE_DIR ??= {};\n  return omputer(api);\n}}\n",
@@ -455,7 +497,10 @@ fn install_integrations(install: &Installation, metadata: &mut Metadata) -> Resu
         if !agent.is_absolute() {
             bail!("OMP agent directory must be absolute");
         }
-        managed_write(&agent.join("extensions/omputer.ts"), &loader, metadata)?;
+        let loader_path = agent.join("extensions/omputer.ts");
+        if !managed_write(&loader_path, &loader, metadata)? {
+            install.warnings.push(format!("OMP uzantısındaki yerel düzenlemeler korundu; yeni köprü otomatik yüklenmeyebilir: {}", loader_path.display()));
+        }
         persist_metadata(&metadata_path, metadata)?;
     }
     let path = runtime_path(layout)?;
@@ -489,7 +534,16 @@ fn install_integrations(install: &Installation, metadata: &mut Metadata) -> Resu
         systemd_path(&install.bridge)?,
         environment
     );
-    managed_write(&layout.unit(), &unit, metadata)?;
+    install.service_owned = false;
+    if !managed_write(&layout.unit(), &unit, metadata)? {
+        install.warnings.push(format!(
+            "Hizmetteki yerel düzenlemeler korundu: {}",
+            layout.unit().display()
+        ));
+    }
+    if fs::read_to_string(layout.unit()).ok().as_deref() == Some(unit.as_str()) {
+        install.service_owned = true;
+    }
     persist_metadata(&metadata_path, metadata)?;
     Ok(())
 }
@@ -504,7 +558,12 @@ pub fn install_autostart(install: &Installation) -> Result<()> {
         desktop_quote(&install.executable)?,
         desktop_quote(&install.layout.state)?
     );
-    managed_write(&install.layout.autostart(), &entry, &mut metadata)?;
+    if !managed_write(&install.layout.autostart(), &entry, &mut metadata)? {
+        bail!(
+            "Masaüstü otomatik başlatma dosyasında yerel düzenlemeler var; korundu: {}",
+            install.layout.autostart().display()
+        );
+    }
     persist_metadata(&path, &metadata)
 }
 
@@ -571,13 +630,13 @@ mod tests {
         let path = tmp.path().join("omputer.service");
         fs::write(&path, "unrelated").unwrap();
         let mut metadata = Metadata::default();
-        assert!(managed_write(&path, "managed", &mut metadata).is_err());
+        assert!(!managed_write(&path, "managed", &mut metadata).unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), "unrelated");
         fs::remove_file(&path).unwrap();
         managed_write(&path, "managed", &mut metadata).unwrap();
         managed_write(&path, "updated", &mut metadata).unwrap();
         fs::write(&path, "local edits").unwrap();
-        assert!(managed_write(&path, "new release", &mut metadata).is_err());
+        assert!(!managed_write(&path, "new release", &mut metadata).unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), "local edits");
     }
     #[test]

@@ -559,6 +559,32 @@ impl LocalServices {
             admin,
         })
     }
+
+    /// Replace only network advertisements. Administration, pairing requests,
+    /// archive scanning and the runtime remain owned by this service instance.
+    pub async fn update_address(&mut self, address: SocketAddr) -> Result<()> {
+        if address.port() != self.state.port {
+            bail!("An in-process LAN rebind must preserve the paired endpoint port");
+        }
+        let urls = lan_addresses(address)?
+            .into_iter()
+            .map(|ip| origin(ip, address.port()))
+            .collect();
+        for task in self.tasks.drain(2..) {
+            task.abort();
+            let _ = task.await;
+        }
+        *self.state.urls.lock() = urls;
+        self.state.discovery.lock()["mdns"] = json!("starting");
+        self.state.discovery.lock()["udp"] = json!("starting");
+        self.tasks.push(start_mdns(self.state.clone(), address));
+        self.tasks.push(start_udp(self.state.clone(), address));
+        Ok(())
+    }
+
+    pub fn listener_error(&self, error: Option<String>) {
+        self.state.discovery.lock()["listenerError"] = json!(error);
+    }
 }
 impl Drop for LocalServices {
     fn drop(&mut self) {
@@ -744,6 +770,63 @@ mod tests {
             scanner: Arc::new(ArchiveScanner::new()),
             pairs: Mutex::new(PairQueue::default()),
         }
+    }
+    #[tokio::test]
+    async fn listener_rebind_preserves_admin_pairing_identity_and_scanner() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::set_permissions(
+            temporary.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let state = Arc::new(state());
+        let pairing = state
+            .request_pair("192.168.1.2".parse().unwrap(), "Phone", &"ab".repeat(32))
+            .unwrap();
+        let scanner = state.scanner.clone();
+        let admin = local_admin::AdminSocket::bind(temporary.path()).unwrap();
+        let admin_info = fs::metadata(temporary.path().join("admin.sock")).unwrap();
+        let mut services = LocalServices {
+            state: state.clone(),
+            tasks: (0..4)
+                .map(|_| tokio::spawn(std::future::pending()))
+                .collect(),
+            admin,
+        };
+        services
+            .update_address("127.0.0.1:8787".parse().unwrap())
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&scanner, &services.state.scanner));
+        assert!(
+            services
+                .state
+                .pairs
+                .lock()
+                .requests
+                .contains_key(pairing["requestId"].as_str().unwrap())
+        );
+        assert_eq!(
+            fs::metadata(temporary.path().join("admin.sock"))
+                .unwrap()
+                .ino(),
+            admin_info.ino()
+        );
+        assert!(services.state.ready.load(Ordering::Acquire));
+        assert!(
+            services
+                .update_address("127.0.0.1:33975".parse().unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            services
+                .state
+                .pairs
+                .lock()
+                .requests
+                .contains_key(pairing["requestId"].as_str().unwrap())
+        );
     }
     #[test]
     fn pairing_v2_matches_cross_language_transcript() {

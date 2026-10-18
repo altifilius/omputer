@@ -216,7 +216,9 @@ impl ArchiveScanner {
     }
     pub fn scan(&self, store: &Store) -> Value {
         let _pass = self.pass.lock();
-        let roots = session_roots();
+        self.scan_roots(store, session_roots())
+    }
+    fn scan_roots(&self, store: &Store, roots: Vec<PathBuf>) -> Value {
         let mut pending = Vec::new();
         let mut missing = Vec::new();
         for root in &roots {
@@ -320,10 +322,30 @@ impl ArchiveScanner {
                 continue;
             }
             let tracked = store.get("archive-source", &source_id).ok();
-            if stamps.get(path) == Some(&signature)
-                || tracked
+            let owner = tracked
+                .as_ref()
+                .and_then(|source| source["sessionId"].as_str())
+                .and_then(|id| store.get("session", id).ok());
+            let live_owner = owner.as_ref().is_some_and(|session| {
+                session["transport"] != "archive"
+                    && !matches!(
+                        session["status"].as_str(),
+                        Some("disconnected" | "closed" | "failed")
+                    )
+            });
+            // A successful import may only have recognized a live owner. Its
+            // unchanged file still needs materializing once that owner closes.
+            let materialized = tracked
+                .as_ref()
+                .is_some_and(|source| source["materialized"] == true)
+                && owner
                     .as_ref()
-                    .is_some_and(|source| source["signature"] == signature)
+                    .is_some_and(|session| session["transport"] == "archive");
+            if (live_owner || materialized)
+                && (stamps.get(path) == Some(&signature)
+                    || tracked
+                        .as_ref()
+                        .is_some_and(|source| source["signature"] == signature))
             {
                 stamps.insert(path.clone(), signature);
                 if let Some(id) = tracked
@@ -332,10 +354,20 @@ impl ArchiveScanner {
                     && let Ok(mut session) = store.get("session", id)
                     && session["transport"] == "archive"
                 {
-                    let active = archive::ensure_source_inactive(id, path).is_err();
+                    let native_id = session["journalId"]
+                        .as_str()
+                        .or(session["runtimeSessionId"].as_str())
+                        .unwrap_or(id);
+                    let active = archive::ensure_source_inactive(native_id, path).is_err();
                     let status = if active { "active-unbridged" } else { "closed" };
                     if session["status"] != status {
                         session["status"] = json!(status);
+                        session["writerConnected"] = json!(false);
+                        session["workState"] = json!("disconnected");
+                        if !session["journalId"].is_string() {
+                            session["journalId"] = session["runtimeSessionId"].clone();
+                        }
+                        session.as_object_mut().unwrap().remove("runtimeSessionId");
                         session["capabilities"] = if active {
                             json!([])
                         } else {
@@ -363,8 +395,10 @@ impl ArchiveScanner {
                             && after.len() == metadata.len()
                             && after.modified().ok() == metadata.modified().ok()
                     }) {
-                        let source =
-                            json!({"path":path,"signature":signature,"sessionId":session_id});
+                        let materialized = store
+                            .get("session", &session_id)
+                            .is_ok_and(|session| session["transport"] == "archive");
+                        let source = json!({"path":path,"signature":signature,"sessionId":session_id,"materialized":materialized});
                         if let Err(error) = store.put("archive-source", &source_id, &source, None) {
                             if errors.len() < 20 {
                                 errors.push(error.to_string());
@@ -395,6 +429,39 @@ impl ArchiveScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unchanged_live_source_is_materialized_after_owner_disconnects() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source.jsonl");
+        let native = uuid::Uuid::new_v4().to_string();
+        let header = json!({"type":"session","id":native,"cwd":temporary.path(),"timestamp":"2026-10-17T10:00:00Z"});
+        let message = json!({"type":"message","id":"saved","parentId":null,"timestamp":"2026-10-17T10:00:01Z","message":{"role":"user","content":"durable prefix"}});
+        fs::write(&source, format!("{header}\n{message}\n")).unwrap();
+        let store = Store::open(Path::new(":memory:"), "test".into()).unwrap();
+        let mut session = json!({"id":"managed","runtimeSessionId":native,"transport":"rpc","status":"running","sessionFile":source});
+        store.put("session", "managed", &session, None).unwrap();
+        let scanner = ArchiveScanner::new();
+        scanner.scan_roots(&store, vec![temporary.path().to_path_buf()]);
+        assert!(
+            store.messages("managed", i64::MAX, 50).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        session["status"] = json!("disconnected");
+        store.put("session", "managed", &session, None).unwrap();
+        let scan = scanner.scan_roots(&store, vec![temporary.path().to_path_buf()]);
+        assert_eq!(scan["imported"], 1);
+        assert_eq!(
+            store.messages("managed", i64::MAX, 50).unwrap()["messages"][0]["id"],
+            "saved"
+        );
+        assert_eq!(store.list("session").unwrap().len(), 1);
+        let sequence = store.snapshot().unwrap()["sequence"].clone();
+        let scan = scanner.scan_roots(&store, vec![temporary.path().to_path_buf()]);
+        assert_eq!(scan["unchanged"], 1);
+        assert_eq!(store.snapshot().unwrap()["sequence"], sequence);
+    }
     #[test]
     fn profile_names_cannot_escape_config_roots() {
         for name in ["../other", "/tmp", "Upper", "a/b", ".", "a.", ""] {

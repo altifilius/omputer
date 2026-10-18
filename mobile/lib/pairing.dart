@@ -48,6 +48,9 @@ class _PairingScreenState extends State<PairingScreen> with WidgetsBindingObserv
     super.dispose();
   }
   Future<void> _request(Json computer) async {
+    if (busy) return;
+    if (controller.connection.paired && !await confirm(context, 'Eşleştirilmiş bilgisayarı değiştir?', '${computer['name']} için yeni eşleştirme isteği açılacak. Bilgisayarda onaylarsan telefondaki mevcut bilgisayar kimliği ve önbelleği değiştirilir. Mevcut bilgisayardaki veriler ve çalışan işler korunur.', action: 'Yeni kod iste')) return;
+    if (!mounted) return;
     setState(() { busy = true; error = null; });
     try {
       if (background) await controller.requestNotifications();
@@ -79,12 +82,20 @@ class _PairingScreenState extends State<PairingScreen> with WidgetsBindingObserv
     if (mounted) setState(() => error = null);
   }
   Future<void> _pairQr(String value) async {
+    if (busy) return;
     setState(() { busy = true; error = null; });
     try {
+      final preview = await controller.previewBundle(value);
+      if (!mounted) return;
+      final replacing = controller.connection.paired || preview['existingPair'] == true;
+      final approved = await confirm(context, replacing ? 'Bilgisayar eşleştirmesini değiştir?' : 'Bu bilgisayara güveniyor musun?',
+        '${preview['serverName'] ?? 'Bilgisayar'}\n${preview['url']}\nBilgisayar kimliği: ${preview['serverId'] ?? 'Pakette belirtilmemiş'}\n\nSertifika parmak izi:\n${preview['fingerprint']}\n\nBu kimliği ve parmak izini bilgisayarındaki Omputer ekranıyla karşılaştır. Bağlantıyı açmak tek başına onay değildir.${replacing ? '\n\nOnaylarsan bu telefondaki mevcut eşleştirme ve önbellek değiştirilir. Eski bilgisayardaki oturumlar ve dosyalar korunur.' : ''}',
+        action: replacing ? 'Değiştir ve eşleştir' : 'Güven ve eşleştir');
+      if (!approved || !mounted) return;
       if (background) await controller.requestNotifications();
       await controller.cancelPair();
       await controller.pair(value, name.text);
-      if (background) await controller.setBackground(true);
+      if (background && controller.connection.notifications) await controller.setBackground(true);
       if (mounted && Navigator.canPop(context)) Navigator.pop(context);
     } catch (failure) { if (mounted) setState(() => error = '$failure'); }
     finally { if (mounted) setState(() => busy = false); }

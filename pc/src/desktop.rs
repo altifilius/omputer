@@ -11,14 +11,17 @@ use std::{
     collections::HashSet,
     fs::{self, File},
     path::PathBuf,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, SyncSender},
+    },
     thread,
     time::{Duration, Instant},
 };
 
 #[derive(Clone, Default)]
 struct State {
-    status: Option<Value>,
+    status: Option<Arc<Value>>,
     error: Option<String>,
     warning: Option<String>,
     phase: String,
@@ -27,10 +30,15 @@ struct State {
     busy: bool,
     notice: Option<String>,
     qr: Option<Value>,
+    update_available: bool,
+    resume_ids: Vec<String>,
 }
 
 enum Command {
     Retry,
+    ApplyUpdate,
+    SaveCloseUpdate,
+    Restore(String),
     Action {
         action: &'static str,
         payload: Value,
@@ -42,6 +50,9 @@ pub fn run(state_dir: PathBuf, bundle: Option<PathBuf>) -> Result<()> {
     setup::private_dir(&layout.state)?;
     let instance = setup::lock(&layout.state.join("desktop.lock"))?;
     if instance.try_lock_exclusive().is_err() {
+        // A newly opened package may contain an update. Stage it before
+        // activating the existing window; never silently ignore that package.
+        setup::install(layout.clone(), bundle.as_deref())?;
         setup::atomic_write(
             &layout.state.join("desktop.activate"),
             uuid::Uuid::new_v4().to_string().as_bytes(),
@@ -49,8 +60,9 @@ pub fn run(state_dir: PathBuf, bundle: Option<PathBuf>) -> Result<()> {
         )?;
         return Ok(());
     }
-    let (commands, commands_rx) = mpsc::channel();
-    let (updates_tx, updates) = mpsc::channel();
+    let (commands, commands_rx) = mpsc::sync_channel(1);
+    let updates = Arc::new(Mutex::new(None));
+    let updates_tx = updates.clone();
     let worker_layout = layout.clone();
     thread::Builder::new()
         .name("omputer-desktop-service".into())
@@ -58,6 +70,10 @@ pub fn run(state_dir: PathBuf, bundle: Option<PathBuf>) -> Result<()> {
             worker(worker_layout, bundle, commands_rx, updates_tx);
         })?;
     let options = eframe::NativeOptions {
+        // A hidden Wayland surface may receive no frame callbacks. Waiting for
+        // them in eglSwapBuffers stalls winit too, including compositor pings.
+        // egui already schedules repaints; keep presentation non-blocking.
+        vsync: false,
         viewport: egui::ViewportBuilder::default()
             .with_title("Omputer")
             .with_app_id("omputer")
@@ -83,6 +99,8 @@ pub fn run(state_dir: PathBuf, bundle: Option<PathBuf>) -> Result<()> {
                 compared: HashSet::new(),
                 revoke: None,
                 qr: None,
+                restore_confirmation: None,
+                update_confirmation: false,
                 dark: true,
                 activation: Vec::new(),
                 next_activation: Instant::now(),
@@ -96,14 +114,14 @@ fn worker(
     layout: Layout,
     bundle: Option<PathBuf>,
     commands: Receiver<Command>,
-    updates: Sender<State>,
+    updates: Arc<Mutex<Option<State>>>,
 ) {
     let mut state = State {
         busy: true,
         phase: "Uygulama ve yerel OMP çalışma ortamı kuruluyor…".into(),
         ..Default::default()
     };
-    let _ = updates.send(state.clone());
+    publish(&updates, &state);
     let mut installation = None;
     prepare(
         &layout,
@@ -112,7 +130,7 @@ fn worker(
         &mut installation,
         &mut state,
     );
-    let _ = updates.send(state.clone());
+    publish(&updates, &state);
     let mut next_poll = Instant::now();
     let mut waiting_since = Instant::now();
     let mut next_prepare = Instant::now() + Duration::from_secs(30);
@@ -121,8 +139,60 @@ fn worker(
             Ok(command) => {
                 state.busy = true;
                 state.notice = None;
-                let _ = updates.send(state.clone());
+                publish(&updates, &state);
                 match command {
+                    Command::ApplyUpdate => {
+                        match installation
+                            .as_ref()
+                            .context("Uygulama henüz kurulmadı")
+                            .and_then(supervisor::apply_update)
+                        {
+                            Ok(()) => {
+                                state.status = None;
+                                state.phase = "Güncelleme uygulanıyor…".into();
+                                waiting_since = Instant::now();
+                            }
+                            Err(error) => state.error = Some(format!("{error:#}")),
+                        }
+                    }
+                    Command::SaveCloseUpdate => {
+                        let result = (|| -> Result<()> {
+                            let saved =
+                                supervisor::admin(&layout.state, "update.closeIdle", json!({}))?;
+                            state.resume_ids = saved["savedSessionIds"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|v| v.as_str().map(str::to_owned))
+                                .collect();
+                            let install =
+                                installation.as_ref().context("Uygulama henüz kurulmadı")?;
+                            supervisor::apply_update(install)?;
+                            Ok(())
+                        })();
+                        match result { Ok(()) => state.notice=Some("Kaydedilen oturumlar kapatıldı ve güncelleme uygulandı. Aşağıdaki düğmeyle devam edebilirsiniz.".into()), Err(error)=>state.error=Some(format!("{error:#}")) }
+                    }
+                    Command::Restore(id) => {
+                        let result = (|| -> Result<()> {
+                            supervisor::admin(
+                                &layout.state,
+                                "backup.restore",
+                                json!({"backupId":id}),
+                            )?;
+                            let install =
+                                installation.as_ref().context("Uygulama henüz kurulmadı")?;
+                            if let Err(error) = supervisor::restart_owned(install) {
+                                let _ = supervisor::admin(
+                                    &layout.state,
+                                    "backup.cancelRestore",
+                                    json!({}),
+                                );
+                                return Err(error);
+                            }
+                            Ok(())
+                        })();
+                        match result { Ok(())=>state.notice=Some("Yedek geri yüklendi. Güncel cihaz izinleri ve TLS kimliği korundu; özgün günlükler değiştirilmedi.".into()),Err(error)=>state.error=Some(format!("{error:#}")) }
+                    }
                     Command::Retry => {
                         prepare(
                             &layout,
@@ -134,19 +204,27 @@ fn worker(
                         waiting_since = Instant::now();
                     }
                     Command::Action { action, payload } => {
-                        match supervisor::admin(&layout.state, action, payload) {
+                        match supervisor::admin(&layout.state, action, payload.clone()) {
                             Ok(value) => {
                                 state.error = None;
                                 if action == "pair.bundle" {
-                                    state.qr = Some(value);
+                                    state.qr = Some(value.clone());
                                 }
                                 state.notice = Some(match action {
-                                    "pair.approve" => "Telefon onaylandı. Eşleştirme telefonda tamamlanıyor.",
-                                    "pair.deny" => "Eşleştirme isteği reddedildi.",
-                                    "device.revoke" => "Cihazın erişimi kaldırıldı.",
-                                    "rescan" => "Yerel oturumlar yeniden tarandı.",
-                                    _ => "Tek kullanımlık QR hazır. Bu kodu yalnızca kendi telefonunuzla tarayın.",
-                                }.into());
+                                    "pair.approve" => "Telefon onaylandı. Eşleştirme telefonda tamamlanıyor.".into(),
+                                    "pair.deny" => "Eşleştirme isteği reddedildi.".into(),
+                                    "device.revoke" => "Cihazın erişimi kaldırıldı.".into(),
+                                    "rescan" => "Yerel oturumlar yeniden tarandı.".into(),
+                                    "backup.create" => format!("Yedek oluşturuldu: {}", value["id"].as_str().unwrap_or_default()),
+                                    "diagnosis.export" => format!("Gizli içerik içermeyen tanılama kaydedildi: {}",value["path"].as_str().unwrap_or_default()),
+                                    "update.resume" => "Kaydedilen oturum devam ettirildi.".into(),
+                                    _ => "Tek kullanımlık QR hazır. Bu kodu yalnızca kendi telefonunuzla tarayın.".into(),
+                                });
+                                if action == "update.resume" {
+                                    state.resume_ids.retain(|id| {
+                                        Some(id.as_str()) != payload["sessionId"].as_str()
+                                    });
+                                }
                             }
                             Err(error) => state.error = Some(format!("{error:#}")),
                         }
@@ -154,7 +232,7 @@ fn worker(
                 }
                 state.busy = false;
                 next_poll = Instant::now();
-                let _ = updates.send(state.clone());
+                publish(&updates, &state);
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -168,7 +246,7 @@ fn worker(
                 &mut state,
             );
             next_prepare = Instant::now() + Duration::from_secs(30);
-            let _ = updates.send(state.clone());
+            publish(&updates, &state);
         }
         if installation.is_some() && Instant::now() >= next_poll {
             match supervisor::admin(&layout.state, "status", json!({})) {
@@ -186,7 +264,10 @@ fn worker(
                         "Yerel hizmet hazırlanıyor…"
                     }
                     .into();
-                    state.status = Some(status);
+                    state.status = Some(Arc::new(status));
+                    state.update_available = installation
+                        .as_ref()
+                        .is_some_and(|install| supervisor::update_warning(install).is_some());
                     if state
                         .error
                         .as_ref()
@@ -209,9 +290,13 @@ fn worker(
                 }
             }
             next_poll = Instant::now() + Duration::from_secs(1);
-            let _ = updates.send(state.clone());
+            publish(&updates, &state);
         }
     }
+}
+
+fn publish(updates: &Mutex<Option<State>>, state: &State) {
+    *updates.lock().unwrap_or_else(|error| error.into_inner()) = Some(state.clone());
 }
 
 fn prepare(
@@ -232,6 +317,8 @@ fn prepare(
             .context("Yerel hizmet başlatılamadı")?;
         state.service_mode = startup.mode;
         state.warning = startup.warning;
+        state.update_available =
+            supervisor::update_warning(installation.as_ref().unwrap()).is_some();
         state.phase = "Güvenli yerel bağlantı başlatılıyor…".into();
         Ok(())
     })();
@@ -253,8 +340,8 @@ fn prepare(
 struct Desktop {
     _instance: File,
     layout: Layout,
-    commands: Sender<Command>,
-    updates: Receiver<State>,
+    commands: SyncSender<Command>,
+    updates: Arc<Mutex<Option<State>>>,
     state: State,
     compared: HashSet<String>,
     revoke: Option<(String, String)>,
@@ -262,6 +349,8 @@ struct Desktop {
     dark: bool,
     activation: Vec<u8>,
     next_activation: Instant,
+    restore_confirmation: Option<String>,
+    update_confirmation: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -355,14 +444,14 @@ impl Desktop {
     fn action(&mut self, action: &'static str, payload: Value) {
         if self
             .commands
-            .send(Command::Action { action, payload })
+            .try_send(Command::Action { action, payload })
             .is_ok()
         {
             self.state.busy = true;
         }
     }
     fn retry(&mut self) {
-        if self.commands.send(Command::Retry).is_ok() {
+        if self.commands.try_send(Command::Retry).is_ok() {
             self.state.busy = true;
             self.state.error = None;
         }
@@ -455,6 +544,10 @@ impl Desktop {
         ui.add_space(20.0);
         egui::CollapsingHeader::new("Telefon bilgisayarı bulamıyorsa").show(ui, |ui| {
             ui.label("İki cihazın aynı özel Wi-Fi/LAN ağında olduğunu kontrol edin. Misafir ağları cihazların birbirini görmesini engelleyebilir.");
+            ui.label("Güvenlik duvarı kullanıyorsanız yalnızca bu bilgisayarın aşağıdaki TCP bağlantı noktasına kendi yerel ağınızdan erişime izin verin. Keşif için UDP 5353 ve 47878 kullanılır. Omputer güvenlik duvarını veya yönlendiricinizi değiştirmez; QR güvenlik duvarını aşmaz.");
+            if let Some(status) = &self.state.status {
+                ui.label(format!("Yerel HTTPS TCP bağlantı noktası: {}", status["port"]));
+            }
             ui.label("Otomatik keşif engelleniyorsa telefonun eşleştirme ekranından bu tek kullanımlık QR’ı tarayın. Adres yazmanız gerekmez.");
             let ready = self.state.status.as_ref().is_some_and(|s| s["ready"] == true);
             if ui.add_enabled(ready && !self.state.busy, egui::Button::new("Tek kullanımlık QR oluştur").min_size(Vec2::new(220.0, 48.0))).clicked() { self.action("pair.bundle", json!({})); }
@@ -492,7 +585,12 @@ impl Desktop {
 
 impl eframe::App for Desktop {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
-        while let Ok(update) = self.updates.try_recv() {
+        if let Some(update) = self
+            .updates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
             self.state = update;
         }
         if Instant::now() >= self.next_activation {
@@ -567,6 +665,14 @@ impl eframe::App for Desktop {
                 } else if !online && !self.state.busy && ui.add(primary("Yeniden bağlan", colors)).clicked() {
                     self.retry();
                 }
+                if let Some(warning) = &self.state.warning {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(warning).color(colors.on_waiting));
+                }
+                if self.state.update_available {
+                    ui.label("Yeni sürüm hazır. Etkin iş kesilmez. Terminal OMP oturumlarını kendi pencerelerinden kapatın; yalnızca uygulamanın yönettiği boş oturumlar açık onayınızla kaydedilip kapatılabilir.");
+                    if ui.add_enabled(online && !self.state.busy, primary("Güncelleme seçenekleri", colors)).clicked() { self.update_confirmation = true; }
+                }
                 if let Some(notice) = &self.state.notice { ui.add_space(8.0); ui.label(RichText::new(notice).color(colors.primary)); }
                 if online {
                     let status = status.as_ref().unwrap();
@@ -575,6 +681,22 @@ impl eframe::App for Desktop {
                 } else if !self.state.installed {
                     section_title(ui, "İlk açılışta hazırlanır");
                     ui.label("Omputer bu kullanıcı hesabına kurulur; oturum açtığınızda yerel bağlantıyı otomatik başlatır. Sistem OMP kurulumunuz değiştirilmez.");
+                }
+                for id in self.state.resume_ids.clone() {
+                    ui.horizontal_wrapped(|ui| { ui.label(format!("Kaydedilen oturum: {id}")); if ui.add_enabled(online && !self.state.busy,egui::Button::new("Oturuma devam et")).clicked() { self.action("update.resume",json!({"sessionId":id})); } });
+                }
+                if let Some(status) = &status {
+                    egui::CollapsingHeader::new("Sürümler, yedekler ve kurtarma").show(ui, |ui| {
+                        for scope in ["installed","running"] {
+                            ui.label(if scope=="installed" { "Kurulu bileşenler" } else { "Çalışan hizmetin başlangıç bileşenleri" });
+                            for key in ["native","omp","bridge"] { let item=&status["components"][scope][key]; ui.label(format!("{key}: {}",item["version"].as_str().unwrap_or("sürüm bilgisi yok"))); ui.add(egui::Label::new(RichText::new(item["sha256"].as_str().unwrap_or("SHA-256 alınamadı")).small().monospace()).wrap().selectable(true)); }
+                        }
+                        if let Some(blockers)=status["update"]["blockers"].as_array() { for blocker in blockers { ui.label(format!("Güncelleme engeli: {} · {}",blocker["sessionId"].as_str().unwrap_or("hizmet"),blocker["reason"].as_str().unwrap_or("Etkin iş var"))); } }
+                        ui.label("Yedekler konuşma ve kaynak günlüklerini içerir; bu bilgisayarın özel klasöründe saklanır. Etkin yazıcı varsa işlem reddedilir. TLS anahtarı ve köprü belirteci yedeklenmez. Geri yükleme güncel cihaz izinlerini korur; eski erişimleri canlandırmaz ve özgün günlükleri değiştirmez.");
+                        if ui.add_enabled(online && !self.state.busy,egui::Button::new("Özel yedek oluştur")).clicked() { self.action("backup.create",json!({})); }
+                        if let Some(items)=status["backups"]["items"].as_array() { if items.is_empty() { ui.label("Henüz özel yedek yok."); } for item in items { ui.horizontal_wrapped(|ui| { ui.label(format!("{} · {} günlük · {} bayt",display_time(&item["createdAt"]),count(&item["journals"]),item["bytes"])); if ui.add_enabled(!self.state.busy,egui::Button::new("Bu yedeği geri yükle…")).clicked() { self.restore_confirmation=item["id"].as_str().map(str::to_owned); } }); } }
+                        if ui.add_enabled(online && !self.state.busy,egui::Button::new("İçeriksiz tanılama dışa aktar")).clicked() { self.action("diagnosis.export",json!({})); }
+                    });
                 }
                 self.fallback(ui, colors);
                 ui.add_space(16.0);
@@ -587,6 +709,7 @@ impl eframe::App for Desktop {
                         if let Some(urls) = status["urls"].as_array() { for url in urls { if let Some(url) = url.as_str() { ui.label(RichText::new(url).monospace().small()); } } }
                         let discovery = &status["discovery"];
                         if let Some(error) = discovery["error"].as_str() { ui.colored_label(colors.on_error, error); }
+                        if let Some(error) = discovery["listenerError"].as_str() { ui.colored_label(colors.on_error, error); }
                         let archives = &discovery["archives"];
                         if let Some(errors) = archives["errors"].as_array() { for error in errors.iter().take(5) { if let Some(error) = error.as_str() { ui.colored_label(colors.on_error, error); } } }
                         if let Some(roots) = archives["missingRoots"].as_array() && !roots.is_empty() { ui.label(RichText::new(format!("{} oturum klasörü henüz yok; oluştuğunda otomatik taranır.", roots.len())).small()); }
@@ -594,7 +717,7 @@ impl eframe::App for Desktop {
                         if let Some(error) = discovery["udp"]["error"].as_str() { ui.colored_label(colors.on_error, format!("Ek yerel ağ keşfi: {error}")); }
                         if ui.add_enabled(!self.state.busy, egui::Button::new("Oturumları yeniden tara").min_size(Vec2::new(180.0,48.0))).clicked() { self.action("rescan", json!({})); }
                     }
-                    ui.label("Yeni terminal OMP oturumları kurulan uzantıyı otomatik yükler. Zaten açık olan, uzantısız oturumlar yeniden başlatılmaz veya bellekte değiştirilmez; kaydedilmiş geçmişleri okunabilir.");
+                    ui.label("Yeni terminal OMP oturumları kurulan uzantıyı otomatik yükler. Zaten açık OMP süreçleri köprü güncellemesini kendi normal yeniden açılışlarında yükler; yeniden başlatılmaz veya bellekte değiştirilmez.");
                     ui.label("Ajan yaşam döngüsü kontrolü, destekleyen derlenmiş çalışma ortamındaki yeni oturumlarda kullanılabilir. Sisteminizdeki omp komutu değiştirilmez.");
                     ui.label("Bulut, aktarıcı ve bildirim sağlayıcısı yoktur. Bilgisayar uyurken veya ağ yokken telefon bağlanamaz.");
                 });
@@ -613,6 +736,25 @@ impl eframe::App for Desktop {
             if context.input(|input| input.key_pressed(egui::Key::Escape)) {
                 self.revoke = None;
             }
+        }
+        if self.update_confirmation {
+            egui::Window::new("Güvenli güncelleme").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,[0.0,0.0]).show(context,|ui| {
+                ui.set_max_width(470.0); ui.label("Etkin işlem, bekleyen soru, kuyruk veya terminal yazıcısı varsa güncelleme reddedilir. Boş yönetilen oturumları kaydedip kapatmak ayrıca onay gerektirir; kapatılan oturumlara güncellemeden sonra devam edebilirsiniz.");
+                if ui.add_enabled(!self.state.busy,primary("Oturum kapatmadan güncelle",colors)).clicked() && self.commands.try_send(Command::ApplyUpdate).is_ok() { self.state.busy=true;self.update_confirmation=false; }
+                if ui.add_enabled(!self.state.busy,egui::Button::new("Boş oturumları kaydet, kapat ve güncelle")).clicked() && self.commands.try_send(Command::SaveCloseUpdate).is_ok() { self.state.busy=true;self.update_confirmation=false; }
+                if ui.button("Vazgeç").clicked() { self.update_confirmation=false; }
+            });
+        }
+        if let Some(id) = self.restore_confirmation.clone() {
+            egui::Window::new("Yedeği geri yükle").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,[0.0,0.0]).show(context,|ui| {
+                ui.set_max_width(470.0);ui.label(format!("Yedek: {id}"));ui.label("Bu bilgisayarın kayıtları yedekteki tarihe dönecek. Mevcut veritabanı geri dönüş kopyası olarak saklanır. Hizmet yeniden başlar; etkin yazıcı varsa işlem reddedilir. Özgün OMP günlükleri ve güncel cihaz iptalleri korunur. Başka bilgisayara kimlik taşıma desteklenmez.");
+                if ui.add_enabled(!self.state.busy,primary("Onayla ve geri yükle",colors)).clicked() && self.commands.try_send(Command::Restore(id)).is_ok() { self.state.busy=true;self.restore_confirmation=None; }
+                if ui.button("Vazgeç").clicked() {self.restore_confirmation=None;}
+            });
+        }
+        if context.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.restore_confirmation = None;
+            self.update_confirmation = false;
         }
         context.request_repaint_after(Duration::from_millis(250));
     }
@@ -645,4 +787,26 @@ fn display_time(value: &Value) -> String {
                 .to_string()
         })
         .unwrap_or_else(|| "Bilinmiyor".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suspended_window_receives_only_latest_snapshot() {
+        let updates = Mutex::new(None);
+        for value in 0..1000 {
+            publish(
+                &updates,
+                &State {
+                    status: Some(Arc::new(json!({"sequence":value}))),
+                    ..Default::default()
+                },
+            );
+        }
+        let latest = updates.lock().unwrap().take().unwrap();
+        assert_eq!(latest.status.unwrap()["sequence"], 999);
+        assert!(updates.lock().unwrap().is_none());
+    }
 }

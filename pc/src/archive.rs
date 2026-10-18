@@ -131,7 +131,13 @@ pub fn message_view(message: &Value, id: &str, timestamp: &Value) -> Value {
     } else {
         timestamp.as_str().unwrap_or_default().to_string()
     };
-    json!({"id":id,"role":message["role"],"content":content,"timestamp":timestamp})
+    let mut view = json!({"id":id,"role":message["role"],"content":content,"timestamp":timestamp});
+    for key in ["toolCallId", "toolName", "isError", "usage", "stopReason"] {
+        if let Some(value) = message.get(key) {
+            view[key] = value.clone();
+        }
+    }
+    view
 }
 pub fn import(store: &Store, path: &Path) -> Result<String> {
     if !fs::symlink_metadata(path)?.is_file() {
@@ -139,32 +145,56 @@ pub fn import(store: &Store, path: &Path) -> Result<String> {
     }
     let path = path.canonicalize()?;
     let (header, records) = load(&path)?;
-    let id = header["id"].as_str().context("Session header missing id")?;
-    if let Some(existing) = store.list("session")?.into_iter().find(|session| {
-        session["transport"] != "archive"
-            && !matches!(
-                session["status"].as_str(),
-                Some("disconnected" | "closed" | "failed")
-            )
-            && session["sessionFile"]
+    let native_id = header["id"].as_str().context("Session header missing id")?;
+    let sessions = store.list("session")?;
+    let same_source: Vec<_> = sessions
+        .iter()
+        .filter(|session| {
+            session["sessionFile"]
                 .as_str()
                 .and_then(|file| Path::new(file).canonicalize().ok())
                 .as_deref()
                 == Some(path.as_path())
+        })
+        .collect();
+    if let Some(existing) = same_source.iter().find(|session| {
+        session["transport"] != "archive"
+            && (session["writerConnected"] == true
+                || !matches!(
+                    session["status"].as_str(),
+                    Some("disconnected" | "closed" | "failed")
+                ))
     }) {
         return Ok(existing["id"]
             .as_str()
             .context("Live session id missing")?
             .to_owned());
     }
-    if store.get("session", id).is_ok_and(|s| {
-        s["transport"] != "archive"
-            && !matches!(
-                s["status"].as_str(),
-                Some("disconnected" | "closed" | "failed")
-            )
+    // Native RPC uses a daemon-owned visible id. Re-importing its saved file
+    // must refresh that same session, not create a second native-header row.
+    let previous = same_source
+        .iter()
+        .find(|session| session["transport"] != "archive")
+        .copied()
+        .or_else(|| same_source.first().copied());
+    let id = previous
+        .and_then(|session| session["id"].as_str())
+        .unwrap_or(native_id);
+    if let Some(conflict) = sessions.iter().find(|session| session["id"] == id)
+        && !same_source
+            .iter()
+            .any(|session| session["id"] == conflict["id"])
+    {
+        bail!(
+            "Session id is already associated with another source; refusing to replace its history"
+        );
+    }
+    if previous.is_some_and(|session| {
+        session["journalId"]
+            .as_str()
+            .is_some_and(|expected| expected != native_id)
     }) {
-        return Ok(id.to_owned());
+        bail!("Saved source changed native session identity; refusing to replace its history");
     }
     let root = PathBuf::from(
         header["cwd"]
@@ -172,8 +202,18 @@ pub fn import(store: &Store, path: &Path) -> Result<String> {
             .context("Session header missing cwd")?,
     );
     let project = store.register_project(&root, None)?;
-    let active = ensure_inactive(store, id, &path).is_err();
-    let mut session = json!({"id":id,"projectId":project["id"],"name":header["name"],"cwd":project["path"],"transport":"archive","status":if active {"active-unbridged"} else {"closed"},"updatedAt":header["timestamp"],"sessionFile":path,"todos":[],"subagents":[],"capabilities":if active {json!([])} else {json!(["session.resume"])}});
+    let active = ensure_inactive(store, native_id, &path).is_err();
+    let mut session = json!({"id":id,"journalId":native_id,"providerSessionId":null,"bindingRevision":null,"writerConnected":false,"workState":"disconnected","turnError":null,"projectId":project["id"],"name":header["name"],"cwd":project["path"],"transport":"archive","status":if active {"active-unbridged"} else {"closed"},"updatedAt":header["timestamp"],"sessionFile":path,"todos":[],"subagents":[],"capabilities":if active {json!([])} else {json!(["session.resume"])}});
+    if let Some(previous) = previous {
+        for key in ["model", "thinkingLevel", "lastError"] {
+            if !previous[key].is_null() {
+                session[key] = previous[key].clone();
+            }
+        }
+        if session["name"].as_str().is_none_or(str::is_empty) {
+            session["name"] = previous["name"].clone();
+        }
+    }
     let mut nodes = HashMap::new();
     let mut leaf = None;
     for record in &records {
@@ -240,9 +280,7 @@ pub fn import(store: &Store, path: &Path) -> Result<String> {
             }
         }
     }
-    store.replace_messages(id, &messages)?;
-    store.put("session", id, &session, Some("session.updated"))?;
-    Ok(id.to_owned())
+    store.import_archive(&session, &messages)
 }
 pub fn assistant_text(message: &Value) -> String {
     if let Some(text) = message["content"].as_str() {
@@ -270,10 +308,11 @@ pub fn assistant_text(message: &Value) -> String {
 pub fn ensure_inactive(store: &Store, id: &str, path: &Path) -> Result<()> {
     if store.list("session")?.iter().any(|s| {
         s["transport"] != "archive"
-            && !matches!(
-                s["status"].as_str(),
-                Some("disconnected" | "closed" | "failed")
-            )
+            && (s["writerConnected"] == true
+                || !matches!(
+                    s["status"].as_str(),
+                    Some("disconnected" | "closed" | "failed")
+                ))
             && (s["id"] == id
                 || s["sessionFile"]
                     .as_str()
@@ -286,9 +325,13 @@ pub fn ensure_inactive(store: &Store, id: &str, path: &Path) -> Result<()> {
     ensure_source_inactive(id, path)
 }
 pub fn ensure_source_inactive(id: &str, path: &Path) -> Result<()> {
-    if !id
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    lease_source(id, path).map(|_| ())
+}
+pub fn lease_source(id: &str, path: &Path) -> Result<std::os::unix::net::UnixDatagram> {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         || id.len() > 128
     {
         bail!("Cannot safely identify this session's native OMP lease; refusing ambiguous resume");
@@ -367,8 +410,7 @@ pub fn ensure_source_inactive(id: &str, path: &Path) -> Result<()> {
             }
         }
     }
-    drop(probe);
-    Ok(())
+    Ok(probe)
 }
 fn session_owners_dir(
     home: &Path,
@@ -397,6 +439,34 @@ fn session_owners_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saved_managed_session_import_keeps_visible_id_and_rejects_identity_replacement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source.jsonl");
+        let native = uuid::Uuid::new_v4().to_string();
+        let header = json!({"type":"session","id":native,"cwd":temporary.path(),"timestamp":"2026-10-17T10:00:00Z"});
+        let message = json!({"type":"message","id":"a","parentId":null,"timestamp":"2026-10-17T10:00:01Z","message":{"role":"user","content":"Saved request"}});
+        fs::write(&source, format!("{header}\n{message}\n")).unwrap();
+        let store = Store::open(Path::new(":memory:"), "PC".into()).unwrap();
+        store.put("session", "managed", &json!({"id":"managed","runtimeSessionId":native,"transport":"rpc","status":"disconnected","sessionFile":source,"name":"My session"}), None).unwrap();
+        assert_eq!(import(&store, &source).unwrap(), "managed");
+        assert_eq!(store.list("session").unwrap().len(), 1);
+        let saved = store.get("session", "managed").unwrap();
+        assert_eq!(saved["journalId"], native);
+        assert_eq!(saved["name"], "My session");
+        assert_eq!(saved["transport"], "archive");
+        assert_eq!(
+            store.messages("managed", i64::MAX, 50).unwrap()["messages"][0]["id"],
+            "a"
+        );
+        let replacement = json!({"type":"session","id":uuid::Uuid::new_v4(),"cwd":temporary.path(),"timestamp":"2026-10-17T10:00:00Z"});
+        fs::write(&source, format!("{replacement}\n")).unwrap();
+        assert!(import(&store, &source).is_err());
+        assert_eq!(
+            store.messages("managed", i64::MAX, 50).unwrap()["messages"][0]["id"],
+            "a"
+        );
+    }
     #[test]
     fn automatic_import_replaces_branch_and_preserves_partial_source() {
         let temporary = tempfile::tempdir().unwrap();

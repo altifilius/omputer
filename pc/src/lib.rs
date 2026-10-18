@@ -1,7 +1,9 @@
 pub mod archive;
 pub mod autodiscover;
+pub mod backup;
 pub mod discovery;
 pub mod local_admin;
+pub mod project_files;
 mod rpc_transport;
 pub mod runtime;
 pub mod security;

@@ -9,3 +9,1900 @@ diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/inde
  
  export * as zod from "@oh-my-pi/omptype/zod";
  export { z } from "@oh-my-pi/omptype/zod";
+@@ -80,3 +81,6 @@
+ 	HookInputComponent as ExtensionInputComponent,
+ 	HookSelectorComponent as ExtensionSelectorComponent,
+ };
++export * from "./session/omputer-controls";
++export * from "./session/omputer-host";
++export * from "./plan-mode/headless-controller";
+diff --git a/packages/coding-agent/src/modes/controllers/btw-controller.ts b/packages/coding-agent/src/modes/controllers/btw-controller.ts
+--- a/packages/coding-agent/src/modes/controllers/btw-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/btw-controller.ts
+@@ -83,6 +83,35 @@
+ 	readonly #failedWrites = new Map<BtwRequest, Error>();
+ 
+ 	constructor(private readonly ctx: InteractiveModeContext) {}
++
++	readonly #listeners = new Set<(record: BtwHistoryRecord) => void>();
++	subscribe(listener: (record: BtwHistoryRecord) => void): () => void {
++		this.#listeners.add(listener);
++		return () => this.#listeners.delete(listener);
++	}
++
++	/** Main-session mobile controls never follow the terminal's focused child view. */
++	async ask(question: string, recordId?: string): Promise<BtwHistoryRecord> {
++		if (this.ctx.focusedAgentId) throw new Error("Return the PC to its main session before asking a mobile side question.");
++		if (!question.trim()) throw new Error("btw requires a non-empty question");
++		if (!(await this.#start(question, recordId)) || !this.#activeRequest) throw new Error("Side question was not admitted.");
++		return this.#activeRequest.record;
++	}
++
++	cancel(recordId?: string): boolean {
++		if (recordId !== undefined && this.#activeRequest?.record.id !== recordId) return false;
++		return this.handleCancel();
++	}
++
++	async history(): Promise<readonly BtwHistoryRecord[]> {
++		if (this.ctx.focusedAgentId) throw new Error("Return the PC to its main session before reading mobile side questions.");
++		await this.flush();
++		return this.#historyRecords(await this.#loadHistory());
++	}
++
++	async close(): Promise<void> {
++		await this.dispose();
++	}
+ 
+ 	/** /btw asks about the transcript on screen: the focused agent's session, else main. */
+ 	get #sessionManager(): InteractiveModeContext["sessionManager"] {
+@@ -599,6 +628,7 @@
+ 
+ 	#updateRequest(request: BtwRequest, patch: Partial<BtwHistoryTurn>): void {
+ 		request.record = patchLatestBtwTurn(request.record, patch);
++		for (const listener of this.#listeners) listener(request.record);
+ 	}
+ 
+ 	async #runRequest(request: BtwRequest): Promise<void> {
+diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
+--- a/packages/coding-agent/src/modes/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive-mode.ts
+@@ -134,6 +134,8 @@
+ import { syncTextPrediction, textPredictionBackend } from "../predict/client";
+ import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
+ import { USER_INTERRUPT_LABEL } from "../session/messages";
++import { bindOmputerHost } from "../session/omputer-host";
++import type { RpcGoalCommand, RpcGoalResult } from "./rpc/rpc-goal";
+ import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
+ import type { ResolveContext } from "../internal-urls/index";
+ import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
+@@ -2049,6 +2051,23 @@
+ 
+ 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
+ 		if (this.isInitialized) return;
++		bindOmputerHost(this.session, {
++			plan: {
++				enter: async () => {
++					await this.#enterPlanMode();
++					if (!this.planModeEnabled) throw new Error("Plan mode could not be entered.");
++				},
++				cancel: () => this.#exitPlanMode(),
++				approve: async plan => { await this.#approvePlan(plan.planContent, { ...plan, preserveContext: true }); },
++			},
++			goal: {
++				handle: command => this.#handleOmputerGoal(command),
++				settled: async () => { await this.session.waitForSessionTransition(); },
++				beginSessionChange: async () => { this.#cancelGoalContinuation(); },
++				endSessionChange: async () => { this.#scheduleGoalContinuation(); },
++			},
++			btw: this.#btwController,
++		});
+ 
+ 		// Fresh dialog lifetime: a previous stop (if this mode is ever
+ 		// re-initialized) left the old controller aborted, and approvals queued
+@@ -5162,6 +5181,37 @@
+ 		);
+ 	}
+ 
++	async #handleOmputerGoal(command: RpcGoalCommand): Promise<RpcGoalResult> {
++		if (!cfgGoalEnabled.get(this.session.settings)) throw new Error("Goal mode is disabled.");
++		const current = this.session.getGoalModeState();
++		switch (command.op) {
++			case "get": break;
++			case "create":
++				if (!command.objective?.trim()) throw new Error("Goal objective is required.");
++				if (current?.goal && (current.enabled || current.goal.status === "paused")) throw new Error("Resume or drop the existing goal first.");
++				await this.#enterGoalMode({ objective: command.objective });
++				if (!this.goalModeEnabled) throw new Error("Goal mode could not be entered.");
++				if (command.token_budget !== undefined) await this.session.goalRuntime.onBudgetMutated(command.token_budget);
++				this.#scheduleGoalContinuation();
++				break;
++			case "resume":
++				if (current?.goal.status !== "paused") throw new Error("No paused goal to resume.");
++				await this.#resumeGoalAction();
++				break;
++			case "pause":
++				if (!current?.enabled) throw new Error("No active goal to pause.");
++				await this.#pauseGoalAction();
++				break;
++			case "drop":
++				if (!current?.goal) throw new Error("No goal to drop.");
++				await this.session.goalRuntime.dropGoal();
++				await this.#exitGoalMode({ reason: "dropped" });
++				break;
++		}
++		const state = this.session.getGoalModeState();
++		return { state: state ?? null, goal: state?.goal ?? null };
++	}
++
+ 	async #enterGoalMode(options: { objective?: string; resume?: boolean; silent?: boolean }): Promise<void> {
+ 		if (this.goalModeEnabled) {
+ 			return;
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-btw.ts b/packages/coding-agent/src/modes/rpc/rpc-btw.ts
+--- a/packages/coding-agent/src/modes/rpc/rpc-btw.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-btw.ts
+@@ -47,6 +47,12 @@
+ 	readonly #writes = new Set<Promise<void>>();
+ 	/** Terminal checkpoints that failed, keyed by record id (latest wins); retried before any move. */
+ 	readonly #unsaved = new Map<string, RunningBtw>();
++	readonly #listeners = new Set<(record: BtwHistoryRecord) => void>();
++
++	subscribe(listener: (record: BtwHistoryRecord) => void): () => void {
++		this.#listeners.add(listener);
++		return () => this.#listeners.delete(listener);
++	}
+ 
+ 	constructor(
+ 		session: Pick<AgentSession, "model" | "runEphemeralTurn" | "sessionManager">,
+@@ -87,6 +93,7 @@
+ 			const running: RunningBtw = { record, store, abort: new AbortController() };
+ 			this.#running = running;
+ 			this.#output({ type: "btw_record", record });
++			for (const listener of this.#listeners) listener(record);
+ 			if (epoch !== this.#epoch) {
+ 				// Cancelled or the session changed while the first checkpoint was written.
+ 				this.#finish(running, { status: "cancelled", updatedAt: Date.now() });
+@@ -220,6 +227,7 @@
+ 						answer: latest.answer + delta,
+ 						updatedAt: Date.now(),
+ 					});
++					for (const listener of this.#listeners) listener(running.record);
+ 					this.#output({ type: "btw_delta", recordId: running.record.id, delta });
+ 				},
+ 			});
+@@ -235,6 +243,7 @@
+ 		this.#running = undefined;
+ 		running.record = patchLatestBtwTurn(running.record, patch);
+ 		this.#output({ type: "btw_record", record: running.record });
++		for (const listener of this.#listeners) listener(running.record);
+ 		const write = running.store.upsert(running.record).then(
+ 			() => {
+ 				this.#unsaved.delete(running.record.id);
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-mode.ts b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+--- a/packages/coding-agent/src/modes/rpc/rpc-mode.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+@@ -49,6 +49,8 @@
+ } from "@oh-my-pi/pi-tui/prompt/word-completion";
+ import { requestTextPrediction, textPredictionBackend } from "../../predict/client";
+ import { type AgentSession, SessionBusyError } from "../../session/agent-session";
++import { bindOmputerHost } from "../../session/omputer-host";
++import { HeadlessPlanController } from "../../plan-mode/headless-controller";
+ import type { RestoredQueuedMessage } from "../../session/agent-session-types";
+ import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
+ import { findMostRecentNonEmptySession } from "../../session/session-listing";
+@@ -389,6 +391,12 @@
+ 	if (isRpcExtensionUIResponse(parsed)) {
+ 		const pending = deps.pendingExtensionRequests.get(parsed.id);
+ 		if (pending) pending.resolve(parsed);
++		if (parsed.responseId) {
++			deps.output(pending
++				? { type: "response", id: parsed.responseId, command: "extension_ui_response", success: true, data: { delivered: true } }
++				: { type: "response", id: parsed.responseId, command: "extension_ui_response", success: false,
++					error: { code: "stale_interaction", message: "Question is no longer pending" } });
++		}
+ 		return true;
+ 	}
+ 
+@@ -1401,7 +1409,9 @@
+ 		() => settleWatcher,
+ 	);
+ 	const promptResults = new RpcPromptResults(session, output, goalTurnScheduled);
+-	const sessionEvents = new RpcSessionEventForwarder(output);
++	const omputerMessages = process.env.OMPUTER_RPC_MANAGED === "1";
++	if (omputerMessages) session.enableOmputerMessageIds();
++	const sessionEvents = new RpcSessionEventForwarder(output, omputerMessages ? message => session.getOmputerMessageId(message) : undefined);
+ 	const settleWatcher = new RpcSessionSettleWatcher(session, output, goalTurnScheduled);
+ 
+ 	const pendingExtensionRequests = new RpcPendingExtensionRequests();
+@@ -1410,6 +1420,12 @@
+ 	// Live frames go straight to `output`, so `set_event_filter` (session events only) never drops them.
+ 	const liveBridge = new RpcLiveBridge(session, output, createLiveSession);
+ 	const subagentRegistry = subagentEventBus ? new RpcSubagentRegistry(subagentEventBus, output) : undefined;
++	const planController = new HeadlessPlanController(session);
++	bindOmputerHost(session, {
++		plan: planController,
++		goal: goalController,
++		btw,
++	});
+ 
+ 	// Shutdown request flag (wrapped in object to allow mutation with const)
+ 	const shutdownState = { requested: false };
+@@ -1671,6 +1687,7 @@
+ 	});
+ 	await goalController.reconcile();
+ 	await goalController.settled();
++	await planController.reconcile();
+ 
+ 	// Discriminates a store failure from any other dispose rejection below.
+ 	let persistenceFailure: Error | undefined;
+@@ -1781,7 +1798,7 @@
+ 				await session.followUp(text, images);
+ 				return "admitted";
+ 			}
+-			if (command.type === "prompt") {
++			if (command.type === "prompt" && command.runCommands !== false && command.expandPromptTemplates !== false) {
+ 				if (!ticket) return "cancelled";
+ 				const skillResult = await dispatchRpcSkillPrompt({
+ 					ticket,
+@@ -1837,7 +1854,7 @@
+ 				startPrompt: onPromptAdmitted =>
+ 					session.prompt(text, {
+ 						images,
+-						...(command.type === "prompt" ? { streamingBehavior: command.streamingBehavior } : {}),
++						...(command.type === "prompt" ? { streamingBehavior: command.streamingBehavior, runCommands: command.runCommands, expandPromptTemplates: command.expandPromptTemplates } : {}),
+ 						onPromptAdmitted,
+ 					}),
+ 				results: promptResults,
+@@ -2438,13 +2455,15 @@
+ 			// =================================================================
+ 
+ 			case "get_messages": {
+-				return success(id, "get_messages", { messages: session.messages });
++				if (omputerMessages) await session.settleInFlightMessagePersistence();
++				return success(id, "get_messages", { messages: omputerMessages ? session.getOmputerMessages() : session.messages });
+ 			}
+ 
+ 			case "get_messages_page": {
+ 				if (session.isStreaming || session.isCompacting)
+ 					return error(id, "get_messages_page", RPC_MESSAGES_PAGE_BUSY_ERROR, "session_busy");
+-				const messages = session.messages;
++				if (omputerMessages) await session.settleInFlightMessagePersistence();
++				const messages = omputerMessages ? session.getOmputerMessages() : session.messages;
+ 				try {
+ 					return success(
+ 						id,
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-types.ts b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+index e19d6d1..ee4dd18 100644
+--- a/packages/coding-agent/src/modes/rpc/rpc-types.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+@@ -37,7 +37,7 @@ export type RpcCommand =
+ 	| { id?: string; type: "negotiate_protocol"; protocolVersion: number }
+ 
+ 	// Prompting
+-	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
++	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp"; runCommands?: boolean; expandPromptTemplates?: boolean }
+ 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
+ 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
+ 	| { id?: string; type: "remove_queued_message"; message: string; queue: "steering" | "followUp" }
+@@ -359,6 +359,7 @@ export interface RpcSubagentMessagesResult {
+ 	fromByte: number;
+ 	nextByte: number;
+ 	reset: boolean;
++	hasMore: boolean;
+ 	entries: FileEntry[];
+ 	messages: AgentMessage[];
+ }
+@@ -872,7 +873,7 @@ export interface RpcHostUriResult {
+ // ============================================================================
+ 
+ /** Response to an extension UI request */
+-export type RpcExtensionUIResponse =
++export type RpcExtensionUIResponse = { responseId?: string } & (
+ 	| { type: "extension_ui_response"; id: string; value: string }
+ 	| { type: "extension_ui_response"; id: string; confirmed: boolean }
+ 	| { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean }
+@@ -881,7 +882,7 @@ export type RpcExtensionUIResponse =
+ 			type: "extension_ui_response";
+ 			id: string;
+ 			answers: Array<{ id: string; selectedOptions: string[]; customInput?: string }>;
+-	  };
++	  });
+ 
+ // ============================================================================
+ // Helper type for extracting command types
+diff --git a/packages/coding-agent/src/modes/rpc/wire/commands.ts b/packages/coding-agent/src/modes/rpc/wire/commands.ts
+--- a/packages/coding-agent/src/modes/rpc/wire/commands.ts
++++ b/packages/coding-agent/src/modes/rpc/wire/commands.ts
+@@ -41,7 +41,7 @@
+ 	{
+ 		name: "prompt",
+ 		doc: "Submit a prompt; acknowledged once admitted, completed by its `prompt_result`.",
+-		params: { message: "string", "images?": IMAGES, "streamingBehavior?": "StreamingBehavior" },
++		params: { message: "string", "images?": IMAGES, "streamingBehavior?": "StreamingBehavior", "runCommands?": "boolean", "expandPromptTemplates?": "boolean" },
+ 		result: "PromptAck",
+ 		completion: "prompt_result",
+ 	},
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -3339,6 +3339,29 @@
+ 
+ 	// Track last assistant message for auto-compaction check
+ 	#lastAssistantMessage: AssistantMessage | undefined = undefined;
++	#omputerMessageIds = false;
++	#omputerMessageGeneration = -1;
++	readonly #omputerOpenMessages: Array<{ id: string; role: AgentMessage["role"] }> = [];
++
++	/** Opt-in host projection. Journal ids stay outside provider message payloads. */
++	enableOmputerMessageIds(): void {
++		this.#omputerMessageIds = true;
++	}
++
++	/** Canonical journal identity shared by live RPC, terminal replay, and pages. */
++	getOmputerMessageId(message: AgentMessage): string {
++		return this.sessionManager.getMessageId(message) ?? this.sessionManager.reserveMessageId(message);
++	}
++
++	/** Read the complete selected journal path, not the compacted provider context. */
++	getOmputerMessages(): Array<AgentMessage & { _entryId: string }> {
++		return this.sessionManager.getBranchView().flatMap(entry => {
++			if (entry.type !== "message" && entry.type !== "custom_message") return [];
++			const message = transcriptEntryMessage(entry);
++			return message ? [{ ...message, _entryId: entry.id }] : [];
++		});
++	}
++
+ 	/**
+ 	 * Terminal failure whose turn was pruned from history at settle: a classifier
+ 	 * refusal (#3591) or an abandoned length-stop recovery. Retained until the next
+@@ -3555,6 +3578,10 @@
+ 	 * run stopped. The failure text is the only thing that distinguishes them.
+ 	 */
+ 	#sessionMessageAlreadyPersisted(message: AgentMessage): boolean {
++		if (this.#omputerMessageIds) {
++			const id = this.sessionManager.getMessageId(message);
++			if (id !== undefined) return this.sessionManager.getEntry(id)?.type === "message";
++		}
+ 		const key = sessionMessagePersistenceKey(message);
+ 		if (key === undefined) return false;
+ 		const keys = this.#ensurePersistedMessageKeys();
+@@ -3689,6 +3716,7 @@
+ 					// otherwise records emission time, which on rebuild excludes
+ 					// provider preparation / hook time from the prompt→yield anchor.
+ 					message.timestamp,
++					this.#omputerMessageIds ? this.getOmputerMessageId(message) : undefined,
+ 				);
+ 			}
+ 			if (message.role === "custom" && message.customType === "ttsr-injection") {
+@@ -3794,6 +3822,25 @@
+ 
+ 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
+ 		const eventPromptGeneration = this.#promptGeneration;
++		if (this.#omputerMessageGeneration !== eventPromptGeneration) {
++			this.#omputerOpenMessages.length = 0;
++			this.#omputerMessageGeneration = eventPromptGeneration;
++		}
++		if (this.#omputerMessageIds) {
++			if (event.type === "message_start") {
++				const id = this.getOmputerMessageId(event.message);
++				this.#omputerOpenMessages.push({ id, role: event.message.role });
++			} else if (event.type === "message_update" || event.type === "message_end") {
++				// Assistant deltas and final frames are distinct snapshots. Match the
++				// open lifecycle, never content/timestamp, including nested external cards.
++				let index = this.#omputerOpenMessages.length - 1;
++				while (index >= 0 && this.#omputerOpenMessages[index].role !== event.message.role) index--;
++				this.sessionManager.reserveMessageId(event.message, index < 0 ? undefined : this.#omputerOpenMessages[index].id);
++				if (event.type === "message_end" && index >= 0) this.#omputerOpenMessages.splice(index, 1);
++			} else if (event.type === "agent_end") {
++				this.#omputerOpenMessages.length = 0;
++			}
++		}
+ 		if (event.type === "agent_end" && this.#activeAgentContinue) {
+ 			this.#activeAgentContinue.turnEnded = true;
+ 		}
+@@ -3953,6 +4000,9 @@
+ 			const deobfuscatedContent = deobfuscateAssistantContent(obfuscator, message.content);
+ 			if (deobfuscatedContent !== message.content) {
+ 				displayEvent = { ...event, message: { ...message, content: deobfuscatedContent } };
++				if (this.#omputerMessageIds && "message" in displayEvent) {
++					this.sessionManager.reserveMessageId(displayEvent.message, this.getOmputerMessageId(message));
++				}
+ 			}
+ 		}
+ 
+@@ -9105,6 +9155,25 @@
+ 		this.agent.replaceQueue(queue, this.#withoutQueuedUserMessage(selected, index));
+ 		this.#reconcileQueuedMessageDrain();
+ 		return toRestoredQueuedMessage(removed);
++	}
++
++	/** Atomically edit a still-queued plain user message, preserving its images and position.
++	 * No command/template is replayed. Skill/custom invocations must be removed and re-authored. */
++	editQueuedMessage(text: string, queue: "steering" | "followUp", replacement: string): boolean {
++		if (!replacement.trim()) throw new Error("Edited queue text must not be empty.");
++		const selected = queue === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
++		const index = this.#findQueuedUserMessage(selected, text);
++		if (index < 0) return false;
++		const message = selected[index];
++		if (message.role !== "user") throw new Error("Remove and re-author skill/custom queued messages instead of editing their expansion.");
++		const images = typeof message.content === "string" ? [] : message.content.filter(part => part.type === "image");
++		const edited = { ...message, content: [{ type: "text" as const, text: replacement }, ...images] };
++		this.#queuedMessageRawText.set(edited, replacement);
++		const next = selected.slice();
++		next[index] = edited;
++		this.agent.replaceQueue(queue, next);
++		this.#reconcileQueuedMessageDrain();
++		return true;
+ 	}
+ 
+ 	/**
+diff --git a/packages/coding-agent/src/slash-commands/helpers/parse.ts b/packages/coding-agent/src/slash-commands/helpers/parse.ts
+--- a/packages/coding-agent/src/slash-commands/helpers/parse.ts
++++ b/packages/coding-agent/src/slash-commands/helpers/parse.ts
+@@ -51,6 +51,7 @@
+ /** Emit a usage/error message and consume the command. */
+ export async function usage(text: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+ 	await runtime.output(text);
++	if (runtime.strictErrors) throw Object.assign(new Error(text), { code: "command_rejected" });
+ 	return commandConsumed();
+ }
+ 
+diff --git a/packages/coding-agent/src/slash-commands/types.ts b/packages/coding-agent/src/slash-commands/types.ts
+--- a/packages/coding-agent/src/slash-commands/types.ts
++++ b/packages/coding-agent/src/slash-commands/types.ts
+@@ -72,6 +72,8 @@
+ 	signal?: AbortSignal;
+ 	/** Emit text to the operator. TUI maps to `ctx.showStatus`, ACP to `sessionUpdate`. */
+ 	output: (text: string) => Promise<void> | void;
++	/** Structured hosts reject usage/errors instead of recording an apparent success. */
++	strictErrors?: boolean;
+ 	/** Re-advertise the available command list (no-op outside ACP). */
+ 	refreshCommands: () => Promise<void> | void;
+ 	/**
+diff --git a/packages/coding-agent/src/plan-mode/headless-controller.ts b/packages/coding-agent/src/plan-mode/headless-controller.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/coding-agent/src/plan-mode/headless-controller.ts
+@@ -0,0 +1,121 @@
++import type { Model } from "@oh-my-pi/pi-ai";
++import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
++import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
++import { prompt } from "@oh-my-pi/pi-utils";
++import type { AgentSession } from "../session/agent-session";
++import { isMCPToolName } from "../tools/builtin-names";
++import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
++import type { ResolvedApprovedPlan } from "./approved-plan";
++import { autosaveApprovedPlan } from "./plan-autosave";
++import { resolvePlanModelTransition } from "./model-transition";
++import { cfgPlanEnabled } from "./settings";
++
++interface PlanSnapshot {
++	journalId: string;
++	enabled: string[];
++	mounted: string[];
++	model?: Model;
++	thinkingLevel?: ConfiguredThinkingLevel;
++}
++
++/** RPC uses the same state, guards, tool partition, model policy and approval artifact as the TUI. */
++export class HeadlessPlanController {
++	#previous: PlanSnapshot | undefined;
++	constructor(readonly session: AgentSession) {}
++
++	async reconcile(): Promise<void> {
++		const manager = this.session.sessionManager;
++		const context = manager.buildSessionContext();
++		if (context.mode !== "plan") {
++			this.#previous = undefined;
++			this.session.setPlanModeState(undefined);
++			this.session.setPlanProposalHandler(null);
++			return;
++		}
++		const snapshot = manager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "omputer-plan-snapshot");
++		if (snapshot?.type === "custom") {
++			const saved = snapshot.data as PlanSnapshot;
++			const model = saved.model ? this.session.getAvailableModels().find(model => model.provider === saved.model?.provider && model.id === saved.model.id) : undefined;
++			this.#previous = { ...saved, model, journalId: manager.getSessionId() };
++		}
++		this.session.setPlanModeState({ enabled: true,
++			planFilePath: typeof context.modeData?.planFilePath === "string" ? context.modeData.planFilePath : "local://PLAN.md",
++			workflow: "parallel", reentry: true });
++		this.session.setPlanProposalHandler(title => this.session.preparePlanForReview(title));
++	}
++
++	async enter(): Promise<void> {
++		const session = this.session;
++		if (!cfgPlanEnabled.get(session.settings)) throw new Error("Plan mode is disabled (plan.enabled).");
++		if (session.getPlanModeState()?.enabled) return;
++		if (session.getGoalModeState()?.goal || session.getVibeModeState()?.enabled) throw new Error("Exit goal/vibe mode before planning.");
++		if (session.isBusyForSnapshot || session.queuedMessageCount > 0) throw new Error("Plan entry requires an idle session.");
++		const previous: PlanSnapshot = { journalId: session.sessionManager.getSessionId(),
++			enabled: session.getEnabledToolNames().filter(name => !isMCPToolName(name)),
++			mounted: session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
++			model: session.model, thinkingLevel: session.configuredThinkingLevel() };
++		const priorState = session.getPlanModeState();
++		const planFilePath = session.getPlanReferencePath() || "local://PLAN.md";
++		session.setPlanModeState({ enabled: true, planFilePath, workflow: "parallel", reentry: priorState !== undefined });
++		try {
++			const tools = session.getEnabledToolNames();
++			await session.setActiveToolsByName(session.hasBuiltInTool("write") ? [...new Set([...tools, "write"])] : tools);
++			const transition = resolvePlanModelTransition(session.model, session.resolveRoleModelWithThinking("plan"), false);
++			if (transition.kind === "thinking") session.setThinkingLevel(transition.thinkingLevel);
++			else if (transition.kind === "apply") await session.setModelTemporary(transition.model, transition.thinkingLevel);
++		} catch (error) {
++			session.setPlanModeState(priorState);
++			await session.restoreNonMCPToolPresentation(previous.enabled, previous.mounted);
++			if (previous.model) await session.setModelTemporary(previous.model, previous.thinkingLevel);
++			throw error;
++		}
++		this.#previous = previous;
++		session.setPlanProposalHandler(title => session.preparePlanForReview(title));
++		session.sessionManager.appendCustomEntry("omputer-plan-snapshot", { ...previous,
++			model: previous.model ? { provider: previous.model.provider, id: previous.model.id } : undefined });
++		session.sessionManager.appendModeChange("plan", { planFilePath });
++		await session.sessionManager.flush();
++	}
++
++	async cancel(): Promise<void> {
++		const session = this.session;
++		if (!session.getPlanModeState()?.enabled) throw new Error("Plan mode is not active.");
++		if (session.isBusyForSnapshot || session.queuedMessageCount > 0) throw new Error("Plan exit requires an idle session.");
++		const previous = this.#previous;
++		if (!previous || previous.journalId !== session.sessionManager.getSessionId()) throw new Error("Plan restoration snapshot is unavailable for this journal.");
++		const state = session.getPlanModeState();
++		const tools = session.getEnabledToolNames();
++		const mounted = session.getMountedXdevToolNames();
++		const model = session.model;
++		const thinking = session.configuredThinkingLevel();
++		session.setPlanModeState(undefined);
++		try {
++			await session.restoreNonMCPToolPresentation(previous.enabled, previous.mounted);
++			if (previous.model) {
++				if (modelsAreEqual(session.model, previous.model)) session.setThinkingLevel(previous.thinkingLevel);
++				else await session.setModelTemporary(previous.model, previous.thinkingLevel);
++			}
++		} catch (error) {
++			session.setPlanModeState(state);
++			await session.setActiveToolPresentation(tools, mounted);
++			if (model) await session.setModelTemporary(model, thinking);
++			throw error;
++		}
++		session.setPlanProposalHandler(null);
++		this.#previous = undefined;
++		session.sessionManager.appendModeChange("none");
++		await session.sessionManager.flush();
++	}
++
++	async approve(plan: ResolvedApprovedPlan): Promise<void> {
++		await autosaveApprovedPlan({ settings: this.session.settings, cwd: this.session.sessionManager.getCwd(),
++			title: plan.title, planContent: plan.planContent });
++		await this.cancel();
++		this.session.setPlanReferencePath(plan.planFilePath);
++		const tools = this.session.getEnabledToolNames();
++		if (!tools.includes("read")) await this.session.setActiveToolsByName([...tools, "read"]);
++		this.session.markPlanReferenceSent();
++		await this.session.prompt(prompt.render(planModeApprovedPrompt, { ...plan, contextPreserved: true }),
++			{ synthetic: true, runCommands: false, expandPromptTemplates: false, throwOnDrop: true });
++	}
++}
+diff --git a/packages/coding-agent/src/session/omputer-controls.ts b/packages/coding-agent/src/session/omputer-controls.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/coding-agent/src/session/omputer-controls.ts
+@@ -0,0 +1,348 @@
++import { createHash } from "node:crypto";
++import type { ExtensionAPI, ExtensionContext } from "../extensibility/extensions/types";
++import { expandPromptTemplate } from "../config/prompt-templates";
++import { expandSlashCommand } from "../extensibility/slash-commands";
++import { buildSkillPromptMessage, getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
++import { buildAvailableSlashCommands } from "../slash-commands/available-commands";
++import { BUILTIN_SLASH_COMMANDS_INTERNAL, lookupBuiltinSlashCommand } from "../slash-commands/builtin-registry";
++import type { SlashCommandRuntime } from "../slash-commands/types";
++import { parseCommandArgs } from "../utils/command-args";
++import { resolveApprovedPlan, type ResolvedApprovedPlan } from "../plan-mode/approved-plan";
++import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
++import { AgentRegistry } from "../registry/agent-registry";
++import { readRpcSubagentTranscript } from "../modes/rpc/rpc-subagents";
++import type { AgentSession } from "./agent-session";
++import { getOmputerHost } from "./omputer-host";
++import { SKILL_PROMPT_MESSAGE_TYPE } from "./messages";
++import { getBtwLatestTurn, type BtwHistoryRecord } from "./btw-history";
++
++type Json = Record<string, unknown>;
++type Risk = "read" | "change" | "execute" | "destructive" | "provider";
++export interface OmputerCommand {
++	id: string; name: string; aliases: string[]; description: string; source: string;
++	inputHint?: string; subcommands: Array<{ name: string; description?: string; usage?: string }>;
++	available: boolean; unavailableReason?: string; risk: Risk; requiresIdle: boolean; localAction?: string;
++}
++export interface OmputerOutput { type: "operation_output"; operationId: string; kind: string; text: string; }
++export type OmputerEmit = (event: OmputerOutput) => void;
++
++const LOCAL: Record<string, string> = { model: "models", models: "models", effort: "effort", tree: "tree", branch: "tree", rewind: "tree", fork: "tree", new: "new", resume: "resume", btw: "btw", plan: "plan", "plan-review": "plan", goal: "goal", jobs: "jobs" };
++const SAFE_TEXT: Record<string, Risk> = { session: "read", context: "read", tools: "read", changelog: "read", dirs: "read", usage: "read", fast: "change", slow: "change", fresh: "change", retry: "provider", shake: "destructive", handoff: "provider", compact: "provider", rename: "change", todo: "change", force: "provider", effort: "change", model: "change", switch: "change" };
++const HOST_ONLY: Record<string, string> = {
++	share: "Hosted sharing is outside Omputer's local-only boundary.", collab: "Hosted collaboration is not a mobile control.", join: "Hosted collaboration is not a mobile control.", leave: "Complete collaboration changes on the PC.",
++	login: "Complete credential sign-in on the PC.", logout: "Complete credential changes on the PC.", setup: "Complete provider setup on the PC.", settings: "Complete host settings on the PC.",
++	dump: "Raw session dumps may contain credentials; use the scoped session export.", export: "Use the scoped local session export.", move: "Working-root changes must be completed on the PC.", wt: "Worktree changes must be completed on the PC.", "add-dir": "Workspace-root changes must be completed on the PC.",
++	delete: "Session deletion must be completed on the PC.", clear: "Context deletion must be completed on the PC.", quit: "Quitting the host is not disconnecting the phone.", pause: "Global agent pause must be completed on the PC.",
++	mcp: "MCP administration and credentials must be completed on the PC.", skills: "Skill installation and updates must be completed on the PC.", plugins: "Plugin administration must be completed on the PC.", marketplace: "Plugin installation must be completed on the PC.", "reload-plugins": "Plugin reload must be completed on the PC.",
++};
++
++function fail(code: string, message: string): never { throw Object.assign(new Error(message), { code }); }
++function required(args: Json, key: string): string {
++	const value = args[key];
++	if (typeof value !== "string" || !value.trim()) fail("invalid_arguments", `${key} is required`);
++	return value;
++}
++function digest(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
++
++/** Session-scoped, explicit command execution. Unknown slash names never become prompts. */
++export class OmputerControls {
++	static readonly version = 1;
++	readonly version = 1;
++	#epoch = 0;
++	#review: (ResolvedApprovedPlan & { revision: string; journalId: string; leafId: string | null }) | undefined;
++	#active = false;
++	readonly #ctx: ExtensionContext;
++	readonly #session: AgentSession;
++	static create(pi: ExtensionAPI, ctx: ExtensionContext, session: AgentSession): OmputerControls {
++		return new OmputerControls(pi, ctx, session);
++	}
++	constructor(_pi: ExtensionAPI, ctx: ExtensionContext, session: AgentSession) {
++		this.#ctx = ctx; this.#session = session;
++		const off = session.subscribeCommandMetadataChanged(() => this.#epoch++);
++		session.addDisposer(off);
++	}
++
++	async catalog(): Promise<Json> {
++		const session = this.#session;
++		const available = await buildAvailableSlashCommands(session);
++		const commands: OmputerCommand[] = [];
++		const seen = new Set<string>();
++		for (const spec of BUILTIN_SLASH_COMMANDS_INTERNAL) {
++			seen.add(spec.name); for (const alias of spec.aliases ?? []) seen.add(alias);
++			const localAction = LOCAL[spec.name];
++			let reason = HOST_ONLY[spec.name];
++			if (!reason && !localAction && !(spec.handle && Object.hasOwn(SAFE_TEXT, spec.name))) reason = "This command requires the PC terminal UI.";
++			if (!reason && ["plan", "plan-review", "goal", "btw"].includes(spec.name) && !getOmputerHost(session)) reason = "The owning host controller is not initialized.";
++			commands.push({ id: `builtin:${spec.name}`, name: spec.name, aliases: spec.aliases ?? [], description: spec.acpDescription ?? spec.description,
++				source: "builtin", inputHint: spec.acpInputHint ?? spec.inlineHint, subcommands: spec.subcommands ?? [],
++				available: !reason, unavailableReason: reason, risk: SAFE_TEXT[spec.name] ?? (["btw", "goal"].includes(spec.name) ? "provider" : "change"),
++				requiresIdle: !["session", "context", "tools", "changelog", "dirs", "usage", "btw", "jobs"].includes(spec.name), localAction });
++		}
++		for (const item of available) {
++			if (item.source === "builtin" || seen.has(item.name)) continue;
++			seen.add(item.name);
++			commands.push({ id: `${item.source}:${item.name}`, name: item.name, aliases: item.aliases ?? [], description: item.description ?? "",
++				source: item.source, inputHint: item.input?.hint, subcommands: item.subcommands ?? [], available: true,
++				risk: item.source === "extension" || item.source === "custom" ? "execute" : "provider", requiresIdle: true });
++		}
++		for (const item of session.promptTemplates) {
++			if (seen.has(item.name)) continue;
++			seen.add(item.name);
++			commands.push({ id: `template:${item.name}`, name: item.name, aliases: [], description: item.description, source: "template",
++				inputHint: "arguments", subcommands: [], available: true, risk: "provider", requiresIdle: true });
++		}
++		const catalogRevision = digest([session.sessionManager.getSessionId(), this.#epoch, commands,
++			session.slashCommands, session.promptTemplates, session.skills.map(skill => [skill.name, skill.filePath])]);
++		return { catalogRevision, journalId: session.sessionManager.getSessionId(), commands };
++	}
++
++	async query(view: string, args: Json = {}): Promise<Json> {
++		const session = this.#session; const manager = session.sessionManager;
++		const host = getOmputerHost(session);
++		switch (view) {
++			case "commands": return this.catalog();
++			case "state": return { journalId: manager.getSessionId(), providerSessionId: session.sessionId, sessionFile: manager.getSessionFile(), leafId: manager.getLeafId(),
++				isStreaming: session.isStreaming, isCompacting: session.isCompacting, hasPendingAsyncWork: session.hasPendingAsyncWork(),
++				isSettled: !session.isBusyForSnapshot && !session.hasPendingAsyncWork() && session.queuedMessageCount === 0,
++				queuedMessages: session.getQueuedMessages(), contextUsage: session.getContextUsage(), model: session.model ? { provider: session.model.provider, id: session.model.id, name: session.model.name } : null, thinkingLevel: session.thinkingLevel };
++			case "queue": return { ...session.getQueuedMessages() };
++			case "tree": return { tree: manager.getTree(), leafId: manager.getLeafId(), journalId: manager.getSessionId() };
++			case "entries": {
++				const entries = manager.getEntries();
++				const offset = typeof args.offset === "number" && Number.isSafeInteger(args.offset) && args.offset >= 0 ? args.offset : 0;
++				const limit = typeof args.limit === "number" && Number.isSafeInteger(args.limit) ? Math.max(1, Math.min(200, args.limit)) : 100;
++				return { entries: entries.slice(offset, offset + limit), leafId: manager.getLeafId(), journalId: manager.getSessionId(), hasMore: entries.length > offset + limit, nextOffset: offset + limit };
++			}
++			case "btw": if (!host) fail("unsupported", "Host side-question controller is unavailable."); return { records: await host.btw.history() };
++			case "plan": return { state: session.getPlanModeState() ?? null, review: this.#review?.journalId === manager.getSessionId() ? this.#review : null };
++			case "goal": if (!host) fail("unsupported", "Host goal controller is unavailable."); return { ...await host.goal.handle({ op: "get" }) };
++			case "models": return { models: session.getAvailableModels().map(model => ({ provider: model.provider, id: model.id, name: model.name, input: model.input, reasoning: model.reasoning })), current: session.model ? { provider: session.model.provider, id: session.model.id, name: session.model.name } : null };
++			case "effort": return { level: session.thinkingLevel, configured: session.configuredThinkingLevel(), levels: ["off", "auto", ...session.getAvailableThinkingLevels()] };
++			case "usage": return { stats: session.getSessionStats(), contextUsage: session.getContextUsage(), limits: session.getUsageLimitState() ?? null };
++			case "jobs": return { snapshot: session.getAsyncJobSnapshot() };
++			case "agents": case "childhistory": return { agents: this.#ownedAgents().map(ref => ({ id: ref.id, name: ref.displayName, status: ref.status, parentId: ref.parentId, task: ref.activity, sessionFile: ref.sessionFile, metrics: ref.history?.metrics })) };
++			case "agentMessages": {
++				const ref = this.#ownedAgents().find(ref => ref.id === required(args, "agentId"));
++				if (!ref?.sessionFile) fail("unknown_agent", "Child transcript does not belong to this session.");
++				const fromByte = args.fromByte === undefined ? 0 : args.fromByte;
++				if (typeof fromByte !== "number" || !Number.isSafeInteger(fromByte) || fromByte < 0) fail("invalid_arguments", "fromByte must be a non-negative integer");
++				return { ...await readRpcSubagentTranscript(ref.sessionFile, fromByte) };
++			}
++			default: fail("unsupported", `Unsupported control view: ${view}`);
++		}
++	}
++
++	#ownedAgents() {
++		const refs = AgentRegistry.global().list(); const owned = new Set([this.#ctx.agent.id]);
++		let changed = true;
++		while (changed) { changed = false; for (const ref of refs) if (ref.kind === "sub" && ref.parentId && owned.has(ref.parentId) && !owned.has(ref.id)) { owned.add(ref.id); changed = true; } }
++		const artifacts = this.#session.sessionManager.getArtifactsDir();
++		return refs.filter(ref => ref.kind === "sub" && owned.has(ref.id) && !!artifacts && !!ref.sessionFile && ref.sessionFile.startsWith(`${artifacts}/`));
++	}
++
++	async execute(action: string, payload: Json, operationId: string, emit: OmputerEmit): Promise<Json> {
++		if (!operationId) fail("invalid_arguments", "operationId is required");
++		if (payload.expectedJournalId !== this.#session.sessionManager.getSessionId()) fail("stale_identity", "The session journal changed; refresh before executing.");
++		// The bridge owns and validates expectedBindingRevision against its registration generation.
++		if (this.#active && !(action === "session.control" && payload.control === "btw.cancel")) fail("operation_busy", "Another host control is executing.");
++		const output = (text: string) => emit({ type: "operation_output", operationId, kind: "command", text });
++		const cancelOvertake = action === "session.control" && payload.control === "btw.cancel";
++		if (!cancelOvertake) this.#active = true;
++		try {
++			if (action === "session.command") {
++				const catalog = await this.catalog();
++				if (payload.catalogRevision !== catalog.catalogRevision) fail("stale_catalog", "The command catalog changed; refresh before executing.");
++				const command = (catalog.commands as OmputerCommand[]).find(command => command.id === payload.commandId);
++				if (!command) fail("unknown_command", "This command is not in the current catalog.");
++				if (!command.available) fail("unsupported", command.unavailableReason ?? "Command is unavailable.");
++				if (typeof payload.args !== "string") fail("invalid_arguments", "args must be a literal string");
++				const args = payload.args;
++				const risk = this.#commandRisk(command, args);
++				if (risk !== "read" && payload.confirmed !== true) fail("confirmation_required", `This command has ${risk} effects; explicit confirmation is required.`);
++				if (command.requiresIdle) this.#requireIdle();
++				return await this.#command(command, args, output);
++			}
++			if (action !== "session.control") fail("unsupported", `Unsupported adapter action: ${action}`);
++			const control = required(payload, "control");
++			const args = payload.arguments === undefined ? {} : payload.arguments;
++			if (!args || typeof args !== "object" || Array.isArray(args)) fail("invalid_arguments", "arguments must be an object");
++			if (payload.confirmed !== true) fail("confirmation_required", "Explicit control confirmation is required.");
++			return await this.#control(control, args as Json, output);
++		} finally {
++			if (!cancelOvertake) this.#active = false;
++		}
++	}
++
++	#requireIdle(): void {
++		const session = this.#session;
++		if (session.isBusyForSnapshot || session.queuedMessageCount || session.hasPendingAsyncWork()) fail("session_busy", "This control requires an idle session; interrupt explicitly first.");
++	}
++
++	#commandRisk(command: OmputerCommand, args: string): Risk {
++		if (command.source !== "builtin") return command.risk;
++		const sub = args.trim().split(/\s+/, 1)[0];
++		if (command.name === "session" && args.trim() && sub !== "info") fail("unsupported", "Only /session info is available; credential/deletion operations require the PC.");
++		if (command.name === "usage" && args.trim()) fail("unsupported", "Usage reset/account mutations require the PC.");
++		if (command.name === "todo") {
++			if (["edit", "expand", "collapse", "export", "import"].includes(sub)) fail("unsupported", "This todo operation requires the PC.");
++			if (!["", "copy", "append", "start", "done", "drop", "rm"].includes(sub)) fail("invalid_arguments", "Unknown todo operation.");
++			return ["", "copy"].includes(sub) ? "read" : ["drop", "rm"].includes(sub) ? "destructive" : "change";
++		}
++		if (["fast", "slow"].includes(command.name) && sub === "status") return "read";
++		if (command.name === "rename" && !args.trim()) return "provider";
++		if (command.name === "jobs" && sub === "kill") return "destructive";
++		return command.risk;
++	}
++
++	async #command(command: OmputerCommand, args: string, output: (text: string) => void): Promise<Json> {
++		const session = this.#session; const text = `/${command.name}${args ? ` ${args}` : ""}`;
++		if (command.source === "builtin") {
++			if (command.name === "btw") return args.trim() ? this.#control("btw.ask", { question: args }, output) : this.query("btw");
++			if (command.name === "plan") {
++				if (args.trim()) fail("structured_control_required", "Enter plan mode first, then send its planning prompt explicitly.");
++				return this.#control("plan.enter", {}, output);
++			}
++			if (command.name === "plan-review") return this.#control("plan.review", {}, output);
++			if (command.name === "goal") {
++				if (args.trim()) fail("structured_control_required", "Use the goal screen for an explicit lifecycle action.");
++				return this.query("goal");
++			}
++			if (["new", "resume", "tree", "branch", "rewind", "fork", "model", "models"].includes(command.name)) fail("structured_control_required", `Open the ${command.localAction} screen to select an explicit target.`);
++			const spec = lookupBuiltinSlashCommand(command.name);
++			if (!spec?.handle) fail("unsupported", "No shared text handler exists.");
++			if (!spec.allowArgs && args.trim()) fail("invalid_arguments", `/${command.name} does not accept arguments`);
++			const runtime: SlashCommandRuntime = { session, sessionManager: session.sessionManager, settings: session.settings, cwd: session.sessionManager.getCwd(), output, strictErrors: true,
++				refreshCommands: () => { this.#epoch++; }, reloadPlugins: async () => { fail("unsupported", "Plugin reload requires the PC."); },
++				keepTurnOpenUntilIdle: () => session.waitForIdle() };
++			const result = await spec.handle({ name: command.name, args, text }, runtime);
++			if (result && "prompt" in result) await session.prompt(result.prompt, { runCommands: false, expandPromptTemplates: false, throwOnDrop: true });
++			await session.sessionManager.flush();
++			return { consumed: true, agentInvoked: !!result && ("prompt" in result || ("agentInvoked" in result && result.agentInvoked === true)) };
++		}
++		if (command.source === "extension") {
++			const runner = session.extensionRunner; const registered = runner?.getCommand(command.name);
++			if (!runner || !registered) fail("unknown_command", "Extension command was removed.");
++			const context = runner.createCommandContext();
++			const ui = new Proxy(context.ui, { get: (target, key) => {
++				if (key === "notify") return (message: string, type?: "info" | "warning" | "error") => { output(message); target.notify(message, type); };
++				const value = Reflect.get(target, key, target);
++				return typeof value === "function" ? value.bind(target) : value;
++			} });
++			await runner.runScoped(() => registered.handler(args, { ...context, ui }));
++			return { consumed: true };
++		}
++		if (command.source === "custom" || command.source === "mcp_prompt") {
++			const loaded = session.customCommands.find(candidate => candidate.command.name === command.name);
++			if (!loaded || !session.extensionRunner) fail("unknown_command", "Custom command was removed.");
++			const ctx = session.extensionRunner.createCommandContext();
++			const result = await session.extensionRunner.runScoped(() => loaded.command.execute(parseCommandArgs(args), { ...ctx, hasQueuedMessages: ctx.hasPendingMessages }, args));
++			if (typeof result === "string" && result) await session.prompt(result, { runCommands: false, expandPromptTemplates: false, throwOnDrop: true });
++			return { consumed: true, agentInvoked: typeof result === "string" && result.length > 0 };
++		}
++		if (command.source === "skill") {
++			const skill = session.skills.find(skill => getSkillSlashCommandName(skill) === command.name); const invocation = parseSkillInvocation(text);
++			if (!skill || !invocation || !session.skillsSettings?.enableSkillCommands) fail("unknown_command", "Skill command was removed or disabled.");
++			const built = await buildSkillPromptMessage(skill, invocation, "user");
++			await session.promptCustomMessage({ customType: SKILL_PROMPT_MESSAGE_TYPE, content: built.message, display: true, details: built.details, attribution: "user" }, { streamingBehavior: "steer", queueChipText: text });
++			return { consumed: true, agentInvoked: true };
++		}
++		const expanded = command.source === "file" ? expandSlashCommand(text, [...session.slashCommands]) : expandPromptTemplate(text, [...session.promptTemplates]);
++		await session.prompt(expanded, { runCommands: false, expandPromptTemplates: false, throwOnDrop: true });
++		return { consumed: true, agentInvoked: true };
++	}
++
++	async #control(control: string, args: Json, output: (text: string) => void): Promise<Json> {
++		const session = this.#session; const manager = session.sessionManager; const host = getOmputerHost(session);
++		if (control === "queue.remove" || control === "queue.edit" || control === "queue.promote") {
++			const message = required(args, "message");
++			const queue = args.queue;
++			if (control !== "queue.promote" && queue !== "steering" && queue !== "followUp") fail("invalid_arguments", "queue must be steering or followUp");
++			if (control === "queue.promote") {
++				if (!session.promoteQueuedMessage(message)) fail("stale_queue", "Message was already consumed or removed.");
++				return { promoted: true };
++			}
++			if (control === "queue.edit") {
++				if (!session.editQueuedMessage(message, queue as "steering" | "followUp", required(args, "text"))) fail("stale_queue", "Message was already consumed or removed.");
++				return { edited: true };
++			}
++			const removed = session.takeQueuedMessage(message, queue as "steering" | "followUp");
++			if (!removed) fail("stale_queue", "Message was already consumed or removed.");
++			return { removed };
++		}
++		if (control === "jobs.cancel") {
++			if (!session.cancelAsyncJob(required(args, "id"))) fail("stale_job", "No running owned job has this ID.");
++			return { cancelled: true };
++		}
++		if (control.startsWith("todo.")) {
++			const name = control.slice(5);
++			if (!["append", "start", "done", "drop", "rm"].includes(name)) fail("unsupported", "Unsupported todo mutation.");
++			return this.#command({ id: "builtin:todo", name: "todo", source: "builtin", aliases: [], description: "", subcommands: [], available: true, risk: "change", requiresIdle: false }, `${name} ${typeof args.args === "string" ? args.args : ""}`, output);
++		}
++		if (!host) fail("unsupported", "The owning host controllers are unavailable.");
++		if (control === "btw.ask") {
++			const completed = Promise.withResolvers<BtwHistoryRecord>();
++			let recordId: string | undefined;
++			const pending = new Map<string, BtwHistoryRecord>();
++			let previousAnswer = "";
++			const observe = (record: BtwHistoryRecord) => {
++				if (recordId === undefined) { pending.set(record.id, record); return; }
++				if (record.id !== recordId) return;
++				const latest = getBtwLatestTurn(record);
++				if (latest.answer.startsWith(previousAnswer)) output(latest.answer.slice(previousAnswer.length));
++				previousAnswer = latest.answer;
++				if (latest.status !== "running") completed.resolve(record);
++			};
++			const off = host.btw.subscribe(observe);
++			try {
++				const record = await host.btw.ask(required(args, "question"), typeof args.recordId === "string" ? args.recordId : undefined);
++				recordId = record.id; observe(pending.get(recordId) ?? record);
++				const terminal = await completed.promise;
++				const latest = getBtwLatestTurn(terminal);
++				if (latest.status === "error") fail("btw_error", latest.error ?? "Side question failed.");
++				return { record: terminal, cancelled: latest.status === "cancelled" };
++			} finally { off(); }
++		}
++		if (control === "btw.cancel") {
++			if (!host.btw.cancel(typeof args.recordId === "string" ? args.recordId : undefined)) fail("stale_btw", "No matching side question is running.");
++			return { cancelled: true };
++		}
++		this.#requireIdle();
++		if (control.startsWith("goal.")) {
++			const op = control.slice(5);
++			if (op !== "create" && op !== "resume" && op !== "pause" && op !== "drop") fail("unsupported", "Unknown goal action.");
++			if (args.token_budget !== undefined && (typeof args.token_budget !== "number" || !Number.isSafeInteger(args.token_budget) || args.token_budget <= 0)) fail("invalid_arguments", "token_budget must be a positive integer");
++			const result = await host.goal.handle({ op, objective: typeof args.objective === "string" ? args.objective : undefined, token_budget: args.token_budget as number | undefined });
++			await manager.flush(); return { ...result };
++		}
++		if (control === "plan.enter") { await host.plan.enter(); await manager.flush(); this.#review = undefined; return this.query("plan"); }
++		if (control === "plan.cancel") { await host.plan.cancel(); await manager.flush(); this.#review = undefined; return this.query("plan"); }
++		if (control === "plan.review") {
++			const state = session.getPlanModeState(); if (!state?.enabled) fail("invalid_state", "Plan mode is not active.");
++			const options = { localProtocolOptions: { getArtifactsDir: () => manager.getArtifactsDir(), getSessionId: () => manager.getSessionId() }, cwd: manager.getCwd() };
++			const plan = await resolveApprovedPlan({ suppliedTitle: args.title, statePlanFilePath: state.planFilePath, readPlan: url => readPlanFile(url, options), listPlanFiles: () => listPlanFiles(options) });
++			this.#review = { ...plan, journalId: manager.getSessionId(), leafId: manager.getLeafId(), revision: digest([manager.getSessionId(), manager.getLeafId(), plan]) };
++			return this.query("plan");
++		}
++		if (control === "plan.approve") {
++			const review = this.#review;
++			if (!review || args.revision !== review.revision || review.journalId !== manager.getSessionId() || review.leafId !== manager.getLeafId()) fail("stale_plan", "Review the current plan before approving.");
++			const content = await readPlanFile(review.planFilePath, { localProtocolOptions: { getArtifactsDir: () => manager.getArtifactsDir(), getSessionId: () => manager.getSessionId() }, cwd: manager.getCwd() });
++			if (content !== review.planContent) fail("stale_plan", "Plan content changed after review; review it again.");
++			await host.plan.approve(review); this.#review = undefined; await manager.flush(); return { approved: true };
++		}
++		if (control === "tree.navigate" || control === "branch" || control === "fork") {
++			const entryId = control === "fork" && args.entryId === undefined ? undefined : required(args, "entryId");
++			if (entryId && !manager.getEntry(entryId)) fail("stale_entry", "Entry does not belong to this journal.");
++			await host.btw.close(); await host.goal.beginSessionChange();
++			try {
++				let result: Json;
++				if (control === "branch") result = { ...await session.branch(entryId!) };
++				else if (control === "fork") result = { cancelled: !(await session.fork(entryId, { requireIdle: true })) };
++				else result = { ...await session.navigateTree(entryId!, { summarize: args.summarize === true }) };
++				await manager.ensureOnDisk(); await manager.flush(); this.#review = undefined;
++				return { ...result, journalId: manager.getSessionId(), sessionFile: manager.getSessionFile(), leafId: manager.getLeafId() };
++			} finally { await host.goal.endSessionChange(); }
++		}
++		fail("unsupported", `Unknown session control: ${control}`);
++	}
++}
+diff --git a/packages/coding-agent/src/session/omputer-host.ts b/packages/coding-agent/src/session/omputer-host.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/coding-agent/src/session/omputer-host.ts
+@@ -0,0 +1,37 @@
++import type { AgentSession } from "./agent-session";
++import type { BtwHistoryRecord } from "./btw-history";
++import type { ResolvedApprovedPlan } from "../plan-mode/approved-plan";
++import type { RpcGoalCommand, RpcGoalResult } from "../modes/rpc/rpc-goal";
++
++/** The owning UI/RPC mode supplies its actual controllers, never a second driver. */
++export interface OmputerHostControllers {
++	plan: {
++		enter(): Promise<void>;
++		cancel(): Promise<void>;
++		approve(plan: ResolvedApprovedPlan): Promise<void>;
++	};
++	goal: {
++		handle(command: RpcGoalCommand): Promise<RpcGoalResult>;
++		settled(): Promise<void>;
++		beginSessionChange(): Promise<void>;
++		endSessionChange(): Promise<void>;
++	};
++	btw: {
++		ask(question: string, recordId?: string): Promise<BtwHistoryRecord>;
++		subscribe(listener: (record: BtwHistoryRecord) => void): () => void;
++		cancel(recordId?: string): boolean;
++		history(): Promise<readonly BtwHistoryRecord[]>;
++		close(): Promise<void>;
++	};
++}
++
++const hosts = new WeakMap<AgentSession, OmputerHostControllers>();
++
++export function bindOmputerHost(session: AgentSession, controllers: OmputerHostControllers): void {
++	hosts.set(session, controllers);
++	session.addDisposer(() => hosts.delete(session));
++}
++
++export function getOmputerHost(session: AgentSession): OmputerHostControllers | undefined {
++	return hosts.get(session);
++}
+diff --git a/packages/coding-agent/test/omputer-controls.test.ts b/packages/coding-agent/test/omputer-controls.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/coding-agent/test/omputer-controls.test.ts
+@@ -0,0 +1,158 @@
++import { afterEach, beforeEach, expect, test } from "bun:test";
++import * as fs from "node:fs/promises";
++import * as os from "node:os";
++import * as path from "node:path";
++import { Agent } from "@oh-my-pi/pi-agent-core";
++import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
++import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
++import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
++import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
++import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
++import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
++import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
++import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
++import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
++import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
++import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
++import { OmputerControls, type OmputerOutput } from "@oh-my-pi/pi-coding-agent/session/omputer-controls";
++import { bindOmputerHost } from "@oh-my-pi/pi-coding-agent/session/omputer-host";
++import { HeadlessPlanController } from "@oh-my-pi/pi-coding-agent/plan-mode/headless-controller";
++import { resolvePlanFilePath } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-files";
++import { RpcGoalController } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal";
++import { RpcBtwController } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-btw";
++
++let auth: AuthStorage;
++let session: AgentSession;
++let controls: OmputerControls;
++let directory: string;
++let calls = 0;
++const output: OmputerOutput[] = [];
++
++beforeEach(async () => {
++	directory = await fs.mkdtemp(path.join(os.tmpdir(), "omputer-host-controls-"));
++	auth = await AuthStorage.create(":memory:");
++	auth.keys.setRuntime("anthropic", "test-key");
++	const registry = new ModelRegistry(auth, undefined, { ignoreLocalModelConfig: true });
++	const mock = createMockModel({ responses: [{ content: ["answer"] }, { content: ["next answer"] }] });
++	calls = 0; output.length = 0;
++	const runtime = new ExtensionRuntime();
++	const extension = await loadExtensionFromFactory(pi => {
++		pi.registerCommand("host-failure", { handler: async () => { throw new Error("Deliberate extension error"); } });
++		pi.registerCommand("host-literal", { handler: async (args, ctx) => { ctx.ui.notify(args); } });
++		pi.registerCommand("models", { handler: async () => { throw new Error("Builtin alias must win"); } });
++	}, directory, new EventBus(), runtime, "omputer-host-test");
++	const manager = SessionManager.create(directory, path.join(directory, "sessions"));
++	const extensionRunner = new ExtensionRunner([extension], runtime, directory, manager, registry);
++	session = new AgentSession({
++		agent: new Agent({ initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, systemPrompt: ["Test"], tools: [] }, convertToLlm,
++			getApiKey: () => "test-key", streamFn: (...args) => { calls++; return mock.stream(...args); } }),
++		sessionManager: manager, extensionRunner, settings: Settings.isolated({ "compaction.enabled": false }), modelRegistry: registry,
++	});
++	const plan = new HeadlessPlanController(session);
++	const goal = new RpcGoalController(session);
++	session.subscribe(event => goal.observe(event));
++	bindOmputerHost(session, { plan, goal, btw: new RpcBtwController(session, () => {}) });
++	controls = OmputerControls.create({} as ExtensionAPI, { agent: { id: "Main" } } as ExtensionContext, session);
++});
++afterEach(async () => { await session.dispose(); auth.close(); await fs.rm(directory, { recursive: true, force: true }); });
++
++async function command(commandId: string, args = "", confirmed = true) {
++	const catalog = await controls.catalog();
++	return controls.execute("session.command", { commandId, args, confirmed, catalogRevision: catalog.catalogRevision, expectedJournalId: session.sessionManager.getSessionId() }, "op-one", event => output.push(event));
++}
++async function control(name: string, args: Record<string, unknown> = {}) {
++	return controls.execute("session.control", { control: name, arguments: args, confirmed: true, expectedJournalId: session.sessionManager.getSessionId() }, "op-control", event => output.push(event));
++}
++
++test("catalog/read discovery never invokes a provider, and unknown/stale/unavailable cannot fall back", async () => {
++	const catalog = await controls.catalog();
++	expect(Array.isArray(catalog.commands)).toBe(true);
++	await controls.query("models"); await controls.query("state"); await controls.query("usage");
++	await expect(command("builtin:not-a-command")).rejects.toMatchObject({ code: "unknown_command" });
++	await expect(command("builtin:share")).rejects.toMatchObject({ code: "unsupported" });
++	await expect(controls.execute("session.command", { commandId: "builtin:context", args: "", catalogRevision: "stale", expectedJournalId: session.sessionManager.getSessionId() }, "op", () => {})).rejects.toMatchObject({ code: "stale_catalog" });
++	expect(calls).toBe(0);
++});
++
++test("session account/deletion and usage mutations reject even when catalog risk is read", async () => {
++	await expect(command("builtin:session", "delete", false)).rejects.toMatchObject({ code: "unsupported" });
++	await expect(command("builtin:session", "pin some-account", false)).rejects.toMatchObject({ code: "unsupported" });
++	await expect(command("builtin:usage", "reset anthropic/active", false)).rejects.toMatchObject({ code: "unsupported" });
++	expect(calls).toBe(0);
++});
++
++test("text builtin output is correlated to the caller operation, not the most recent prompt", async () => {
++	await command("builtin:session", "info", false);
++	expect(output.length).toBeGreaterThan(0);
++	expect(output.every(event => event.operationId === "op-one" && event.type === "operation_output")).toBe(true);
++	expect(calls).toBe(0);
++});
++
++test("file command arguments stay literal and normal slash message mode is distinct", async () => {
++	session.setSlashCommands([{ name: "literal-test", description: "literal", source: "test", content: "$ARGUMENTS" }]);
++	// The session loader adds its bundled files; use a prompt template to exercise the same literal pipeline.
++	const templates = session.promptTemplates as Array<{ name: string; description: string; source: string; content: string }>;
++	templates.push({ name: "literal-template", description: "test", source: "test", content: "$ARGUMENTS" });
++	await command("template:literal-template", "$(touch NEVER) ; literal");
++	expect(calls).toBe(1);
++	await session.prompt("/definitely-unknown", { runCommands: false, expandPromptTemplates: false });
++	expect(calls).toBe(2);
++	expect(await Bun.file(path.join(directory, "NEVER")).exists()).toBe(false);
++});
++
++test("queue editing is atomic, retains images and rejects consumed/custom targets", () => {
++	const image = { type: "image" as const, data: "AA==", mimeType: "image/png" };
++	session.agent.followUp({ role: "user", content: [{ type: "text", text: "old" }, image], timestamp: 1 });
++	expect(session.editQueuedMessage("old", "followUp", "/literal replacement")).toBe(true);
++	expect(session.agent.peekFollowUpQueue()[0]).toMatchObject({ content: [{ type: "text", text: "/literal replacement" }, image] });
++	expect(session.editQueuedMessage("old", "followUp", "no replay")).toBe(false);
++	session.agent.followUp({ role: "custom", customType: "skill", content: "expanded", display: true, attribution: "user", timestamp: 2 });
++	expect(() => session.editQueuedMessage("expanded", "followUp", "unsafe")).toThrow("Remove and re-author");
++});
++
++test("real plan entry/cancel restores the prior mode and never invokes a provider", async () => {
++	const tools = session.getEnabledToolNames(); const model = session.model; const effort = session.configuredThinkingLevel();
++	await control("plan.enter");
++	expect(session.getPlanModeState()?.enabled).toBe(true);
++	expect(session.peekPlanProposalHandler()).toBeDefined();
++	await expect(control("goal.create", { objective: "not during plan" })).rejects.toThrow("Exit plan mode");
++	await expect(control("plan.approve", { revision: "unreviewed" })).rejects.toMatchObject({ code: "stale_plan" });
++	await control("plan.cancel");
++	expect(session.getPlanModeState()).toBeUndefined();
++	expect(session.peekPlanProposalHandler()).toBeUndefined();
++	expect(session.getEnabledToolNames()).toEqual(tools);
++	expect(session.model).toEqual(model); expect(session.configuredThinkingLevel()).toEqual(effort);
++	expect(calls).toBe(0);
++});
++
++test("tree controls reject unknown entries and stale journal identities without writing", async () => {
++	await expect(control("branch", { entryId: "absent" })).rejects.toMatchObject({ code: "stale_entry" });
++	await expect(controls.execute("session.control", { control: "fork", arguments: {}, confirmed: true, expectedJournalId: "different-journal" }, "op", () => {})).rejects.toMatchObject({ code: "stale_identity" });
++	expect(calls).toBe(0);
++});
++
++test("extension failures propagate and command aliases cannot shadow builtins", async () => {
++	const catalog = await controls.catalog();
++	expect((catalog.commands as Array<{ id: string }>).some(command => command.id === "extension:models")).toBe(false);
++	await expect(command("extension:host-failure")).rejects.toThrow("Deliberate extension error");
++	await command("extension:host-literal", "  quoted ; $(not a shell)  ");
++	expect(output.at(-1)).toMatchObject({ operationId: "op-one", text: "  quoted ; $(not a shell)  " });
++	expect(calls).toBe(0);
++});
++
++test("review hashes the actual artifact and refuses edits after human review", async () => {
++	await control("plan.enter");
++	await session.sessionManager.ensureOnDisk();
++	const planPath = resolvePlanFilePath("local://PLAN.md", { cwd: directory, localProtocolOptions: {
++		getArtifactsDir: () => session.sessionManager.getArtifactsDir(), getSessionId: () => session.sessionManager.getSessionId(),
++	} });
++	await Bun.write(planPath, "# Reviewed plan\n\nImplement the exact approved change.\n");
++	const reviewed = await control("plan.review");
++	const review = reviewed.review as { revision: string; planContent: string };
++	expect(review.planContent).toContain("Reviewed plan");
++	await Bun.write(planPath, "# Changed after review\n");
++	await expect(control("plan.approve", { revision: review.revision })).rejects.toMatchObject({ code: "stale_plan" });
++	expect(session.getPlanModeState()?.enabled).toBe(true);
++	expect(calls).toBe(0);
++});
+diff --git a/packages/coding-agent/test/omputer-ui-response.test.ts b/packages/coding-agent/test/omputer-ui-response.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/coding-agent/test/omputer-ui-response.test.ts
+@@ -0,0 +1,22 @@
++import { expect, test } from "bun:test";
++import { dispatchRpcControlFrame, requestRpcAskDialog, type PendingExtensionRequest, type RpcInputFrameDeps } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
++
++test("an acknowledged answer settles the actual ask once and a second answer is stale", async () => {
++  const pending = new Map<string, PendingExtensionRequest>();
++  const frames: object[] = [];
++  const deps: RpcInputFrameDeps = {
++    pendingExtensionRequests: pending,
++    output: frame => { frames.push(frame); },
++    handleCommand: async () => { throw new Error("UI responses must bypass the command queue"); },
++    errorResponse: (id, command, error) => ({ type: "response", id, command, success: false, error }),
++    onHostToolResult: () => {}, onHostToolUpdate: () => {}, onHostUriResult: () => {},
++  };
++  const result = requestRpcAskDialog(pending, deps.output, [{ id: "color", question: "Which color?", options: [{ label: "Mavi" }, { label: "Yesil" }] }]);
++  const question = frames[0] as { id: string };
++  const answer = { type: "extension_ui_response", id: question.id, responseId: "first", answers: [{ id: "color", selectedOptions: ["Yesil"] }] };
++  expect(dispatchRpcControlFrame(answer, deps)).toBe(true);
++  expect(await result).toMatchObject({ kind: "submit", results: [{ id: "color", selectedOptions: ["Yesil"] }] });
++  expect(pending.has(question.id)).toBe(false);
++  dispatchRpcControlFrame({ ...answer, responseId: "second" }, deps);
++  expect(frames.at(-1)).toMatchObject({ id: "second", success: false, error: { code: "stale_interaction" } });
++});
+diff --git a/packages/coding-agent/src/session/session-manager.ts b/packages/coding-agent/src/session/session-manager.ts
+--- a/packages/coding-agent/src/session/session-manager.ts
++++ b/packages/coding-agent/src/session/session-manager.ts
+@@ -895,6 +895,9 @@
+ 	#hasTitleSlot = true;
+ 	#entries: SessionEntry[] = [];
+ 	#index = new SessionEntryIndex();
++	/** Host-only identity: never added to messages sent to a provider. */
++	readonly #messageEntryIds = new WeakMap<object, string>();
++	readonly #reservedMessageEntryIds = new Set<string>();
+ 
+ 	/** File reflects all current entries; appends can go incrementally. */
+ 	#fileIsCurrent = false;
+@@ -2033,14 +2036,17 @@
+ 		this.#sessionName = header.title;
+ 		this.#titleSource = header.titleSource;
+ 		this.#titleUpdatedAt = header.timestamp;
++		for (const entry of entries) {
++			if (entry.type === "message") this.#messageEntryIds.set(entry.message, entry.id);
++		}
+ 		const repairedUsage = normalizeLoadedUsage(entries);
+ 		if (repairedUsage > 0) logger.warn("Loaded assistant messages with incomplete usage", { count: repairedUsage });
+ 		this.#index.rebuild(entries);
+ 	}
+ 
+-	#freshEntryFields(): { id: string; parentId: string | null; timestamp: string } {
++	#freshEntryFields(id?: string): { id: string; parentId: string | null; timestamp: string } {
+ 		return {
+-			id: generateId(this.#index),
++			id: id ?? generateId({ has: candidate => this.#index.has(candidate) || this.#reservedMessageEntryIds.has(candidate) }),
+ 			parentId: this.#index.leafId(),
+ 			timestamp: nowIso(),
+ 		};
+@@ -2059,6 +2065,10 @@
+ 		if (this.#released) {
+ 			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
+ 			return;
++		}
++		if (entry.type === "message") {
++			this.#messageEntryIds.set(entry.message, entry.id);
++			this.#reservedMessageEntryIds.delete(entry.id);
+ 		}
+ 		if (entry.type === "message" && entry.message.role === "assistant" && normalizeAssistantUsage(entry.message)) {
+ 			logger.warn("Assistant message recorded with incomplete usage", { id: entry.id });
+@@ -3360,6 +3370,21 @@
+ 		return { header: this.#header, entries: this.#entries };
+ 	}
+ 
++	/** Reserve the actual journal id before a host publishes a streaming message. */
++	reserveMessageId(message: SessionMessageEntry["message"], id?: string): string {
++		const existing = this.#messageEntryIds.get(message);
++		if (existing !== undefined) return existing;
++		const reserved = id ?? generateId({ has: candidate => this.#index.has(candidate) || this.#reservedMessageEntryIds.has(candidate) });
++		this.#messageEntryIds.set(message, reserved);
++		if (!this.#index.has(reserved)) this.#reservedMessageEntryIds.add(reserved);
++		return reserved;
++	}
++
++	/** The canonical id of a persisted message or an unfinished host-owned message. */
++	getMessageId(message: SessionMessageEntry["message"]): string | undefined {
++		return this.#messageEntryIds.get(message);
++	}
++
+ 	/**
+ 	 * Append a message as a child of the current leaf, then advance the leaf.
+ 	 * CompactionSummaryMessage / BranchSummaryMessage are rejected here — they are
+@@ -3374,7 +3399,12 @@
+ 			| PythonExecutionMessage
+ 			| FileMentionMessage,
+ 	): string {
+-		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
++		const reserved = this.#messageEntryIds.get(message);
++		const entry: SessionMessageEntry = {
++			type: "message",
++			...this.#freshEntryFields(reserved !== undefined && !this.#index.has(reserved) ? reserved : undefined),
++			message,
++		};
+ 		this.#recordEntry(entry);
+ 		return entry.id;
+ 	}
+@@ -3395,11 +3425,11 @@
+ 	): string {
+ 		if (parentId !== null && !this.#index.has(parentId)) throw new Error(`Entry ${parentId} not found`);
+ 		const activeLeafId = this.#index.leafId();
++		const reserved = this.#messageEntryIds.get(message);
+ 		const entry: SessionMessageEntry = {
+ 			type: "message",
+-			id: generateId(this.#index),
++			...this.#freshEntryFields(reserved !== undefined && !this.#index.has(reserved) ? reserved : undefined),
+ 			parentId,
+-			timestamp: nowIso(),
+ 			message,
+ 		};
+ 		// The leaf is restored below, so the entry never joins the active branch;
+@@ -3575,9 +3605,10 @@
+ 		details?: T,
+ 		attribution: MessageAttribution | undefined = "agent",
+ 		timestamp?: number,
++		entryId?: string,
+ 	): string {
+ 		const normalized = normalizeCustomMessagePayload<T>({ customType, content, display, details, attribution });
+-		const fresh = this.#freshEntryFields();
++		const fresh = this.#freshEntryFields(entryId !== undefined && !this.#index.has(entryId) ? entryId : undefined);
+ 		const entry: CustomMessageEntry<T> = {
+ 			type: "custom_message",
+ 			customType: normalized.customType,
+@@ -3592,6 +3623,7 @@
+ 			// preparation / hook time from the prompt→yield anchor.
+ 			timestamp: timestamp !== undefined ? new Date(timestamp).toISOString() : fresh.timestamp,
+ 		};
++		this.#reservedMessageEntryIds.delete(entry.id);
+ 		this.#recordEntry(entry);
+ 		return entry.id;
+ 	}
+@@ -4008,6 +4040,9 @@
+ 		manager.#hasTitleSlot = true;
+ 		manager.#entries = history;
+ 		manager.#index.rebuild(history);
++		for (const entry of history) {
++			if (entry.type === "message") manager.#messageEntryIds.set(entry.message, entry.id);
++		}
+ 		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
+ 		if (options?.repairInterruptedTail) {
+ 			SessionManager.#repairForkedInterruptedTail(history, manager.#index.pathTo());
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-session-events.ts b/packages/coding-agent/src/modes/rpc/rpc-session-events.ts
+--- a/packages/coding-agent/src/modes/rpc/rpc-session-events.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-session-events.ts
+@@ -2,6 +2,7 @@
+  * Session-event forwarding for RPC mode: stamps message lifecycle frames with a
+  * `messageId` and applies the host's `set_event_filter` selection.
+  */
++import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+ import type { AssistantMessageEvent } from "@oh-my-pi/pi-ai";
+ import type { AgentSessionEvent } from "../../session/agent-session";
+ import type {
+@@ -30,9 +31,11 @@
+ 	/** Ids of started, unfinished messages. External records (advisor cards, IRC) nest inside a streaming reply. */
+ 	#openMessageIds: string[] = [];
+ 	readonly #output: (frame: RpcProjectedSessionEventFrame) => void;
++	readonly #messageId: ((message: AgentMessage) => string) | undefined;
+ 
+-	constructor(output: (frame: RpcProjectedSessionEventFrame) => void) {
++	constructor(output: (frame: RpcProjectedSessionEventFrame) => void, messageId?: (message: AgentMessage) => string) {
+ 		this.#output = output;
++		this.#messageId = messageId;
+ 	}
+ 
+ 	/** Forward only the listed event types; `null` forwards everything. Returns the active selection. */
+@@ -57,6 +60,9 @@
+ 	}
+ 
+ 	#stamp(event: AgentSessionEvent): RpcAgentSessionEventFrame {
++		if (this.#messageId && (event.type === "message_start" || event.type === "message_update" || event.type === "message_end")) {
++			return { ...event, messageId: this.#messageId(event.message) };
++		}
+ 		switch (event.type) {
+ 			case "message_start": {
+ 				const messageId = this.#mintMessageId();
+diff --git a/packages/coding-agent/test/omputer-message-identity.test.ts b/packages/coding-agent/test/omputer-message-identity.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/coding-agent/test/omputer-message-identity.test.ts
+@@ -0,0 +1,145 @@
++import { afterEach, beforeEach, expect, test, vi } from "bun:test";
++import * as fs from "node:fs/promises";
++import * as os from "node:os";
++import * as path from "node:path";
++import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
++import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
++import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
++import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
++import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { pageRpcMessages } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-messages";
++import { RpcSessionEventForwarder } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-session-events";
++import type { RpcProjectedSessionEventFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
++import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
++import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
++import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
++import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
++import { makeAssistantMessage } from "./session-manager/helpers";
++
++let directory: string;
++let auth: AuthStorage;
++const sessions: AgentSession[] = [];
++const frames: RpcProjectedSessionEventFrame[] = [];
++
++beforeEach(async () => {
++	directory = await fs.mkdtemp(path.join(os.tmpdir(), "omputer-message-identities-"));
++	auth = await AuthStorage.create(":memory:");
++	auth.keys.setRuntime("anthropic", "test-key");
++	frames.length = 0;
++});
++afterEach(async () => {
++	for (const session of sessions.splice(0)) await session.dispose();
++	auth.close();
++	await fs.rm(directory, { recursive: true, force: true });
++	vi.restoreAllMocks();
++});
++
++function host(manager: SessionManager): AgentSession {
++	const mock = createMockModel({ handler: { content: ["reply"] } });
++	const session = new AgentSession({
++		agent: new Agent({
++			initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, systemPrompt: ["Test"], tools: [] },
++			getApiKey: () => "test-key", streamFn: mock.stream, convertToLlm,
++		}),
++		sessionManager: manager,
++		settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, "todo.enabled": false }),
++		modelRegistry: new ModelRegistry(auth, undefined, { ignoreLocalModelConfig: true }),
++	});
++	session.enableOmputerMessageIds();
++	const forwarder = new RpcSessionEventForwarder(frame => frames.push(JSON.parse(JSON.stringify(frame))), message => session.getOmputerMessageId(message));
++	session.subscribe(event => forwarder.forward(event));
++	sessions.push(session);
++	return session;
++}
++
++test("same-millisecond users, including identical repeats, retain their real journal ids through stream, pages, fork and restart", async () => {
++	const manager = SessionManager.create(directory, path.join(directory, "sessions"));
++	const session = host(manager);
++	const timestamp = 1792329478325;
++	for (const text of ["Queued owned remove", "Queued owned edit", "same", "same"]) {
++		const message: AgentMessage = { role: "user", content: [{ type: "text", text }], timestamp };
++		session.agent.emitExternalEvent({ type: "message_start", message });
++		session.agent.emitExternalEvent({ type: "message_end", message });
++	}
++	const partial = { ...makeAssistantMessage(), timestamp, content: [] };
++	const update = { ...partial, content: [{ type: "text" as const, text: "stream" }] };
++	const completed = { ...update, content: [{ type: "text" as const, text: "stream complete" }] };
++	session.agent.emitExternalEvent({ type: "message_start", message: partial });
++	session.agent.emitExternalEvent({ type: "message_update", message: update,
++		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "stream", partial: update } });
++	session.agent.emitExternalEvent({ type: "message_end", message: completed });
++	await session.settleInFlightMessagePersistence();
++	await manager.ensureOnDisk();
++	await manager.flush();
++
++	const visible = session.getOmputerMessages();
++	expect(visible).toHaveLength(5);
++	const ids = visible.map(message => message._entryId);
++	expect(new Set(ids).size).toBe(5);
++	const live = frames.filter(frame => frame.type === "message_start" || frame.type === "message_update" || frame.type === "message_end");
++	expect(live.map(frame => frame.messageId)).toEqual([ids[0], ids[0], ids[1], ids[1], ids[2], ids[2], ids[3], ids[3], ids[4], ids[4], ids[4]]);
++	expect(session.messages.every(message => !("_entryId" in message) && !("messageId" in message))).toBe(true);
++
++	const snapshot = { sessionId: manager.getSessionId(), leafId: manager.getLeafId(), messageCount: visible.length };
++	const pageOne = pageRpcMessages(visible, snapshot, { limit: 2 });
++	const pageTwo = pageRpcMessages(visible, snapshot, { limit: 2, cursor: pageOne.nextCursor });
++	const pageThree = pageRpcMessages(visible, snapshot, { limit: 2, cursor: pageTwo.nextCursor });
++	expect([...pageOne.messages, ...pageTwo.messages, ...pageThree.messages].map(message => message._entryId)).toEqual(ids);
++
++	manager.appendCompaction("provider context summary", undefined, ids[4], 100);
++	expect(session.getOmputerMessages().map(message => message._entryId)).toEqual(ids);
++	manager.createBranchedSession(manager.getLeafId()!);
++	expect(session.getOmputerMessages().map(message => message._entryId)).toEqual(ids);
++	const forkFile = manager.getSessionFile()!;
++	const forkId = manager.getSessionId();
++	await session.dispose();
++	sessions.splice(sessions.indexOf(session), 1);
++	const resumed = host(await SessionManager.open(forkFile));
++	expect(resumed.sessionManager.getSessionId()).toBe(forkId);
++	expect(resumed.getOmputerMessages().map(message => message._entryId)).toEqual(ids);
++	const replay: RpcProjectedSessionEventFrame[] = [];
++	const reconnect = new RpcSessionEventForwarder(frame => replay.push(frame), message => resumed.getOmputerMessageId(message));
++	for (const entry of resumed.sessionManager.getBranch()) if (entry.type === "message") reconnect.forward({ type: "message_end", message: entry.message });
++	expect(replay.map(frame => "messageId" in frame ? frame.messageId : undefined)).toEqual(ids);
++});
++
++test("older journals without host metadata preserve authoritative entry ids and compacted history", async () => {
++	const source = path.join(directory, "legacy.jsonl");
++	const timestamp = 1792329478325;
++	await fs.writeFile(source, [
++		{ type: "session", version: 3, id: "legacy-journal", cwd: directory, timestamp: new Date(timestamp).toISOString() },
++		...(["67072843", "0f87e894"] as const).map((id, index) => ({ type: "message", id, parentId: index === 0 ? null : "67072843", timestamp: new Date(timestamp).toISOString(), message: { role: "user", content: [{ type: "text", text: "identical" }], timestamp } })),
++		{ type: "compaction", id: "compacted", parentId: "0f87e894", timestamp: new Date(timestamp).toISOString(), summary: "old", firstKeptEntryId: "0f87e894", tokensBefore: 100 },
++	].map(entry => JSON.stringify(entry)).join("\n") + "\n");
++	const session = host(await SessionManager.open(source));
++	expect(session.getOmputerMessages().map(message => message._entryId)).toEqual(["67072843", "0f87e894"]);
++	expect(session.getOmputerMessages().map(message => "content" in message ? message.content : undefined)).toEqual([
++		[{ type: "text", text: "identical" }], [{ type: "text", text: "identical" }],
++	]);
++});
++
++test("real follow-up delivery stores identical same-millisecond queue items separately", async () => {
++	const manager = SessionManager.create(directory, path.join(directory, "sessions"));
++	const session = host(manager);
++	const clock = vi.spyOn(Date, "now").mockReturnValue(1792329478325);
++	try {
++		await session.followUp("repeat queued request");
++		await session.followUp("repeat queued request");
++	} finally {
++		clock.mockRestore();
++	}
++	await session.prompt("drain the queue");
++	await session.waitForIdle();
++	await session.settleInFlightMessagePersistence();
++	const repeated = session.getOmputerMessages().filter(message => message.role === "user" && JSON.stringify(message.content).includes("repeat queued request"));
++	expect(repeated).toHaveLength(2);
++	expect(repeated[0].timestamp).toBe(repeated[1].timestamp);
++	expect(repeated[0]._entryId).not.toBe(repeated[1]._entryId);
++	await manager.ensureOnDisk();
++	await manager.flush();
++	const source = manager.getSessionFile()!;
++	await session.dispose();
++	sessions.splice(sessions.indexOf(session), 1);
++	const resumed = host(await SessionManager.open(source));
++	expect(resumed.getOmputerMessages().filter(message => message.role === "user" && JSON.stringify(message.content).includes("repeat queued request")).map(message => message._entryId)).toEqual(repeated.map(message => message._entryId));
++});
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-subagents.ts b/packages/coding-agent/src/modes/rpc/rpc-subagents.ts
+index 9071d81..38dcc1c 100644
+--- a/packages/coding-agent/src/modes/rpc/rpc-subagents.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-subagents.ts
+@@ -67,7 +67,13 @@ function addPruned(set: Set<string>, value: string, maxSize: number): void {
+ 	}
+ }
+ 
+-export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 0): Promise<RpcSubagentMessagesResult> {
++/** Read a bounded page without consuming an incomplete trailing JSONL record. */
++export async function readRpcSubagentTranscript(
++	sessionFile: string,
++	fromByte = 0,
++): Promise<RpcSubagentMessagesResult> {
++	const pageBytes = 256 * 1024;
++	const maxRecordBytes = 2 * 1024 * 1024;
+ 	let startByte = Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0;
+ 	const file = Bun.file(sessionFile);
+ 	let size: number;
+@@ -80,6 +86,7 @@ export async function readRpcSubagentTranscript(sessionFile: string, fromByte =
+ 			fromByte: startByte,
+ 			nextByte: startByte,
+ 			reset: false,
++			hasMore: false,
+ 			entries: [],
+ 			messages: [],
+ 		};
+@@ -90,17 +97,38 @@ export async function readRpcSubagentTranscript(sessionFile: string, fromByte =
+ 		reset = true;
+ 	}
+ 
+-	const text = startByte >= size ? "" : await file.slice(startByte).text();
+-	const lastNewline = text.lastIndexOf("\n");
+-	const completeText = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
+-	const entries = completeText.length > 0 ? parseSessionEntries(completeText) : [];
+-	const nextByte = startByte + Buffer.byteLength(completeText, "utf8");
++	const first = Buffer.from(await file.slice(startByte, Math.min(size, startByte + pageBytes)).arrayBuffer());
++	const chunks = [first];
++	let readBytes = first.length;
++	let completeBytes = first.lastIndexOf(0x0a) + 1;
++	let hasMore = startByte + readBytes < size;
++	// Extend only when the first record cannot fit in one page. The limit includes LF.
++	while (completeBytes === 0 && startByte + readBytes < size && readBytes < maxRecordBytes) {
++		const endByte = Math.min(size, startByte + readBytes + pageBytes, startByte + maxRecordBytes);
++		const chunk = Buffer.from(await file.slice(startByte + readBytes, endByte).arrayBuffer());
++		if (chunk.length === 0) break;
++		chunks.push(chunk);
++		const newline = chunk.indexOf(0x0a);
++		if (newline >= 0) completeBytes = readBytes + newline + 1;
++		readBytes += chunk.length;
++		hasMore = startByte + readBytes < size || (newline >= 0 && chunk.indexOf(0x0a, newline + 1) >= 0);
++	}
++	if (completeBytes === 0 && readBytes >= maxRecordBytes) {
++		throw new Error(`Subagent transcript record at byte ${startByte} exceeds ${maxRecordBytes} bytes`);
++	}
++	// Decode only complete records: a page boundary may split a multibyte UTF-8 code point.
++	const completeText = chunks.length === 1
++		? first.toString("utf8", 0, completeBytes)
++		: Buffer.concat(chunks, completeBytes).toString("utf8");
++	const entries = completeBytes > 0 ? parseSessionEntries(completeText) : [];
++	const nextByte = startByte + completeBytes;
+ 
+ 	return {
+ 		sessionFile,
+ 		fromByte: startByte,
+ 		nextByte,
+ 		reset,
++		hasMore: completeBytes > 0 && hasMore,
+ 		entries,
+ 		messages: entries.filter(isSessionMessageEntry).map(entry => entry.message),
+ 	};
+diff --git a/packages/coding-agent/src/modes/rpc/wire/rpc-wire.generated.ts b/packages/coding-agent/src/modes/rpc/wire/rpc-wire.generated.ts
+index c4940c6..1faabb2 100644
+--- a/packages/coding-agent/src/modes/rpc/wire/rpc-wire.generated.ts
++++ b/packages/coding-agent/src/modes/rpc/wire/rpc-wire.generated.ts
+@@ -702,6 +702,8 @@ export interface SubagentMessages {
+ 	nextByte: number;
+ 	/** `fromByte` exceeded the file size and reading restarted at zero. */
+ 	reset: boolean;
++	/** More transcript data may be read immediately using `nextByte`. */
++	hasMore: boolean;
+ 	entries: Record<string, unknown>[];
+ 	messages: AgentMessage[];
+ }
+@@ -1462,6 +1464,8 @@ export interface PromptParams {
+ 	/** Images attached to the message. */
+ 	images?: ImageContent[];
+ 	streamingBehavior?: StreamingBehavior;
++	runCommands?: boolean;
++	expandPromptTemplates?: boolean;
+ }
+ 
+ export interface SteerParams {
+diff --git a/packages/coding-agent/src/modes/rpc/wire/rpc-wire.schema.json b/packages/coding-agent/src/modes/rpc/wire/rpc-wire.schema.json
+index 481c437..baa9cc7 100644
+--- a/packages/coding-agent/src/modes/rpc/wire/rpc-wire.schema.json
++++ b/packages/coding-agent/src/modes/rpc/wire/rpc-wire.schema.json
+@@ -3265,6 +3265,10 @@
+ 					"type": "boolean",
+ 					"description": "`fromByte` exceeded the file size and reading restarted at zero."
+ 				},
++				"hasMore": {
++					"type": "boolean",
++					"description": "More transcript data may be read immediately using `nextByte`."
++				},
+ 				"entries": {
+ 					"type": "array",
+ 					"items": {
+@@ -3285,6 +3289,7 @@
+ 				"fromByte",
+ 				"nextByte",
+ 				"reset",
++				"hasMore",
+ 				"entries",
+ 				"messages"
+ 			],
+@@ -5814,6 +5819,12 @@
+ 				},
+ 				"streamingBehavior": {
+ 					"$ref": "#/$defs/StreamingBehavior"
++				},
++				"runCommands": {
++					"type": "boolean"
++				},
++				"expandPromptTemplates": {
++					"type": "boolean"
+ 				}
+ 			},
+ 			"required": [
+diff --git a/packages/coding-agent/src/modes/rpc/wire/state.ts b/packages/coding-agent/src/modes/rpc/wire/state.ts
+index 4e95eb3..8f8182a 100644
+--- a/packages/coding-agent/src/modes/rpc/wire/state.ts
++++ b/packages/coding-agent/src/modes/rpc/wire/state.ts
+@@ -271,6 +271,7 @@ export const stateDefs = {
+ 			fromByte: "number.integer",
+ 			nextByte: doc("number.integer", "Pass as the next `fromByte` to read incrementally."),
+ 			reset: doc("boolean", "`fromByte` exceeded the file size and reading restarted at zero."),
++			hasMore: doc("boolean", "More transcript data may be read immediately using `nextByte`."),
+ 			entries: `${JSON_OBJECT}[]`,
+ 			messages: "AgentMessage[]",
+ 		},
+diff --git a/packages/coding-agent/test/rpc-subagents.test.ts b/packages/coding-agent/test/rpc-subagents.test.ts
+index f64b8f6..701d14b 100644
+--- a/packages/coding-agent/test/rpc-subagents.test.ts
++++ b/packages/coding-agent/test/rpc-subagents.test.ts
+@@ -357,6 +357,7 @@ describe("readRpcSubagentTranscript", () => {
+ 			fromByte: 42,
+ 			nextByte: 42,
+ 			reset: false,
++			hasMore: false,
+ 			entries: [],
+ 			messages: [],
+ 		});
+@@ -410,7 +411,7 @@ function handle(frame) {
+ 		return;
+ 	}
+ 	if (frame.type === "get_subagent_messages") {
+-		write({ id: frame.id, type: "response", command: "get_subagent_messages", success: true, data: { sessionFile: frame.sessionFile || "/tmp/subagent.jsonl", fromByte: frame.fromByte || 0, nextByte: 0, reset: false, entries: [], messages: [] } });
++		write({ id: frame.id, type: "response", command: "get_subagent_messages", success: true, data: { sessionFile: frame.sessionFile || "/tmp/subagent.jsonl", fromByte: frame.fromByte || 0, nextByte: 0, reset: false, hasMore: false, entries: [], messages: [] } });
+ 		return;
+ 	}
+ 	if (frame.type === "prompt") {
+diff --git a/packages/coding-agent/test/omputer-subagent-transcript.test.ts b/packages/coding-agent/test/omputer-subagent-transcript.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/coding-agent/test/omputer-subagent-transcript.test.ts
+@@ -0,0 +1,169 @@
++import { afterEach, describe, expect, test } from "bun:test";
++import * as fs from "node:fs/promises";
++import * as os from "node:os";
++import * as path from "node:path";
++import { readRpcSubagentTranscript } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
++
++const pageBytes = 256 * 1024;
++const maxRecordBytes = 2 * 1024 * 1024;
++const tempPaths: string[] = [];
++
++afterEach(async () => {
++	for (const dir of tempPaths.splice(0)) await fs.rm(dir, { recursive: true, force: true });
++});
++
++async function transcript(content: string | Buffer): Promise<string> {
++	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omputer-child-transcript-"));
++	tempPaths.push(dir);
++	const sessionFile = path.join(dir, "child.jsonl");
++	await fs.writeFile(sessionFile, content);
++	return sessionFile;
++}
++
++function messageLine(id: string, text: string): string {
++	return `${JSON.stringify({
++		type: "message",
++		id,
++		parentId: null,
++		timestamp: "2026-10-18T00:00:00.000Z",
++		message: { role: "user", content: [{ type: "text", text }] },
++	})}\n`;
++}
++
++function entryOfBytes(id: string, bytes: number): string {
++	const empty = messageLine(id, "");
++	return messageLine(id, "x".repeat(bytes - Buffer.byteLength(empty)));
++}
++
++describe("bounded child transcript pages", () => {
++	test("reads multiple pages with exact cursors and no omitted or duplicate UTF-8 records", async () => {
++		const prefix = messageLine("first", "hello");
++		const emptyUnicode = messageLine("unicode", "🙂日本語");
++		const textOffset = Buffer.byteLength(emptyUnicode.slice(0, emptyUnicode.indexOf("🙂")));
++		// The ordinary page ends halfway through the emoji, not on a UTF-8 boundary.
++		const padding = pageBytes - Buffer.byteLength(prefix) - textOffset - 2;
++		const unicode = messageLine("unicode", `${"x".repeat(padding)}🙂日本語`);
++		const lines = [prefix, unicode, ...Array.from({ length: 24 }, (_, i) => messageLine(`m${i}`, "é界🙂".repeat(8_000)))];
++		const content = lines.join("");
++		const sessionFile = await transcript(content);
++		const expected = lines.map(line => JSON.parse(line));
++		const entries: unknown[] = [];
++		let cursor = 0;
++		let pages = 0;
++		for (;;) {
++			const result = await readRpcSubagentTranscript(sessionFile, cursor);
++			expect(result.fromByte).toBe(cursor);
++			expect(result.reset).toBe(false);
++			expect(result.nextByte).toBeGreaterThan(cursor);
++			expect(result.nextByte - cursor).toBeLessThanOrEqual(pageBytes);
++			expect(Buffer.from(content).subarray(cursor, result.nextByte).toString("utf8").endsWith("\n")).toBe(true);
++			entries.push(...result.entries);
++			expect(result.messages).toEqual(result.entries.filter(entry => entry.type === "message").map(entry => entry.message));
++			cursor = result.nextByte;
++			pages++;
++			if (!result.hasMore) break;
++			expect(pages).toBeLessThan(lines.length + 1);
++		}
++		expect(pages).toBeGreaterThan(2);
++		expect(entries).toEqual(expected);
++		expect(cursor).toBe(Buffer.byteLength(content));
++		const end = await readRpcSubagentTranscript(sessionFile, cursor);
++		expect(end.entries).toEqual([]);
++		expect(end.nextByte).toBe(cursor);
++		expect(end.hasMore).toBe(false);
++	});
++
++	test("does not consume a partial UTF-8 tail and reads it once completed", async () => {
++		const first = messageLine("first", "complete");
++		const last = messageLine("last", "🙂 still writing");
++		const bytes = Buffer.from(last);
++		const cut = bytes.indexOf(Buffer.from("🙂")) + 2;
++		const sessionFile = await transcript(Buffer.concat([Buffer.from(first), bytes.subarray(0, cut)]));
++		const page = await readRpcSubagentTranscript(sessionFile);
++		expect(page.entries.map(entry => entry.id)).toEqual(["first"]);
++		expect(page.nextByte).toBe(Buffer.byteLength(first));
++		expect(page.hasMore).toBe(false);
++		const pending = await readRpcSubagentTranscript(sessionFile, page.nextByte);
++		expect(pending.entries).toEqual([]);
++		expect(pending.nextByte).toBe(page.nextByte);
++		expect(pending.hasMore).toBe(false);
++		await fs.appendFile(sessionFile, bytes.subarray(cut));
++		const completed = await readRpcSubagentTranscript(sessionFile, pending.nextByte);
++		expect(completed.entries).toEqual([JSON.parse(last)]);
++		expect(completed.nextByte).toBe(Buffer.byteLength(first) + bytes.length);
++		expect(completed.hasMore).toBe(false);
++	});
++
++	test("normalizes fromByte, resumes at exact records, and resets only beyond a truncated file", async () => {
++		const first = messageLine("first", "a");
++		const second = messageLine("second", "b");
++		const sessionFile = await transcript(first + second);
++		const cursor = Buffer.byteLength(first);
++		const resumed = await readRpcSubagentTranscript(sessionFile, cursor + 0.9);
++		expect(resumed.fromByte).toBe(cursor);
++		expect(resumed.entries).toEqual([JSON.parse(second)]);
++		expect(resumed.reset).toBe(false);
++		for (const offset of [-100, Number.NaN, Number.POSITIVE_INFINITY]) {
++			const normalized = await readRpcSubagentTranscript(sessionFile, offset);
++			expect(normalized.fromByte).toBe(0);
++			expect(normalized.entries).toHaveLength(2);
++			expect(normalized.reset).toBe(false);
++		}
++		await fs.writeFile(sessionFile, first);
++		const reset = await readRpcSubagentTranscript(sessionFile, resumed.nextByte);
++		expect(reset.fromByte).toBe(0);
++		expect(reset.nextByte).toBe(cursor);
++		expect(reset.reset).toBe(true);
++		expect(reset.entries).toEqual([JSON.parse(first)]);
++		expect(reset.hasMore).toBe(false);
++	});
++
++	test("advances past a lone large record and preserves complete following records", async () => {
++		const large = entryOfBytes("large", pageBytes + 17);
++		const following = messageLine("following", "next page");
++		const sessionFile = await transcript(large + following);
++		const first = await readRpcSubagentTranscript(sessionFile);
++		expect(first.entries).toEqual([JSON.parse(large)]);
++		expect(first.nextByte).toBe(Buffer.byteLength(large));
++		expect(first.hasMore).toBe(true);
++		const next = await readRpcSubagentTranscript(sessionFile, first.nextByte);
++		expect(next.entries).toEqual([JSON.parse(following)]);
++		expect(next.hasMore).toBe(false);
++	});
++
++	test("accepts the exact single-record bound and explicitly rejects larger records without skipping", async () => {
++		const exact = entryOfBytes("exact", maxRecordBytes);
++		const sessionFile = await transcript(exact);
++		const accepted = await readRpcSubagentTranscript(sessionFile);
++		expect(accepted.nextByte).toBe(maxRecordBytes);
++		expect(accepted.entries).toEqual([JSON.parse(exact)]);
++		expect(accepted.hasMore).toBe(false);
++		const prefix = messageLine("first", "still readable");
++		await fs.writeFile(sessionFile, prefix + entryOfBytes("oversize", maxRecordBytes + 1));
++		const page = await readRpcSubagentTranscript(sessionFile);
++		expect(page.entries).toEqual([JSON.parse(prefix)]);
++		expect(page.nextByte).toBe(Buffer.byteLength(prefix));
++		expect(page.hasMore).toBe(true);
++		await expect(readRpcSubagentTranscript(sessionFile, page.nextByte)).rejects.toThrow(
++			`Subagent transcript record at byte ${page.nextByte} exceeds ${maxRecordBytes} bytes`,
++		);
++		await fs.writeFile(sessionFile, "x".repeat(maxRecordBytes + 1));
++		await expect(readRpcSubagentTranscript(sessionFile)).rejects.toThrow(
++			`Subagent transcript record at byte 0 exceeds ${maxRecordBytes} bytes`,
++		);
++	});
++
++	test("returns a bounded empty result for an absent file without resetting its caller cursor", async () => {
++		const sessionFile = await transcript("");
++		await fs.unlink(sessionFile);
++		expect(await readRpcSubagentTranscript(sessionFile, 27)).toEqual({
++			sessionFile,
++			fromByte: 27,
++			nextByte: 27,
++			reset: false,
++			hasMore: false,
++			entries: [],
++			messages: [],
++		});
++	});
++});
+diff --git a/sdk/go/omp-rpc/wire.go b/sdk/go/omp-rpc/wire.go
+index e1beeae..19df2a6 100644
+--- a/sdk/go/omp-rpc/wire.go
++++ b/sdk/go/omp-rpc/wire.go
+@@ -3179,7 +3179,9 @@ type SubagentMessages struct {
+ 	// Pass as the next `fromByte` to read incrementally.
+ 	NextByte int64 `json:"nextByte"`
+ 	// `fromByte` exceeded the file size and reading restarted at zero.
+-	Reset    bool                         `json:"reset"`
++	Reset bool `json:"reset"`
++	// More transcript data may be read immediately using `nextByte`.
++	HasMore  bool                         `json:"hasMore"`
+ 	Entries  []map[string]json.RawMessage `json:"entries"`
+ 	Messages []AgentMessage               `json:"messages"`
+ }
+@@ -3195,6 +3197,7 @@ func (v *SubagentMessages) decodeFrom(raw map[string]json.RawMessage) error {
+ 	d.required("fromByte", &out.FromByte)
+ 	d.required("nextByte", &out.NextByte)
+ 	d.required("reset", &out.Reset)
++	d.required("hasMore", &out.HasMore)
+ 	d.required("entries", &out.Entries)
+ 	d.required("messages", &out.Messages)
+ 	if d.err != nil {
+@@ -7353,8 +7356,10 @@ func (c Commands) NegotiateProtocol(ctx context.Context, p NegotiateProtocolComm
+ type PromptCommand struct {
+ 	Message string `json:"message"`
+ 	// Images attached to the message.
+-	Images            []ImageContent     `json:"images,omitempty"`
+-	StreamingBehavior *StreamingBehavior `json:"streamingBehavior,omitempty"`
++	Images                []ImageContent     `json:"images,omitempty"`
++	StreamingBehavior     *StreamingBehavior `json:"streamingBehavior,omitempty"`
++	RunCommands           *bool              `json:"runCommands,omitempty"`
++	ExpandPromptTemplates *bool              `json:"expandPromptTemplates,omitempty"`
+ }
+ 
+ // Prompt sends "prompt": Submit a prompt; acknowledged once admitted, completed by its `prompt_result`.
+diff --git a/sdk/python/omp-rpc/src/omp_rpc/_wire.py b/sdk/python/omp-rpc/src/omp_rpc/_wire.py
+index 929f698..923b7a0 100644
+--- a/sdk/python/omp-rpc/src/omp_rpc/_wire.py
++++ b/sdk/python/omp-rpc/src/omp_rpc/_wire.py
+@@ -883,6 +883,8 @@ class SubagentMessages:
+     """Pass as the next `fromByte` to read incrementally."""
+     reset: bool
+     """`fromByte` exceeded the file size and reading restarted at zero."""
++    has_more: bool
++    """More transcript data may be read immediately using `nextByte`."""
+     entries: tuple[JsonObject, ...]
+     messages: tuple[AgentMessage, ...]
+ 
+@@ -2189,6 +2191,7 @@ def parse_subagent_messages(value: object, path: str = "SubagentMessages") -> Su
+         from_byte=required(payload, "fromByte", decode_int, path),
+         next_byte=required(payload, "nextByte", decode_int, path),
+         reset=required(payload, "reset", decode_bool, path),
++        has_more=required(payload, "hasMore", decode_bool, path),
+         entries=required(payload, "entries", array(decode_json_object), path),
+         messages=required(payload, "messages", array(parse_agent_message), path),
+     )
+diff --git a/sdk/rust/omp-rpc/src/wire.rs b/sdk/rust/omp-rpc/src/wire.rs
+index 6daf174..9aae206 100644
+--- a/sdk/rust/omp-rpc/src/wire.rs
++++ b/sdk/rust/omp-rpc/src/wire.rs
+@@ -3378,6 +3378,9 @@ pub struct SubagentMessages {
+ 	pub next_byte: i64,
+ 	/// `fromByte` exceeded the file size and reading restarted at zero.
+ 	pub reset: bool,
++	/// More transcript data may be read immediately using `nextByte`.
++	#[serde(rename = "hasMore")]
++	pub has_more: bool,
+ 	pub entries: Vec<Map<String, Value>>,
+ 	pub messages: Vec<AgentMessage>,
+ }
+@@ -5041,6 +5044,10 @@ pub struct PromptParams {
+ 	pub images: Option<Vec<ImageContent>>,
+ 	#[serde(rename = "streamingBehavior", default, skip_serializing_if = "Option::is_none")]
+ 	pub streaming_behavior: Option<StreamingBehavior>,
++	#[serde(rename = "runCommands", default, skip_serializing_if = "Option::is_none")]
++	pub run_commands: Option<bool>,
++	#[serde(rename = "expandPromptTemplates", default, skip_serializing_if = "Option::is_none")]
++	pub expand_prompt_templates: Option<bool>,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+@@ -5894,6 +5901,10 @@ pub struct PromptCommand {
+ 	pub images: Option<Vec<ImageContent>>,
+ 	#[serde(rename = "streamingBehavior", default, skip_serializing_if = "Option::is_none")]
+ 	pub streaming_behavior: Option<StreamingBehavior>,
++	#[serde(rename = "runCommands", default, skip_serializing_if = "Option::is_none")]
++	pub run_commands: Option<bool>,
++	#[serde(rename = "expandPromptTemplates", default, skip_serializing_if = "Option::is_none")]
++	pub expand_prompt_templates: Option<bool>,
+ }
+ 
+ impl Command for PromptCommand {

@@ -6,10 +6,13 @@ use anyhow::{Context, Result, bail};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -36,6 +39,13 @@ struct PendingResponse {
     session: String,
     bridge: bool,
     tx: oneshot::Sender<Value>,
+    control_snapshot: Option<Value>,
+}
+struct AdmittedCommand<'a>(&'a AtomicUsize);
+impl Drop for AdmittedCommand<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 #[derive(Debug)]
 pub struct CommandError {
@@ -71,6 +81,10 @@ pub struct App {
     revisions: Mutex<HashMap<String, u64>>,
     notifications: Mutex<HashMap<String, (bool, std::time::Instant)>>,
     starting: tokio::sync::Mutex<()>,
+    managed_children: Mutex<HashSet<String>>,
+    update_pending: AtomicBool,
+    admitted_commands: AtomicUsize,
+    child_shutdown: Mutex<HashMap<String, mpsc::UnboundedSender<()>>>,
 }
 impl App {
     pub fn new(store: Arc<Store>, config: RuntimeConfig) -> Arc<Self> {
@@ -84,23 +98,257 @@ impl App {
             revisions: Mutex::new(HashMap::new()),
             notifications: Mutex::new(HashMap::new()),
             starting: tokio::sync::Mutex::new(()),
+            managed_children: Mutex::new(HashSet::new()),
+            update_pending: AtomicBool::new(false),
+            admitted_commands: AtomicUsize::new(0),
+            child_shutdown: Mutex::new(HashMap::new()),
         })
     }
     pub fn initialize_disconnected(&self) -> Result<()> {
-        for mut s in self.store.list("session")? {
-            if s["transport"] != "archive" {
-                if !s["activityUpdatedAt"].is_string() {
-                    s["activityUpdatedAt"] = s["updatedAt"].clone();
-                }
-                s["status"] = json!("disconnected");
-                s["capabilities"] = json!([]);
-                let id = s["id"].as_str().unwrap_or_default().to_owned();
-                self.store
-                    .put("session", &id, &s, Some("session.updated"))?;
-                self.store.cancel_session_interactions(&id)?;
+        // Clear stale liveness first, so a duplicate saved object cannot mask an inactive writer.
+        for mut session in self.store.list("session")? {
+            migrate_identity(&mut session);
+            session["writerConnected"] = json!(false);
+            session["workState"] = json!("disconnected");
+            if session["transport"] == "archive" {
+                let id = required(&session, "id")?;
+                self.store.put("session", id, &session, None)?;
+                continue;
+            }
+            if !session["activityUpdatedAt"].is_string() {
+                session["activityUpdatedAt"] = session["updatedAt"].clone();
+            }
+            if !matches!(session["status"].as_str(), Some("closed" | "failed")) {
+                session["status"] = json!("disconnected");
+            }
+            session["capabilities"] = json!([]);
+            let id = required(&session, "id")?.to_owned();
+            self.store
+                .put("session", &id, &session, Some("session.updated"))?;
+            self.store.cancel_session_interactions(&id)?;
+        }
+        for mut session in self.store.list("session")? {
+            if session["transport"] != "archive" {
+                self.set_inactive_capabilities(&mut session);
+                self.store.put(
+                    "session",
+                    required(&session, "id")?,
+                    &session,
+                    Some("session.updated"),
+                )?;
             }
         }
         Ok(())
+    }
+    fn saved_source(&self, session: &Value) -> Result<(PathBuf, String)> {
+        let file = PathBuf::from(required(session, "sessionFile")?).canonicalize()?;
+        let (header, _) = archive::load(&file)?;
+        let native_id = required(&header, "id")?;
+        if session["journalId"]
+            .as_str()
+            .is_some_and(|id| id != native_id)
+        {
+            bail!("Saved session identity changed; refusing ambiguous resume");
+        }
+        let root = PathBuf::from(required(session, "cwd")?).canonicalize()?;
+        let project = self.store.get("project", required(session, "projectId")?)?;
+        if Path::new(required(&project, "path")?).canonicalize()? != root
+            || Path::new(required(&header, "cwd")?).canonicalize()? != root
+            || session["cwd"].as_str() != root.to_str()
+        {
+            bail!("Saved session root differs from its registered project; refusing resume");
+        }
+        Ok((file, native_id.to_owned()))
+    }
+    fn set_inactive_capabilities(&self, session: &mut Value) {
+        let id = session["id"].as_str().unwrap_or_default().to_owned();
+        let connected = self
+            .links
+            .lock()
+            .get(&id)
+            .is_some_and(|link| link.rpc.is_some() || link.bridge.is_some());
+        session["writerConnected"] = json!(connected);
+        if !connected {
+            session["workState"] = json!("disconnected");
+        }
+        let resumable = !connected
+            && !self.managed_children.lock().contains(&id)
+            && self.saved_source(session).is_ok_and(|(file, native_id)| {
+                // This object's persisted status can still be the pre-disconnect snapshot.
+                let others_live = self
+                    .store
+                    .list("session")
+                    .map(|sessions| {
+                        sessions.iter().any(|other| {
+                            other["id"] != id
+                                && other["transport"] != "archive"
+                                && !matches!(
+                                    other["status"].as_str(),
+                                    Some("closed" | "failed" | "disconnected")
+                                )
+                                && (other["id"] == native_id
+                                    || other["sessionFile"]
+                                        .as_str()
+                                        .and_then(|path| Path::new(path).canonicalize().ok())
+                                        .as_ref()
+                                        == Some(&file))
+                        })
+                    })
+                    .unwrap_or(true);
+                !others_live && archive::ensure_source_inactive(&native_id, &file).is_ok()
+            });
+        session["capabilities"] = if resumable {
+            json!(["session.resume"])
+        } else {
+            json!([])
+        };
+    }
+    pub fn managed_rpc_sessions(&self) -> usize {
+        self.managed_children.lock().len()
+    }
+    pub async fn update_blockers(&self) -> Result<Value> {
+        let managed = self.managed_children.lock().clone();
+        let mut blockers = Vec::new();
+        for (id, link) in self.links.lock().iter() {
+            if link.bridge.is_some() && !managed.contains(id) {
+                blockers.push(json!({"sessionId":id,"kind":"external_writer","reason":"An external terminal owns this writer; close it explicitly"}));
+            }
+        }
+        for id in &managed {
+            let session = self.store.get("session", id)?;
+            blockers.push(json!({"sessionId":id,"kind":if session_idle(&session) {"idle_managed"} else {"active_work"},"reason":if session_idle(&session) {"Save and close this idle managed writer before updating"} else {"This managed writer has active or unsettled work"}}));
+        }
+        let admitted = self.admitted_commands.load(Ordering::SeqCst);
+        let inflight = self.responses.lock().len();
+        if admitted != 0 || inflight != 0 {
+            blockers.push(json!({"kind":"inflight","reason":"A command is still awaiting its actual outcome"}));
+        }
+        for interaction in self
+            .store
+            .list("interaction")?
+            .iter()
+            .filter(|i| i["status"] == "pending")
+        {
+            blockers.push(json!({"sessionId":interaction["sessionId"],"kind":"human_wait","reason":"A human decision is pending"}));
+        }
+        Ok(
+            json!({"blockers":blockers,"managedRpcSessions":managed.len(),"admittedCommands":admitted,"inflightResponses":inflight,"updatePending":self.update_pending.load(Ordering::SeqCst)}),
+        )
+    }
+    pub async fn close_idle_managed(&self) -> Result<Value> {
+        let ids = {
+            let _guard = self.starting.lock().await;
+            if self.update_pending.load(Ordering::SeqCst)
+                || self.admitted_commands.load(Ordering::SeqCst) != 0
+                || !self.responses.lock().is_empty()
+            {
+                return Err(command_error(
+                    "session_busy",
+                    "An update or acknowledged command is already in flight",
+                ));
+            }
+            let ids = self
+                .managed_children
+                .lock()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            if self
+                .links
+                .lock()
+                .iter()
+                .any(|(id, link)| link.bridge.is_some() && !ids.contains(id))
+            {
+                return Err(command_error(
+                    "session_busy",
+                    "An external terminal owns a writer; no managed writer was closed",
+                ));
+            }
+            for id in &ids {
+                let session = self.store.get("session", id)?;
+                if !session_idle(&session)
+                    || self
+                        .store
+                        .list("interaction")?
+                        .iter()
+                        .any(|i| i["sessionId"] == *id && i["status"] == "pending")
+                {
+                    return Err(command_error(
+                        "session_busy",
+                        "Managed work or a human decision remains; no writer was closed",
+                    ));
+                }
+                self.bridge_link(id)?;
+            }
+            self.update_pending.store(true, Ordering::SeqCst);
+            ids
+        };
+        let result: Result<Value> = async {
+            for id in &ids {
+                self.bridge_command(id, "session.flush", json!({})).await?;
+            }
+            for id in &ids {
+                self.child_shutdown
+                    .lock()
+                    .get(id)
+                    .context("Managed shutdown owner disappeared")?
+                    .send(())
+                    .context("Managed shutdown channel closed")?;
+            }
+            tokio::time::timeout(Duration::from_secs(20), async {
+                while ids
+                    .iter()
+                    .any(|id| self.managed_children.lock().contains(id))
+                {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                command_error(
+                    "outcome_unknown",
+                    "Managed children have not acknowledged durable shutdown; do not update yet",
+                )
+            })?;
+            for id in &ids {
+                self.saved_source(&self.store.get("session", id)?)?;
+            }
+            Ok(json!({"closed":true,"sessionIds":ids,"savedSessionIds":ids}))
+        }
+        .await;
+        self.update_pending.store(false, Ordering::SeqCst);
+        result
+    }
+    pub async fn prepare_update(&self) -> Result<Value> {
+        let _guard = self.starting.lock().await;
+        if self
+            .links
+            .lock()
+            .iter()
+            .any(|(id, link)| link.bridge.is_some() && !self.managed_children.lock().contains(id))
+        {
+            return Err(command_error(
+                "session_busy",
+                "An external terminal still owns a live writer; close it explicitly before updating",
+            ));
+        }
+        if self.managed_rpc_sessions() != 0
+            || self.admitted_commands.load(Ordering::SeqCst) != 0
+            || !self.responses.lock().is_empty()
+        {
+            return Err(command_error(
+                "session_busy",
+                "Finish active managed sessions and acknowledged commands before updating",
+            ));
+        }
+        self.update_pending.store(true, Ordering::SeqCst);
+        Ok(json!({"prepared":true,"managedRpcSessions":0}))
+    }
+    pub async fn cancel_update(&self) -> Value {
+        // The reservation excludes both new commands and sessions until local update cancellation.
+        let _guard = self.starting.lock().await;
+        self.update_pending.store(false, Ordering::SeqCst);
+        json!({"prepared":false,"managedRpcSessions":self.managed_rpc_sessions()})
     }
     async fn exchange(
         &self,
@@ -108,9 +356,21 @@ impl App {
         sender: mpsc::Sender<Value>,
         mut frame: Value,
     ) -> Result<Value> {
+        let control_snapshot = matches!(
+            frame["action"].as_str(),
+            Some("session.command" | "session.control")
+        )
+        .then(|| self.store.get("session", session_id))
+        .transpose()?;
+        let durable_control = control_snapshot.is_some();
         let id = Uuid::new_v4().to_string();
         let bridge = frame["type"] == "command";
         frame["id"] = json!(id);
+        if frame["type"] == "extension_ui_response" {
+            frame["id"] = frame["targetId"].take();
+            frame.as_object_mut().unwrap().remove("targetId");
+            frame["responseId"] = json!(id);
+        }
         let (tx, rx) = oneshot::channel();
         self.responses.lock().insert(
             id.clone(),
@@ -118,6 +378,7 @@ impl App {
                 session: session_id.to_owned(),
                 bridge,
                 tx,
+                control_snapshot,
             },
         );
         if sender.send(frame).await.is_err() {
@@ -127,9 +388,13 @@ impl App {
                 "OMP control connection has closed; reconnect the session",
             ));
         }
-        let result = tokio::time::timeout(Duration::from_secs(120), rx).await;
+        let result = if durable_control {
+            rx.await.map_err(|_| command_error("outcome_unknown", "OMP disconnected before acknowledging; outcome unknown. Refresh state before retrying"))
+        } else {
+            tokio::time::timeout(Duration::from_secs(120),rx).await.map_err(|_| command_error("outcome_unknown","OMP did not acknowledge within 120 seconds. Refresh state before issuing a new command")).and_then(|reply| reply.map_err(|_| command_error("outcome_unknown","OMP disconnected before acknowledging; outcome unknown. Refresh state before retrying")))
+        };
         self.responses.lock().remove(&id);
-        let reply=result.map_err(|_|command_error("outcome_unknown","OMP did not acknowledge within 120 seconds. Refresh state before issuing a new command"))?.map_err(|_|command_error("session_disconnected","OMP disconnected before acknowledging; outcome unknown. Refresh state before retrying"))?;
+        let reply = result?;
         if reply["success"] != true {
             return Err(command_error(
                 reply["code"]
@@ -143,6 +408,24 @@ impl App {
             ));
         }
         Ok(reply["data"].clone())
+    }
+    fn cancel_transport_interactions(&self, session: &str, native: bool) -> Result<()> {
+        for mut interaction in self.store.list("interaction")? {
+            if interaction["sessionId"] == session
+                && interaction["status"] == "pending"
+                && (interaction["responseTransport"] == "rpc") == native
+            {
+                interaction["status"] = json!("cancelled");
+                interaction["cancellationReason"] = json!("disconnect");
+                self.store.put(
+                    "interaction",
+                    required(&interaction, "id")?,
+                    &interaction,
+                    Some("interaction.resolved"),
+                )?;
+            }
+        }
+        Ok(())
     }
     fn fail_pending(&self, session: &str, bridge: bool) {
         self.responses
@@ -184,6 +467,52 @@ impl App {
         )
         .await
     }
+    pub async fn controls(&self, id: &str, view: &str, args: Value) -> Result<Value> {
+        if !matches!(
+            view,
+            "commands"
+                | "state"
+                | "queue"
+                | "tree"
+                | "entries"
+                | "btw"
+                | "plan"
+                | "goal"
+                | "agents"
+                | "agentMessages"
+                | "jobs"
+                | "models"
+                | "effort"
+                | "usage"
+        ) || !args.is_object()
+        {
+            return Err(command_error(
+                "invalid_command",
+                "Unknown control view or malformed arguments",
+            ));
+        }
+        let session = self.store.get("session", id)?;
+        if !session["capabilities"]
+            .as_array()
+            .is_some_and(|caps| caps.iter().any(|cap| cap == "session.controls"))
+        {
+            return Err(command_error(
+                "unsupported",
+                "The connected runtime does not provide host controls",
+            ));
+        }
+        let mut data = self
+            .bridge_command(
+                id,
+                "session.controls",
+                json!({"view":view,"arguments":args}),
+            )
+            .await?;
+        data.as_object_mut()
+            .context("Host control query returned a non-object")?
+            .remove("_omputerState");
+        Ok(public_event(&data))
+    }
     pub async fn models(&self) -> Result<Vec<Value>> {
         let sessions: Vec<(String, bool)> = self
             .links
@@ -211,6 +540,17 @@ impl App {
         Ok(self.models.lock().clone())
     }
     pub async fn command(self: &Arc<Self>, request: &Value) -> Result<Value> {
+        let _admitted = {
+            let _guard = self.starting.lock().await;
+            if self.update_pending.load(Ordering::SeqCst) {
+                return Err(command_error(
+                    "update_pending",
+                    "A local update is prepared; finish or cancel it before sending commands",
+                ));
+            }
+            self.admitted_commands.fetch_add(1, Ordering::SeqCst);
+            AdmittedCommand(&self.admitted_commands)
+        };
         let action = request["action"]
             .as_str()
             .context("Command action is required")?;
@@ -224,25 +564,7 @@ impl App {
                 .or(request["sessionId"].as_str())
                 .context("sessionId is required")?;
             let session = self.store.get("session", id)?;
-            let file = PathBuf::from(
-                session["sessionFile"]
-                    .as_str()
-                    .context("Session has no saved sessionFile")?,
-            )
-            .canonicalize()?;
-            let (header, _) = archive::load(&file)?;
-            if header["cwd"]
-                .as_str()
-                .and_then(|p| Path::new(p).canonicalize().ok())
-                .as_deref()
-                != Some(Path::new(
-                    session["cwd"]
-                        .as_str()
-                        .context("Saved session cwd is missing")?,
-                ))
-            {
-                bail!("Saved session root differs from its registered project; refusing resume");
-            }
+            let (file, _) = self.saved_source(&session)?;
             let payload = json!({"projectId":session["projectId"],"name":session["name"]});
             return self.start(&payload, Some((id.to_owned(), file))).await;
         }
@@ -257,11 +579,31 @@ impl App {
             if request["sessionId"].as_str().is_some_and(|s| s != id) {
                 bail!("Interaction belongs to a different session");
             }
-            self.bridge_link(id)?;
+            let native = interaction["responseTransport"] == "rpc";
+            if native {
+                self.rpc_link(id)?;
+            } else {
+                self.bridge_link(id)?;
+            }
             validate_answer(&interaction, payload)?;
             self.store
                 .claim_interaction(interaction_id, request["id"].as_str().unwrap_or_default())?;
-            let result = self.bridge_command(id, action, payload.clone()).await;
+            let result = if native {
+                let mut response =
+                    json!({"type":"extension_ui_response","targetId":interaction_id});
+                if payload["cancelled"] == true {
+                    response["cancelled"] = json!(true);
+                } else if interaction["method"] == "ask" {
+                    response["answers"] = payload["answer"]["results"].clone();
+                } else if matches!(interaction["method"].as_str(), Some("confirm" | "approval")) {
+                    response["confirmed"] = payload["confirmed"].clone();
+                } else {
+                    response["value"] = payload["value"].clone();
+                }
+                self.native(id, response).await
+            } else {
+                self.bridge_command(id, action, payload.clone()).await
+            };
             match result {
                 Ok(data) => {
                     self.store.end_interaction(
@@ -298,6 +640,19 @@ impl App {
         if session["transport"] == "archive" {
             bail!("Archive is read-only; resume it before issuing commands");
         }
+        if matches!(action, "session.command" | "session.control") {
+            validate_control_identity(&session, payload)?;
+            let mut result = self.exchange(id, self.bridge_link(id)?, json!({"type":"command","action":action,"payload":payload,"operationId":required(request,"id")?})).await?;
+            if let Some(data) = result.as_object_mut() {
+                data.remove("_omputerState");
+                data.remove("_omputerMessages");
+                let current = self.store.get("session", id)?;
+                for key in ["journalId", "bindingRevision", "leafId"] {
+                    data.insert(key.to_owned(), current[key].clone());
+                }
+            }
+            return Ok(public_event(&result));
+        }
         if action == "agent.command" {
             return self.bridge_command(id, action, payload.clone()).await;
         }
@@ -308,7 +663,7 @@ impl App {
         let frame = match action {
             "session.prompt" | "session.steer" | "session.follow_up" => {
                 let message = payload["message"].as_str().context("message is required")?;
-                json!({"type":action.trim_start_matches("session."),"message":message,"images":payload["images"].as_array().cloned().unwrap_or_default()})
+                json!({"type":action.trim_start_matches("session."),"message":message,"images":payload["images"].as_array().cloned().unwrap_or_default(),"runCommands":payload["runCommands"].as_bool().unwrap_or(false),"expandPromptTemplates":payload["expandPromptTemplates"].as_bool().unwrap_or(false)})
             }
             "session.abort" => json!({"type":"abort"}),
             "session.model" => {
@@ -344,6 +699,12 @@ impl App {
         resume: Option<(String, PathBuf)>,
     ) -> Result<Value> {
         let _guard = self.starting.lock().await;
+        if self.update_pending.load(Ordering::SeqCst) {
+            return Err(command_error(
+                "update_pending",
+                "A local update is prepared; finish or cancel it before starting a session",
+            ));
+        }
         let project = self.store.get("project", required(payload, "projectId")?)?;
         let root = PathBuf::from(project["path"].as_str().context("Project root missing")?);
         if root.canonicalize()? != root {
@@ -360,12 +721,15 @@ impl App {
             .map(|(id, _)| id.clone())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         if let Some((_, file)) = &resume {
-            let (header, _) = archive::load(file)?;
-            archive::ensure_inactive(
-                &self.store,
-                header["id"].as_str().context("Missing native session id")?,
-                file,
-            )?;
+            let session = self.store.get("session", &id)?;
+            let (saved, native_id) = self.saved_source(&session)?;
+            if saved != *file {
+                bail!("Saved session source changed before resume");
+            }
+            archive::ensure_inactive(&self.store, &native_id, file)?;
+            if self.managed_children.lock().contains(&id) {
+                bail!("The previous managed process still owns this session; wait for its exit");
+            }
             if self
                 .links
                 .lock()
@@ -403,14 +767,7 @@ impl App {
         ) {
             command.arg("--model").arg(format!("{provider}/{model}"));
         }
-        let mut child = command.spawn().with_context(|| {
-            format!("Cannot launch {} --mode rpc-ui", self.config.omp.display())
-        })?;
-        let stdin = child.stdin.take().context("OMP stdin unavailable")?;
-        let stdout = child.stdout.take().context("OMP stdout unavailable")?;
-        let stderr = child.stderr.take().context("OMP stderr unavailable")?;
         let (tx, rx) = mpsc::channel(256);
-        self.links.lock().entry(id.clone()).or_default().rpc = Some(tx);
         let mut session = if resume.is_some() {
             self.store.get("session", &id)?
         } else {
@@ -422,23 +779,49 @@ impl App {
         session["transport"] = json!("rpc");
         session["status"] = json!("idle");
         session["updatedAt"] = json!(now());
-        session["capabilities"] = json!(rpc_capabilities());
+        session["capabilities"] = json!([]);
+        session["writerConnected"] = json!(true);
+        session["workState"] = json!("settled");
+        session["turnError"] = Value::Null;
+        session["lastError"] = Value::Null;
         self.store
             .put("session", &id, &session, Some("session.updated"))?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                session["status"] = json!("failed");
+                session["lastError"] = json!("Cannot launch the configured local OMP runtime");
+                self.set_inactive_capabilities(&mut session);
+                self.store
+                    .put("session", &id, &session, Some("session.updated"))?;
+                return Err(error).with_context(|| {
+                    format!("Cannot launch {} --mode rpc-ui", self.config.omp.display())
+                });
+            }
+        };
+        let stdin = child.stdin.take().context("OMP stdin unavailable")?;
+        let stdout = child.stdout.take().context("OMP stdout unavailable")?;
+        let stderr = child.stderr.take().context("OMP stderr unavailable")?;
+        self.managed_children.lock().insert(id.clone());
+        self.links.lock().entry(id.clone()).or_default().rpc = Some(tx);
         let (ready_tx, ready_rx) = oneshot::channel();
         let (failure_tx, mut failure_rx) = mpsc::unbounded_channel::<()>();
+        self.child_shutdown
+            .lock()
+            .insert(id.clone(), failure_tx.clone());
+        let (stdin_close_tx, stdin_close_rx) = oneshot::channel();
         let app = self.clone();
         let sid = id.clone();
         let failed = failure_tx.clone();
         tokio::spawn(async move {
-            write_frames(stdin, rx).await;
+            tokio::select! { _ = write_frames(stdin, rx) => {}, _ = stdin_close_rx => {} }
             app.fail_pending(&sid, false);
             let _ = failed.send(());
         });
         let app = self.clone();
         let sid = id.clone();
         let failed = failure_tx.clone();
-        tokio::spawn(async move {
+        let mut stdout_reader = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             let mut decoder = rpc_transport::Decoder::default();
             let mut ready = Some(ready_tx);
@@ -475,7 +858,30 @@ impl App {
         let app = self.clone();
         let sid = id.clone();
         tokio::spawn(async move {
-            let status = tokio::select! {status=child.wait()=>status,_=failure_rx.recv()=>{let _=child.start_kill();child.wait().await}};
+            let status = tokio::select! {
+                status = child.wait() => status,
+                _ = failure_rx.recv() => {
+                    // stdin EOF is OMP's durable dispose path. Only our exact spawned child
+                    // may be terminated, and only after bounded graceful teardown fails.
+                    if let Some(link) = app.links.lock().get_mut(&sid) { link.rpc = None; }
+                    app.fail_pending(&sid, false);
+                    let _ = stdin_close_tx.send(());
+                    match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
+                        Ok(status) => status,
+                        Err(_) => { let _ = child.start_kill(); child.wait().await }
+                    }
+                }
+            };
+            if tokio::time::timeout(Duration::from_secs(2), &mut stdout_reader)
+                .await
+                .is_err()
+            {
+                stdout_reader.abort();
+                let _ = stdout_reader.await;
+            }
+            let _cleanup_guard = app.starting.lock().await;
+            app.managed_children.lock().remove(&sid);
+            app.child_shutdown.lock().remove(&sid);
             if let Some(link) = app.links.lock().get_mut(&sid) {
                 link.rpc = None;
             }
@@ -485,7 +891,7 @@ impl App {
                     || status.as_ref().is_ok_and(|s| !s.success())
                     || session["status"] == "failed";
                 session["status"] = json!(if failed { "failed" } else { "closed" });
-                session["capabilities"] = json!([]);
+                app.set_inactive_capabilities(&mut session);
                 session["updatedAt"] = json!(now());
                 if failed {
                     if !session["lastError"].is_string() {
@@ -498,9 +904,10 @@ impl App {
                 let _ = app
                     .store
                     .put("session", &sid, &session, Some("session.updated"));
-                let _ = app.store.cancel_session_interactions(&sid);
+                let _ = app.cancel_transport_interactions(&sid, true);
             }
         });
+        drop(_guard);
         let ready = match tokio::time::timeout(Duration::from_secs(30), ready_rx).await {
             Ok(Ok(ready)) => ready,
             _ => {
@@ -669,8 +1076,109 @@ impl App {
             .put("session", id, &session, Some("session.updated"))?;
         Ok(())
     }
+    fn apply_control_state(&self, id: &str, previous: &Value, state: &Value) -> Result<()> {
+        let current = self.store.get("session", id)?;
+        if current["journalId"] != previous["journalId"]
+            || current["bindingRevision"] != previous["bindingRevision"]
+        {
+            return Err(command_error(
+                "stale_identity",
+                "Writer binding changed while the host control executed",
+            ));
+        }
+        let journal = required(state, "journalId")?;
+        let file = PathBuf::from(required(state, "sessionFile")?).canonicalize()?;
+        let (header, _) = archive::load(&file)?;
+        let root = PathBuf::from(required(&current, "cwd")?).canonicalize()?;
+        if header["id"] != journal
+            || Path::new(required(&header, "cwd")?).canonicalize()? != root
+            || Path::new(required(state, "cwd")?).canonicalize()? != root
+        {
+            return Err(command_error(
+                "source_mismatch",
+                "Control outcome source header or root differs from its registered writer",
+            ));
+        }
+        for other in self.store.list("session")? {
+            if other["id"] != id
+                && other["writerConnected"] == true
+                && (other["journalId"] == journal
+                    || other["sessionFile"]
+                        .as_str()
+                        .and_then(|p| Path::new(p).canonicalize().ok())
+                        .as_ref()
+                        == Some(&file))
+            {
+                return Err(command_error(
+                    "source_mismatch",
+                    "Another live writer already owns the control outcome",
+                ));
+            }
+        }
+        let mut next = current;
+        if next["journalId"] != journal || next["sessionFile"].as_str() != file.to_str() {
+            if next["originalSource"].is_null() {
+                next["originalSource"] = json!({"journalId":previous["journalId"],"sessionFile":previous["sessionFile"]});
+            }
+            next["journalId"] = json!(journal);
+            next["sessionFile"] = json!(file);
+        }
+        self.apply_state_inner(id, state, true, Some(next))
+    }
     fn apply_state(&self, id: &str, state: &Value, bridge: bool) -> Result<()> {
-        let mut session = self.store.get("session", id)?;
+        self.apply_state_inner(id, state, bridge, None)
+    }
+    fn apply_state_inner(
+        &self,
+        id: &str,
+        state: &Value,
+        bridge: bool,
+        session: Option<Value>,
+    ) -> Result<()> {
+        let mut session = match session {
+            Some(session) => session,
+            None => self.store.get("session", id)?,
+        };
+        migrate_identity(&mut session);
+        if bridge {
+            if let Some(journal) = state["journalId"].as_str() {
+                if session["journalId"]
+                    .as_str()
+                    .is_some_and(|current| current != journal)
+                {
+                    bail!("Runtime journal identity differs from the registered saved session");
+                }
+                session["journalId"] = json!(journal);
+            }
+        } else if let Some(provider) = state["sessionId"].as_str() {
+            session["providerSessionId"] = json!(provider);
+        }
+        for key in [
+            "leafId",
+            "hostControls",
+            "providerSessionId",
+            "queuedMessages",
+            "contextUsage",
+            "turnError",
+            "isStreaming",
+            "isCompacting",
+        ] {
+            if let Some(value) = state.get(key) {
+                session[key] = value.clone();
+            }
+        }
+        session["writerConnected"] = json!(
+            self.links
+                .lock()
+                .get(id)
+                .is_some_and(|link| link.rpc.is_some() || link.bridge.is_some())
+        );
+        session["bindingRevision"] = json!(
+            self.links
+                .lock()
+                .get(id)
+                .and_then(|link| link.bridge_generation.clone())
+        );
         if let Some(model) = state.get("model").filter(|m| m.is_object()) {
             session["model"] = public_model(model);
         }
@@ -710,11 +1218,13 @@ impl App {
                     .map(str::to_owned)
                     .collect::<Vec<_>>();
                 if let Some(advertised) = state["capabilities"].as_array() {
-                    for capability in advertised
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .filter(|s| s.starts_with("agent.") || *s == "interaction.respond")
-                    {
+                    for capability in advertised.iter().filter_map(Value::as_str).filter(|s| {
+                        s.starts_with("agent.")
+                            || *s == "interaction.respond"
+                            || *s == "project.checkpoint"
+                            || s.starts_with("session.control")
+                            || *s == "session.command"
+                    }) {
                         if !caps.iter().any(|c| c == capability) {
                             caps.push(capability.to_owned());
                         }
@@ -723,6 +1233,35 @@ impl App {
                 session["capabilities"] = json!(caps);
             }
         } else {
+            let mut capabilities = rpc_capabilities()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if self
+                .links
+                .lock()
+                .get(id)
+                .is_some_and(|link| link.bridge.is_some())
+            {
+                for capability in session["capabilities"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .filter(|capability| {
+                        capability.starts_with("agent.")
+                            || *capability == "project.checkpoint"
+                            || *capability == "interaction.respond"
+                            || capability.starts_with("session.control")
+                            || *capability == "session.command"
+                    })
+                {
+                    if !capabilities.iter().any(|existing| existing == capability) {
+                        capabilities.push(capability.to_owned());
+                    }
+                }
+            }
+            session["capabilities"] = json!(capabilities);
             session["status"] = json!(runtime_status(
                 state,
                 self.store
@@ -756,24 +1295,28 @@ impl App {
         if session["todos"] != self.store.get("session", id)?["todos"] {
             session["activityUpdatedAt"] = json!(now());
         }
-        if session["lastError"].is_string()
-            && !matches!(
-                session["status"].as_str(),
-                Some("running" | "disconnected" | "closed")
-            )
-        {
-            session["status"] = json!("failed");
-        }
+        session["workState"] = json!(work_state(
+            &session,
+            self.store
+                .list("interaction")?
+                .iter()
+                .any(|i| i["sessionId"] == id && i["status"] == "pending")
+        ));
         session["updatedAt"] = json!(now());
         self.store
             .put("session", id, &session, Some("session.updated"))?;
         Ok(())
     }
-    fn upsert_message(&self, id: &str, message: &Value) -> Result<()> {
+    fn upsert_message(&self, id: &str, message: &Value, event_id: Option<&str>) -> Result<()> {
         if !message["role"].is_string() {
             return Ok(());
         }
-        let mid = message_id(id, message);
+        let mid = message["_entryId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .or(event_id.filter(|id| !id.is_empty()))
+            .map(str::to_owned)
+            .unwrap_or_else(|| message_id(id, message));
         let msg = archive::message_view(message, &mid, &json!(now()));
         self.store.message(id, &mid, &msg)?;
         Ok(())
@@ -826,7 +1369,7 @@ impl App {
             let _ = self.notify(id, "error", message, None);
         }
     }
-    async fn frame(self: &Arc<Self>, session: &str, frame: Value, bridge: bool) -> Result<()> {
+    async fn frame(self: &Arc<Self>, session: &str, mut frame: Value, bridge: bool) -> Result<()> {
         if frame["type"] == "response" {
             if let Some(id) = frame["id"].as_str() {
                 let mut responses = self.responses.lock();
@@ -835,6 +1378,28 @@ impl App {
                     .is_some_and(|pending| pending.session == session && pending.bridge == bridge)
                     && let Some(pending) = responses.remove(id)
                 {
+                    if let Some(previous) = &pending.control_snapshot
+                        && let Some(state) = frame["data"]
+                            .get("_omputerState")
+                            .or(frame.get("_omputerState"))
+                    {
+                        if let Err(error) = self.apply_control_state(session, previous, state) {
+                            frame = json!({"type":"response","success":false,"error":{"code":error_code(&error),"message":error.to_string()}});
+                        } else if let Some(messages) = frame["data"]["_omputerMessages"].as_array()
+                        {
+                            let views = messages
+                                .iter()
+                                .filter(|m| m["role"].is_string())
+                                .map(|message| {
+                                    let mid = message_id(session, message);
+                                    archive::message_view(message, &mid, &message_time(message))
+                                })
+                                .collect::<Vec<_>>();
+                            if let Err(error) = self.store.replace_messages(session, &views) {
+                                frame = json!({"type":"response","success":false,"error":{"code":"outcome_unknown","message":error.to_string()}});
+                            }
+                        }
+                    }
                     let _ = pending.tx.send(frame);
                 }
             }
@@ -843,12 +1408,30 @@ impl App {
         let ty = frame["type"].as_str().unwrap_or_default();
         if bridge {
             match ty {
+                "operation_output" => {
+                    let operation = required(&frame, "operationId")?;
+                    let output_id = required(&frame, "outputId")?;
+                    let status = self.store.command_status(operation)?;
+                    if status["sessionId"] != session {
+                        bail!("Operation output belongs to another session");
+                    }
+                    self.store.command_output_once(
+                        operation,
+                        output_id,
+                        required(&frame, "kind")?,
+                        frame["text"].as_str().context("Output text missing")?,
+                    )?;
+                    self.bridge_link(session)?
+                        .send(json!({"type":"output_ack","outputId":output_id}))
+                        .await?;
+                    return Ok(());
+                }
                 "state" => return self.apply_state(session, &frame["session"], true),
                 "event" => {
                     self.process_event(session, &frame["event"])?;
                     return Ok(());
                 }
-                "interaction" => return self.interaction(session, &frame["request"]),
+                "interaction" => return self.interaction(session, &frame["request"], false),
                 "notification" => {
                     self.omp_notification(session, frame.get("data").unwrap_or(&frame))?;
                     return Ok(());
@@ -868,7 +1451,7 @@ impl App {
                                 json!({"type":"response","id":id,"success":true,"data":data})
                             }
                             Err(error) => {
-                                json!({"type":"response","id":id,"success":false,"error":{"code":"invalid_checkpoint","message":error.to_string()}})
+                                json!({"type":"response","id":id,"success":false,"error":{"code":if error.to_string().contains("memory_conflict") {"memory_conflict"} else {"invalid_checkpoint"},"message":error.to_string()}})
                             }
                         };
                         self.bridge_link(session)?
@@ -907,7 +1490,7 @@ impl App {
                 return Ok(());
             }
             if matches!(method, "select" | "confirm" | "input" | "editor" | "ask") {
-                self.interaction(session, &frame)?;
+                self.interaction(session, &frame, true)?;
             } else if method == "notify" {
                 let mut notification = frame.clone();
                 notification["nativeSource"] = json!(true);
@@ -934,6 +1517,11 @@ impl App {
             if ty == "omputer_command_error" {
                 notification["level"] = json!("error");
                 notification["message"] = event["error"].clone();
+                let mut session = self.store.get("session", id)?;
+                session["turnError"] = event["error"].clone();
+                session["workState"] = json!(work_state(&session, false));
+                self.store
+                    .put("session", id, &session, Some("session.updated"))?;
             }
             self.omp_notification(id, &notification)?;
             return Ok(());
@@ -945,7 +1533,7 @@ impl App {
             *self.revisions.lock().entry(id.to_owned()).or_default() += 1;
         }
         if matches!(ty, "message_start" | "message_update" | "message_end") {
-            self.upsert_message(id, &event["message"])?;
+            self.upsert_message(id, &event["message"], event["messageId"].as_str())?;
             self.record_activity(id, &event["message"], ty == "message_end")?;
         }
         let mut session = self.store.get("session", id)?;
@@ -953,14 +1541,13 @@ impl App {
         match ty {
             "agent_start" | "turn_start" => {
                 session["status"] = json!("running");
-                session["lastError"] = Value::Null;
+                session["turnError"] = Value::Null;
                 session["isSettled"] = json!(false);
                 changed = true;
             }
             "agent_end" => {
                 if let Some(messages) = event["messages"].as_array() {
                     for message in messages {
-                        self.upsert_message(id, message)?;
                         self.record_activity(id, message, true)?;
                     }
                 }
@@ -975,21 +1562,21 @@ impl App {
                         .find(|m| m["role"] == "assistant" && m["stopReason"] == "error")
                 });
                 if let Some(message) = error {
-                    session["lastError"] = json!(
+                    session["turnError"] = json!(
                         message["errorMessage"]
                             .as_str()
                             .unwrap_or("OMP assistant turn failed")
                     );
-                    session["status"] = json!("failed");
+                    session["status"] = json!("waiting");
                     self.notify(
                         id,
                         "error",
-                        session["lastError"]
+                        session["turnError"]
                             .as_str()
                             .unwrap_or("OMP assistant turn failed"),
                         None,
                     )?;
-                } else if !session["lastError"].is_string() {
+                } else if !session["turnError"].is_string() {
                     self.notify(id, "turn_done", "OMP turn ended", None)?;
                 }
             }
@@ -999,13 +1586,7 @@ impl App {
                     .list("interaction")?
                     .iter()
                     .any(|i| i["sessionId"] == id && i["status"] == "pending");
-                session["status"] = json!(if session["lastError"].is_string() {
-                    "failed"
-                } else if pending {
-                    "waiting"
-                } else {
-                    "idle"
-                });
+                session["status"] = json!(if pending { "waiting" } else { "idle" });
                 session["isSettled"] = json!(!pending);
                 session["hasPendingAsyncWork"] = json!(false);
                 changed = true;
@@ -1053,18 +1634,18 @@ impl App {
                 }
             }
             "prompt_result" if event["status"] == "error" => {
-                session["lastError"] = json!(
+                session["turnError"] = json!(
                     event["error"]["message"]
                         .as_str()
                         .or(event["error"].as_str())
                         .unwrap_or("OMP reported a prompt error")
                 );
-                session["status"] = json!("failed");
+                session["status"] = json!("idle");
                 changed = true;
                 self.notify(
                     id,
                     "error",
-                    session["lastError"].as_str().unwrap_or_default(),
+                    session["turnError"].as_str().unwrap_or_default(),
                     None,
                 )?;
             }
@@ -1072,17 +1653,17 @@ impl App {
                 if event["message"]["role"] == "assistant"
                     && event["message"]["stopReason"] == "error" =>
             {
-                session["lastError"] = json!(
+                session["turnError"] = json!(
                     event["message"]["errorMessage"]
                         .as_str()
                         .unwrap_or("OMP assistant turn failed")
                 );
-                session["status"] = json!("failed");
+                session["status"] = json!("waiting");
                 changed = true;
                 self.notify(
                     id,
                     "error",
-                    session["lastError"]
+                    session["turnError"]
                         .as_str()
                         .unwrap_or("OMP assistant turn failed"),
                     None,
@@ -1104,11 +1685,23 @@ impl App {
             _ => {}
         }
         if changed {
+            session["workState"] = json!(work_state(
+                &session,
+                self.store
+                    .list("interaction")?
+                    .iter()
+                    .any(|i| i["sessionId"] == id && i["status"] == "pending")
+            ));
             session["updatedAt"] = json!(now());
             self.store
                 .put("session", id, &session, Some("session.updated"))?;
         }
-        if !ty.is_empty() && ty != "response" {
+        if !ty.is_empty()
+            && !matches!(
+                ty,
+                "response" | "message_start" | "message_update" | "message_end"
+            )
+        {
             self.store.event(
                 "session.event",
                 Some(id),
@@ -1118,17 +1711,29 @@ impl App {
         }
         Ok(())
     }
-    fn interaction(&self, id: &str, request: &Value) -> Result<()> {
+    fn interaction(&self, id: &str, request: &Value, native: bool) -> Result<()> {
         let session = self.store.get("session", id)?;
         let rid = required(request, "id")?;
-        if self.store.get("interaction", rid).is_ok_and(|i| {
-            i["sessionId"] != id
-                || (i["status"] != "pending" && i["cancellationReason"] != "disconnect")
-        }) {
+        if let Ok(previous) = self.store.get("interaction", rid) {
+            // Identity, provenance and deadline are immutable while a host still waits.
+            if previous["sessionId"] != id
+                || previous["responseTransport"] != if native { "rpc" } else { "bridge" }
+                || (previous["status"] != "pending"
+                    && previous["cancellationReason"] != "disconnect")
+            {
+                return Ok(());
+            }
+            self.store.reconcile_pending_replay(rid, id)?;
+            let mut replay = previous;
+            replay["status"] = json!("pending");
+            replay.as_object_mut().unwrap().remove("cancellationReason");
+            self.store
+                .put("interaction", rid, &replay, Some("interaction.pending"))?;
             return Ok(());
         }
-        self.store.reconcile_pending_replay(rid, id)?;
         let mut interaction = json!({"id":rid,"sessionId":id,"projectId":session["projectId"],"method":request["method"],"title":request["title"].as_str().unwrap_or("OMP question"),"createdAt":request["createdAt"].as_str().unwrap_or(&now()),"status":"pending"});
+        interaction["responseTransport"] = json!(if native { "rpc" } else { "bridge" });
+        interaction["supportsNotes"] = json!(!native);
         for key in ["message", "options", "questions", "prefill", "expiresAt"] {
             if let Some(value) = request.get(key) {
                 interaction[key] = value.clone();
@@ -1222,9 +1827,52 @@ impl App {
         self.store.event("notification",Some(session),None,&json!({"id":Uuid::new_v4(),"kind":kind,"title":title,"body":message,"sessionId":session}))?;
         Ok(())
     }
+    async fn refresh_inactive_sessions(&self) -> Result<()> {
+        let _guard = self.starting.lock().await;
+        if self.update_pending.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        for mut session in self.store.list("session")? {
+            if session["transport"] == "archive"
+                || !matches!(
+                    session["status"].as_str(),
+                    Some("closed" | "failed" | "disconnected")
+                )
+                || self
+                    .links
+                    .lock()
+                    .get(session["id"].as_str().unwrap_or_default())
+                    .is_some_and(|link| link.rpc.is_some() || link.bridge.is_some())
+            {
+                continue;
+            }
+            let previous = session["capabilities"].clone();
+            self.set_inactive_capabilities(&mut session);
+            if previous != session["capabilities"] {
+                self.store.put(
+                    "session",
+                    required(&session, "id")?,
+                    &session,
+                    Some("session.updated"),
+                )?;
+            }
+        }
+        Ok(())
+    }
     pub async fn ipc(self: Arc<Self>, listener: UnixListener) {
+        let mut maintenance = tokio::time::interval(Duration::from_secs(15));
+        maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            match listener.accept().await {
+            let accepted = tokio::select! {
+                accepted = listener.accept() => accepted,
+                _ = maintenance.tick() => {
+                    if self.refresh_inactive_sessions().await.is_err() {
+                        eprintln!("Cannot refresh inactive OMP session ownership");
+                    }
+                    continue;
+                }
+            };
+            match accepted {
                 Ok((stream, _)) => {
                     let app = self.clone();
                     tokio::spawn(async move {
@@ -1256,9 +1904,16 @@ impl App {
         {
             bail!("Invalid local bridge registration credential");
         }
+        let registration_guard = self.starting.lock().await;
+        if self.update_pending.load(Ordering::SeqCst) {
+            return Err(command_error(
+                "update_pending",
+                "Local update is prepared; bridge will reconnect after it finishes",
+            ));
+        }
         let raw = &registration["session"];
         let managed = registration["managed"] == true;
-        let id = if managed {
+        let mut id = if managed {
             registration["managedSessionId"]
                 .as_str()
                 .or(raw["managedSessionId"].as_str())
@@ -1269,13 +1924,48 @@ impl App {
         }
         .to_owned();
         let root = PathBuf::from(required(raw, "cwd")?).canonicalize()?;
+        let source = raw["sessionFile"]
+            .as_str()
+            .and_then(|file| Path::new(file).canonicalize().ok());
+        if let Some(file) = &source {
+            let (header, _) = archive::load(file)?;
+            if header["id"] != raw["journalId"].as_str().unwrap_or(&id)
+                || Path::new(required(&header, "cwd")?).canonicalize()? != root
+            {
+                bail!("Bridge session source identity or root does not match its runtime");
+            }
+            if !managed {
+                for saved in self.store.list("session")? {
+                    if saved["sessionFile"]
+                        .as_str()
+                        .and_then(|path| Path::new(path).canonicalize().ok())
+                        .as_ref()
+                        == Some(file)
+                    {
+                        id = required(&saved, "id")?.to_owned();
+                        break;
+                    }
+                }
+            }
+        }
+        if self
+            .links
+            .lock()
+            .get(&id)
+            .is_some_and(|link| link.bridge.is_some())
+        {
+            bail!("Session already has a connected bridge; refusing duplicate initialization");
+        }
         let project = if managed {
             let s = self
                 .store
                 .get("session", &id)
                 .context("Managed bridge has no daemon-owned RPC session")?;
-            if s["transport"] != "rpc" || s["cwd"].as_str() != root.to_str() {
-                bail!("Managed bridge cwd does not match RPC session");
+            if !self.managed_children.lock().contains(&id)
+                || s["transport"] != "rpc"
+                || s["cwd"].as_str() != root.to_str()
+            {
+                bail!("Managed bridge is not owned by the matching live RPC process");
             }
             self.store.get(
                 "project",
@@ -1285,6 +1975,9 @@ impl App {
             self.store.register_project(&root, None)?
         };
         if !managed {
+            if self.managed_children.lock().contains(&id) {
+                bail!("Session still has an owned managed process; refusing a second writer");
+            }
             if self
                 .links
                 .lock()
@@ -1312,6 +2005,7 @@ impl App {
             link.bridge = Some(tx.clone());
             link.bridge_generation = Some(generation.clone());
         }
+        drop(registration_guard);
         let (close_tx, close_rx) = oneshot::channel();
         let (writer_failed_tx, mut writer_failed_rx) = oneshot::channel();
         let app = self.clone();
@@ -1325,11 +2019,32 @@ impl App {
                 app.fail_pending(&sid, true);
             }
         });
-        tx.send(json!({"type":"registered","sessionId":id,"projectId":project["id"]}))
-            .await?;
-        self.apply_state(&id, raw, true)?;
-        let result:Result<()>=async{loop{let next=tokio::select!{line=rpc_transport::line(&mut reader,rpc_transport::LOGICAL_BYTES)=>line?,_ = &mut writer_failed_rx=>bail!("Bridge command writer disconnected")};let Some(line)=next else{break;};let frame:Value=serde_json::from_str(&line)?;if frame.get("sessionId").is_some_and(|sid|sid.as_str()!=Some(id.as_str())){continue;}self.frame(&id,frame,true).await?;}Ok(())}.await;
+        let result: Result<()> = async {
+            tx.send(json!({"type":"registered","sessionId":id,"projectId":project["id"],"memoryRevision":project["memoryRevision"].as_u64().unwrap_or(0),"bindingRevision":generation}))
+                .await?;
+            self.apply_state(&id, raw, true)?;
+            loop {
+                let next = tokio::select! {
+                    line = rpc_transport::line(&mut reader, rpc_transport::LOGICAL_BYTES) => line?,
+                    _ = &mut writer_failed_rx => bail!("Bridge command writer disconnected"),
+                };
+                let Some(line) = next else {
+                    break;
+                };
+                let frame: Value = serde_json::from_str(&line)?;
+                if frame
+                    .get("sessionId")
+                    .is_some_and(|sid| sid.as_str() != Some(id.as_str()))
+                {
+                    continue;
+                }
+                self.frame(&id, frame, true).await?;
+            }
+            Ok(())
+        }
+        .await;
         let _ = close_tx.send(());
+        let _cleanup_guard = self.starting.lock().await;
         let disconnected = {
             let mut links = self.links.lock();
             if let Some(link) = links.get_mut(&id) {
@@ -1346,13 +2061,28 @@ impl App {
         };
         if disconnected {
             self.fail_pending(&id, true);
-            self.store.cancel_session_interactions(&id)?;
+            self.cancel_transport_interactions(&id, false)?;
             let mut session = self.store.get("session", &id)?;
+            session["writerConnected"] = json!(
+                self.links
+                    .lock()
+                    .get(&id)
+                    .is_some_and(|link| link.rpc.is_some())
+            );
+            session["bindingRevision"] = Value::Null;
+            session["workState"] = json!(work_state(&session, false));
             if !managed {
                 session["status"] = json!("disconnected");
-                session["capabilities"] = json!([]);
-            } else {
+                self.set_inactive_capabilities(&mut session);
+            } else if self
+                .links
+                .lock()
+                .get(&id)
+                .is_some_and(|link| link.rpc.is_some())
+            {
                 session["capabilities"] = json!(rpc_capabilities());
+            } else {
+                self.set_inactive_capabilities(&mut session);
             }
             session["updatedAt"] = json!(now());
             self.store
@@ -1376,6 +2106,75 @@ async fn write_frames<W: tokio::io::AsyncWrite + Unpin>(
         }
     }
 }
+fn migrate_identity(session: &mut Value) {
+    if !session["journalId"].is_string()
+        && let Some(legacy) = session["runtimeSessionId"].as_str().map(str::to_owned)
+    {
+        let header = session["sessionFile"]
+            .as_str()
+            .and_then(|file| archive::load(Path::new(file)).ok())
+            .map(|(header, _)| header);
+        let journal = header
+            .as_ref()
+            .filter(|header| header["cwd"] == session["cwd"])
+            .and_then(|header| header["id"].as_str());
+        if let Some(journal) = journal {
+            if journal != legacy {
+                session["providerSessionId"] = json!(legacy);
+            }
+            session["journalId"] = json!(journal);
+        } else {
+            session["journalId"] = json!(legacy);
+        }
+    }
+    session.as_object_mut().unwrap().remove("runtimeSessionId");
+}
+fn validate_control_identity(session: &Value, payload: &Value) -> Result<()> {
+    if !session["journalId"].is_string()
+        || !session["bindingRevision"].is_string()
+        || payload["expectedJournalId"] != session["journalId"]
+        || payload["expectedBindingRevision"] != session["bindingRevision"]
+    {
+        return Err(command_error(
+            "stale_identity",
+            "Session identity changed; refresh controls before executing",
+        ));
+    }
+    Ok(())
+}
+fn session_idle(session: &Value) -> bool {
+    session["isSettled"] == true
+        && session["hasPendingAsyncWork"] != true
+        && session["isStreaming"] != true
+        && session["isCompacting"] != true
+        && session["status"] == "idle"
+        && session["queuedMessages"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+}
+fn work_state(session: &Value, pending: bool) -> &'static str {
+    if session["writerConnected"] != true {
+        "disconnected"
+    } else if pending {
+        "human_wait"
+    } else if session["isStreaming"] == true
+        || session["isCompacting"] == true
+        || session["status"] == "running"
+    {
+        "running"
+    } else if session["queuedMessages"]
+        .as_array()
+        .is_some_and(|q| !q.is_empty())
+    {
+        "queued"
+    } else if session["hasPendingAsyncWork"] == true || session["isSettled"] == false {
+        "background"
+    } else if session["turnError"].is_string() {
+        "turn_error"
+    } else {
+        "settled"
+    }
+}
 fn required<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value[key]
         .as_str()
@@ -1386,6 +2185,9 @@ pub fn public_model(model: &Value) -> Value {
     json!({"provider":model["provider"],"id":model["id"],"name":model["name"].as_str().or(model["id"].as_str()).unwrap_or_default()})
 }
 pub fn message_id(session: &str, message: &Value) -> String {
+    if let Some(id) = message["_entryId"].as_str().filter(|id| !id.is_empty()) {
+        return id.to_owned();
+    }
     crate::security::hash(&format!(
         "{session}:{}:{}:{}",
         message["role"], message["timestamp"], message["toolCallId"]
@@ -1427,8 +2229,18 @@ pub(crate) fn public_event(value: &Value) -> Value {
                 .map(|(k, v)| {
                     (
                         k.clone(),
-                        if k == "model" && v.is_object() {
+                        if matches!(k.as_str(), "model" | "current" | "resolvedModel")
+                            && v.is_object()
+                        {
                             public_model(v)
+                        } else if k == "models" && v.is_array() {
+                            json!(
+                                v.as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(public_model)
+                                    .collect::<Vec<_>>()
+                            )
                         } else {
                             public_event(v)
                         },
@@ -1530,13 +2342,22 @@ fn validate_ask(interaction: &Value, payload: &Value) -> Result<()> {
                 return Err(invalid("Custom answer and note must be text"));
             }
         }
+        if (interaction["supportsNotes"] == false || interaction["responseTransport"] == "rpc")
+            && result["note"]
+                .as_str()
+                .is_some_and(|note| !note.trim().is_empty())
+        {
+            return Err(invalid(
+                "This native OMP question cannot preserve notes; remove the note before submitting",
+            ));
+        }
         let custom = result["customInput"]
             .as_str()
             .is_some_and(|s| !s.trim().is_empty());
         if question["multi"] != true && (selected.len() > 1 || (!selected.is_empty() && custom)) {
             return Err(invalid("Question is single-select"));
         }
-        if selected.is_empty() && !custom {
+        if question["multi"] != true && selected.is_empty() && !custom {
             return Err(invalid("Choose an option or enter a custom answer"));
         }
     }
@@ -1559,6 +2380,109 @@ mod tests {
             },
         )
     }
+    #[test]
+    fn canonical_ids_preserve_same_millisecond_repeats_and_stream_revisions_without_reset() {
+        let app = app();
+        let user = json!({"role":"user","timestamp":1792329478325i64,"content":[{"type":"text","text":"identical queued request"}]});
+        for id in ["67072843", "0f87e894"] {
+            app.process_event(
+                "s",
+                &json!({"type":"message_start","messageId":id,"message":user}),
+            )
+            .unwrap();
+            app.process_event(
+                "s",
+                &json!({"type":"message_end","messageId":id,"message":user}),
+            )
+            .unwrap();
+        }
+        let mut assistant = json!({"role":"assistant","timestamp":1792329478325i64,"content":[]});
+        app.process_event(
+            "s",
+            &json!({"type":"message_start","messageId":"stream-entry","message":assistant}),
+        )
+        .unwrap();
+        assistant["content"] = json!([{"type":"text","text":"streamed"}]);
+        app.process_event(
+            "s",
+            &json!({"type":"message_update","messageId":"stream-entry","message":assistant}),
+        )
+        .unwrap();
+        assistant["stopReason"] = json!("stop");
+        app.process_event(
+            "s",
+            &json!({"type":"message_end","messageId":"stream-entry","message":assistant}),
+        )
+        .unwrap();
+        app.process_event(
+            "s",
+            &json!({"type":"agent_end","messages":[user,user,assistant]}),
+        )
+        .unwrap();
+        let before = app.store.messages("s", i64::MAX, 100).unwrap();
+        assert_eq!(before["messages"].as_array().unwrap().len(), 3);
+        let pages = [
+            ("67072843", &user),
+            ("0f87e894", &user),
+            ("stream-entry", &assistant),
+        ]
+        .map(|(id, message)| {
+            let mut projected = message.clone();
+            projected["_entryId"] = json!(id);
+            let mid = message_id("s", &projected);
+            archive::message_view(&projected, &mid, &message_time(&projected))
+        });
+        let sequence = app.store.snapshot().unwrap()["sequence"].as_i64().unwrap();
+        app.store.replace_messages("s", &pages).unwrap();
+        app.store.replace_messages("s", &pages).unwrap();
+        assert_eq!(app.store.messages("s", i64::MAX, 100).unwrap(), before);
+        assert!(
+            !app.store
+                .journal(sequence, 100)
+                .unwrap()
+                .iter()
+                .any(|event| event["type"] == "session.event"
+                    && event["data"]["type"] == "transcript_reset")
+        );
+        let restarted = self::app();
+        restarted.store.replace_messages("s", &pages).unwrap();
+        let restored = restarted.store.messages("s", i64::MAX, 100).unwrap();
+        assert_eq!(
+            restored["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|message| message["id"].clone())
+                .collect::<Vec<_>>(),
+            before["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|message| message["id"].clone())
+                .collect::<Vec<_>>()
+        );
+        let mut grown = pages.to_vec();
+        grown.push(archive::message_view(
+            &user,
+            "next-entry",
+            &message_time(&user),
+        ));
+        app.store.replace_messages("s", &grown).unwrap();
+        let expanded = app.store.messages("s", i64::MAX, 100).unwrap();
+        assert_eq!(expanded["messages"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            &expanded["messages"].as_array().unwrap()[..3],
+            before["messages"].as_array().unwrap().as_slice()
+        );
+        assert!(
+            !app.store
+                .journal(sequence, 100)
+                .unwrap()
+                .iter()
+                .any(|event| event["type"] == "session.event"
+                    && event["data"]["type"] == "transcript_reset")
+        );
+    }
     fn ask() -> Value {
         json!({"id":"q","method":"ask","title":"Choose","questions":[{"id":"one","question":"First?","options":[{"label":"A"},{"label":"B"}],"multi":false}]})
     }
@@ -1568,7 +2492,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_ask_does_not_claim_or_cancel_and_correct_answer_succeeds() {
         let app = app();
-        app.interaction("s", &ask()).unwrap();
+        app.interaction("s", &ask(), false).unwrap();
         let (tx, mut rx) = mpsc::channel(8);
         app.links.lock().entry("s".into()).or_default().bridge = Some(tx);
         for answer in [
@@ -1603,7 +2527,7 @@ mod tests {
     #[tokio::test]
     async fn host_validation_releases_claim_and_desktop_resolution_survives_rejection() {
         let app = app();
-        app.interaction("s", &ask()).unwrap();
+        app.interaction("s", &ask(), false).unwrap();
         let (tx, mut rx) = mpsc::channel(8);
         app.links.lock().entry("s".into()).or_default().bridge = Some(tx);
         let worker = app.clone();
@@ -1647,26 +2571,196 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap_err();
-        assert_eq!(error_code(&result), "session_disconnected");
+        assert_eq!(error_code(&result), "outcome_unknown");
     }
     #[test]
     fn disconnect_pending_replay_clears_abandoned_claim_only() {
         let app = app();
-        app.interaction("s", &ask()).unwrap();
+        app.interaction("s", &ask(), false).unwrap();
         app.store.claim_interaction("q", "old").unwrap();
         app.store.cancel_session_interactions("s").unwrap();
-        app.interaction("s", &ask()).unwrap();
+        app.interaction("s", &ask(), false).unwrap();
         assert_eq!(
             app.store.get("interaction", "q").unwrap()["status"],
             "pending"
         );
         app.store.claim_interaction("q", "new").unwrap();
         app.store.end_interaction("q", "resolved").unwrap();
-        app.interaction("s", &ask()).unwrap();
+        app.interaction("s", &ask(), false).unwrap();
         assert_eq!(
             app.store.get("interaction", "q").unwrap()["status"],
             "resolved"
         );
+    }
+    #[test]
+    fn restart_recovers_valid_closed_failed_and_disconnected_sources_only() {
+        let app = app();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("saved.jsonl");
+        let native_id = Uuid::new_v4().to_string();
+        std::fs::write(
+            &source,
+            format!("{}\n", json!({"type":"session","id":native_id,"cwd":root})),
+        )
+        .unwrap();
+        app.store
+            .put("project", "p", &json!({"id":"p","path":root}), None)
+            .unwrap();
+        for status in ["closed", "failed", "disconnected", "running"] {
+            app.store.put("session", "s", &json!({"id":"s","runtimeSessionId":native_id,"projectId":"p","cwd":root,"transport":"rpc","status":status,"sessionFile":source,"capabilities":rpc_capabilities(),"updatedAt":now()}), None).unwrap();
+            app.initialize_disconnected().unwrap();
+            let recovered = app.store.get("session", "s").unwrap();
+            assert_eq!(
+                recovered["capabilities"],
+                json!(["session.resume"]),
+                "{status}"
+            );
+            assert_eq!(
+                recovered["status"],
+                if status == "running" {
+                    "disconnected"
+                } else {
+                    status
+                }
+            );
+        }
+        let mut changed = app.store.get("session", "s").unwrap();
+        changed["journalId"] = json!("another-native-session");
+        app.store.put("session", "s", &changed, None).unwrap();
+        app.initialize_disconnected().unwrap();
+        assert_eq!(
+            app.store.get("session", "s").unwrap()["capabilities"],
+            json!([])
+        );
+        changed["journalId"] = json!(native_id);
+        std::fs::write(&source, "not a session\n").unwrap();
+        app.store.put("session", "s", &changed, None).unwrap();
+        app.initialize_disconnected().unwrap();
+        assert_eq!(
+            app.store.get("session", "s").unwrap()["capabilities"],
+            json!([])
+        );
+    }
+    #[tokio::test]
+    async fn inactive_owned_process_recovers_after_its_actual_exit_without_archive_scan() {
+        let app = app();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("managed.jsonl");
+        let native_id = Uuid::new_v4().to_string();
+        std::fs::write(
+            &source,
+            format!("{}\n", json!({"type":"session","id":native_id,"cwd":root})),
+        )
+        .unwrap();
+        app.store
+            .put("project", "p", &json!({"id":"p","path":root}), None)
+            .unwrap();
+        app.store.put("session", "s", &json!({"id":"s","runtimeSessionId":native_id,"projectId":"p","cwd":root,"transport":"rpc","status":"failed","sessionFile":source,"capabilities":[],"updatedAt":now()}), None).unwrap();
+        app.managed_children.lock().insert("s".into());
+        app.refresh_inactive_sessions().await.unwrap();
+        assert_eq!(
+            app.store.get("session", "s").unwrap()["capabilities"],
+            json!([])
+        );
+        app.managed_children.lock().remove("s");
+        app.refresh_inactive_sessions().await.unwrap();
+        assert_eq!(
+            app.store.get("session", "s").unwrap()["capabilities"],
+            json!(["session.resume"])
+        );
+    }
+    #[tokio::test]
+    async fn update_reservation_waits_for_acknowledged_work_and_blocks_new_controls() {
+        let app = app();
+        let (tx, mut rx) = mpsc::channel(8);
+        app.links.lock().entry("s".into()).or_default().bridge = Some(tx);
+        let worker = app.clone();
+        let command = tokio::spawn(async move {
+            worker.command(&json!({"id":Uuid::new_v4().to_string(),"sessionId":"s","action":"session.rename","payload":{"name":"saved"}})).await
+        });
+        let request = rx.recv().await.unwrap();
+        assert_eq!(
+            error_code(&app.prepare_update().await.unwrap_err()),
+            "session_busy"
+        );
+        app.frame(
+            "s",
+            json!({"type":"response","id":request["id"],"success":true,"data":{"name":"saved"}}),
+            true,
+        )
+        .await
+        .unwrap();
+        command.await.unwrap().unwrap();
+        app.managed_children.lock().insert("dead-link-child".into());
+        assert_eq!(app.managed_rpc_sessions(), 1);
+        assert_eq!(
+            error_code(&app.prepare_update().await.unwrap_err()),
+            "session_busy"
+        );
+        app.managed_children.lock().clear();
+        app.links.lock().get_mut("s").unwrap().bridge = None;
+        assert_eq!(app.prepare_update().await.unwrap()["prepared"], true);
+        assert_eq!(
+            error_code(
+                &app.command(&json!({"action":"session.refresh","sessionId":"s","payload":{}}))
+                    .await
+                    .unwrap_err()
+            ),
+            "update_pending"
+        );
+        assert_eq!(app.cancel_update().await["prepared"], false);
+    }
+    #[tokio::test]
+    async fn native_note_rejection_preserves_question_and_disconnect_is_transport_scoped() {
+        let app = app();
+        app.interaction("s", &ask(), true).unwrap();
+        let mut bridge_ask = ask();
+        bridge_ask["id"] = json!("bridge-question");
+        app.interaction("s", &bridge_ask, false).unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        app.links.lock().entry("s".into()).or_default().rpc = Some(tx);
+        let mut payload = submitted();
+        payload["answer"]["results"][0]["note"] = json!("Never silently drop this context");
+        assert_eq!(error_code(&app.command(&json!({"id":Uuid::new_v4().to_string(),"action":"interaction.respond","payload":payload})).await.unwrap_err()), "invalid_answer");
+        app.store
+            .claim_interaction("q", "after-validation")
+            .unwrap();
+        assert_eq!(
+            app.store.get("interaction", "q").unwrap()["status"],
+            "pending"
+        );
+        app.cancel_transport_interactions("s", false).unwrap();
+        assert_eq!(
+            app.store.get("interaction", "q").unwrap()["status"],
+            "pending"
+        );
+        assert_eq!(
+            app.store.get("interaction", "bridge-question").unwrap()["status"],
+            "cancelled"
+        );
+        app.cancel_transport_interactions("s", true).unwrap();
+        assert_eq!(
+            app.store.get("interaction", "q").unwrap()["status"],
+            "cancelled"
+        );
+    }
+    #[test]
+    fn replay_cannot_change_provenance_question_or_absolute_deadline() {
+        let app = app();
+        let mut original = ask();
+        original["expiresAt"] = json!("2099-01-01T00:00:00Z");
+        app.interaction("s", &original, false).unwrap();
+        let mut replay = ask();
+        replay["questions"][0]["options"] = json!([{"label":"replaced"}]);
+        replay["expiresAt"] = json!("2199-01-01T00:00:00Z");
+        app.interaction("s", &replay, true).unwrap();
+        app.interaction("s", &replay, false).unwrap();
+        let stored = app.store.get("interaction", "q").unwrap();
+        assert_eq!(stored["responseTransport"], "bridge");
+        assert_eq!(stored["questions"], original["questions"]);
+        assert_eq!(stored["expiresAt"], original["expiresAt"]);
     }
     #[test]
     fn project_activity_ignores_deltas_local_commands_and_synthetic_prompts() {
@@ -1715,7 +2809,11 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(app.store.get("session", "s").unwrap()["status"], "failed");
+        assert_eq!(app.store.get("session", "s").unwrap()["status"], "idle");
+        assert_eq!(
+            app.store.get("session", "s").unwrap()["turnError"],
+            "provider failed"
+        );
         assert!(
             app.store
                 .journal(0, 1000)
@@ -1736,5 +2834,157 @@ mod tests {
         assert!(events.iter().any(|event| event["type"] == "notification"
             && event["data"]["kind"] == "error"
             && event["data"]["body"] == "custom failure"));
+    }
+    #[test]
+    fn fresh_provider_identity_does_not_replace_persisted_journal_or_disable_failed_turn() {
+        let app = app();
+        let (tx, _rx) = mpsc::channel(8);
+        app.links.lock().entry("s".into()).or_default().rpc = Some(tx);
+        let mut session = app.store.get("session", "s").unwrap();
+        session["runtimeSessionId"] = json!("journal-original");
+        app.store.put("session", "s", &session, None).unwrap();
+        app.apply_state("s",&json!({"sessionId":"provider-fresh","isStreaming":false,"isCompacting":false,"isSettled":true,"hasPendingAsyncWork":false}),false).unwrap();
+        app.process_event("s",&json!({"type":"agent_end","messages":[{"role":"assistant","stopReason":"error","errorMessage":"offline","content":[],"timestamp":1}]})).unwrap();
+        app.apply_state("s",&json!({"sessionId":"provider-another","isStreaming":false,"isCompacting":false,"isSettled":true,"hasPendingAsyncWork":false}),false).unwrap();
+        let saved = app.store.get("session", "s").unwrap();
+        assert_eq!(saved["journalId"], "journal-original");
+        assert_eq!(saved["providerSessionId"], "provider-another");
+        assert!(saved.get("runtimeSessionId").is_none());
+        assert_eq!(saved["writerConnected"], true);
+        assert_eq!(saved["status"], "idle");
+        assert_eq!(saved["workState"], "turn_error");
+        assert!(
+            saved["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|cap| cap == "session.prompt")
+        );
+    }
+    #[tokio::test]
+    async fn acknowledged_branch_updates_same_visible_object_before_following_state_and_rejects_old_binding()
+     {
+        let app = app();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("branch.jsonl");
+        std::fs::write(
+            &source,
+            format!(
+                "{}\n",
+                json!({"type":"session","id":"journal-next","cwd":root})
+            ),
+        )
+        .unwrap();
+        let mut session = app.store.get("session", "s").unwrap();
+        session["cwd"] = json!(root);
+        session["journalId"] = json!("journal-original");
+        session["bindingRevision"] = json!("binding-one");
+        app.store.put("session", "s", &session, None).unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        app.links.lock().insert(
+            "s".into(),
+            Links {
+                bridge: Some(tx),
+                bridge_generation: Some("binding-one".into()),
+                ..Default::default()
+            },
+        );
+        let worker = app.clone();
+        let call = tokio::spawn(async move {
+            worker.command(&json!({"id":"public-operation","sessionId":"s","action":"session.control","payload":{"control":"branch","arguments":{"entryId":"entry"},"expectedJournalId":"journal-original","expectedBindingRevision":"binding-one"}})).await
+        });
+        let request = rx.recv().await.unwrap();
+        assert_eq!(request["operationId"], "public-operation");
+        let state = json!({"journalId":"journal-next","providerSessionId":"provider-next","sessionFile":source,"cwd":root,"status":"idle","isSettled":true,"hasPendingAsyncWork":false});
+        app.frame("s",json!({"type":"response","id":request["id"],"success":true,"data":{"branched":true,"_omputerState":state}}),true).await.unwrap();
+        // This frame may arrive before the command future gets polled again.
+        app.apply_state("s", &state, true).unwrap();
+        assert_eq!(call.await.unwrap().unwrap()["branched"], true);
+        let saved = app.store.get("session", "s").unwrap();
+        assert_eq!(saved["journalId"], "journal-next");
+        assert_eq!(saved["originalSource"]["journalId"], "journal-original");
+        assert_eq!(app.store.list("session").unwrap().len(), 1);
+        let error = app.command(&json!({"id":"stale","sessionId":"s","action":"session.control","payload":{"expectedJournalId":"journal-original","expectedBindingRevision":"binding-one"}})).await.unwrap_err();
+        assert_eq!(error_code(&error), "stale_identity");
+    }
+    #[tokio::test]
+    async fn idle_close_refuses_external_writer_before_signalling_any_managed_child() {
+        let app = app();
+        let (tx, _rx) = mpsc::channel(8);
+        app.links
+            .lock()
+            .entry("terminal".into())
+            .or_default()
+            .bridge = Some(tx);
+        app.managed_children.lock().insert("s".into());
+        let (shutdown, mut signals) = mpsc::unbounded_channel();
+        app.child_shutdown.lock().insert("s".into(), shutdown);
+        assert_eq!(
+            error_code(&app.close_idle_managed().await.unwrap_err()),
+            "session_busy"
+        );
+        assert!(signals.try_recv().is_err());
+        assert!(!app.update_pending.load(Ordering::SeqCst));
+        assert_eq!(
+            app.update_blockers().await.unwrap()["blockers"][0]["kind"],
+            "external_writer"
+        );
+    }
+    #[tokio::test]
+    async fn replayed_output_is_durable_once_and_cross_session_output_never_acknowledges() {
+        let app = app();
+        let operation = Uuid::new_v4().to_string();
+        app.store
+            .begin_command(
+                &operation,
+                &json!({"id":operation,"sessionId":"s","action":"session.command","payload":{}}),
+            )
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        app.links.lock().entry("s".into()).or_default().bridge = Some(tx);
+        let frame = json!({"type":"operation_output","operationId":operation,"outputId":"output-1","kind":"command","text":"actual output"});
+        app.frame("s", frame.clone(), true).await.unwrap();
+        app.frame("s", frame.clone(), true).await.unwrap();
+        assert_eq!(rx.recv().await.unwrap()["type"], "output_ack");
+        assert_eq!(rx.recv().await.unwrap()["type"], "output_ack");
+        assert_eq!(
+            app.store.command_output_page(&operation, 0, 100).unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(app.frame("other", frame, true).await.is_err());
+        assert!(rx.try_recv().is_err());
+    }
+    #[test]
+    fn identity_transition_rejects_wrong_header_without_mutating_original_binding() {
+        let app = app();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let file = root.join("source.jsonl");
+        std::fs::write(
+            &file,
+            format!(
+                "{}\n",
+                json!({"type":"session","id":"header-real","cwd":root})
+            ),
+        )
+        .unwrap();
+        let mut saved = app.store.get("session", "s").unwrap();
+        saved["journalId"] = json!("old");
+        saved["bindingRevision"] = json!("binding");
+        saved["cwd"] = json!(root);
+        app.store.put("session", "s", &saved, None).unwrap();
+        let error = app
+            .apply_control_state(
+                "s",
+                &saved,
+                &json!({"journalId":"header-forged","sessionFile":file,"cwd":root}),
+            )
+            .unwrap_err();
+        assert_eq!(error_code(&error), "source_mismatch");
+        assert_eq!(app.store.get("session", "s").unwrap(), saved);
     }
 }

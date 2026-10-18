@@ -8,6 +8,8 @@ import 'projects.dart';
 import 'interactions.dart';
 import 'session.dart';
 import 'settings.dart';
+import 'models.dart';
+import 'project_files.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -36,15 +38,70 @@ class _OmputerAppState extends State<OmputerApp> with WidgetsBindingObserver {
       perform(navigator.currentContext ?? context, widget.controller.reloadConnection);
     }
   }
+  String? _visibleSession() {
+    String? sessionId;
+    void visit(Element element) {
+      final screen = element.widget;
+      if (screen is SessionScreen && ModalRoute.of(element)?.isCurrent == true) sessionId = screen.sessionId;
+      element.visitChildren(visit);
+    }
+    navigator.currentContext?.visitChildElements(visit);
+    return sessionId;
+  }
+
+  void _shareNotice(BuildContext context, Json data, String identity) {
+    final controller = widget.controller;
+    final sessionId = _visibleSession();
+    showDialog<void>(context: context, builder: (dialogContext) => AlertDialog(
+      title: Text(data['shareError'] is String ? 'Görseller alınamadı' : 'Paylaşılan görseller hazır'),
+      content: SingleChildScrollView(child: Text(data['shareError'] is String
+        ? '${data['shareError']}\n\nGörselleri kaynak uygulamadan yeniden paylaşabilir veya konuşmadaki galeriden ekleyebilirsin. Taslağın değiştirilmedi.'
+        : 'Görseller henüz taslağa eklenmedi ve gönderilmedi. ${sessionId == null ? 'Bir konuşma seç, ardından' : 'Bu konuşmada'} “Paylaşılan görselleri ekle” düğmesini kullan. Yazdığın metin korunur.')),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Kapat')),
+        if (data['sharedImages'] == true) FilledButton(onPressed: () {
+          Navigator.pop(dialogContext);
+          if ('${controller.localState['identity'] ?? ''}' != identity) return;
+          if (sessionId == null) _chooseSharedSession(context, identity);
+        }, child: Text(sessionId == null ? 'Konuşma seç' : 'Konuşmaya dön')),
+      ],
+    ));
+  }
+
+  void _chooseSharedSession(BuildContext context, String identity) {
+    final controller = widget.controller;
+    showDialog<void>(context: context, builder: (dialogContext) => AlertDialog(
+      title: const Text('Görseller için konuşma seç'),
+      content: SizedBox(width: double.maxFinite, child: ListView(shrinkWrap: true, children: [
+        if (controller.snapshot.sessions.isEmpty) const Text('Henüz konuşma yok. Projelerden bir oturum aç; ardından paylaşılan görselleri ekle.'),
+        for (final session in controller.snapshot.sessions) ListTile(
+          title: Text(session.name), subtitle: Text(controller.snapshot.project(session.projectId)?.name ?? session.projectId),
+          trailing: const Icon(Icons.chevron_right_rounded),
+          onTap: () {
+            Navigator.pop(dialogContext);
+            if ('${controller.localState['identity'] ?? ''}' != identity) return;
+            openScreen(context, SessionScreen(controller: controller, sessionId: session.id));
+          },
+        ),
+      ])),
+      actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Vazgeç'))],
+    ));
+  }
   void _navigate() {
     final data = widget.controller.pendingNavigation;
     if (data == null || !widget.controller.ready) return;
+    widget.controller.consumeNavigation();
+    final identity = '${widget.controller.localState['identity'] ?? ''}';
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || navigator.currentContext == null) return;
+      if (!mounted || navigator.currentContext == null || '${widget.controller.localState['identity'] ?? ''}' != identity) return;
       final controller = widget.controller;
-      controller.consumeNavigation();
-      navigator.currentState!.popUntil((route) => route.isFirst);
       final ctx = navigator.currentContext!;
+      if (data['sharedImages'] == true || data['shareError'] is String) {
+        _shareNotice(ctx, data, identity);
+        return;
+      }
+      if (data['bundle'] is! String && data['interactionId'] is! String && data['sessionId'] is! String) return;
+      navigator.currentState!.popUntil((route) => route.isFirst);
       if (data['bundle'] is String) {
         openScreen(ctx, PairingScreen(controller: controller, initialBundle: data['bundle'] as String));
       } else if (data['interactionId'] is String) {
@@ -53,6 +110,7 @@ class _OmputerAppState extends State<OmputerApp> with WidgetsBindingObserver {
         openScreen(ctx, SessionScreen(controller: controller, sessionId: data['sessionId'] as String));
       }
     });
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
   @override
   void dispose() {
@@ -95,6 +153,7 @@ class _HomeScreenState extends State<HomeScreen> {
   int destination = 0;
   String query = '', filter = 'all';
   final search = TextEditingController();
+  final _projectOrder = StableActivityOrder();
   @override
   void dispose() { search.dispose(); super.dispose(); }
   @override
@@ -118,27 +177,29 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _projects(BuildContext context) {
     final c = widget.controller;
     final needle = query.trim().toLowerCase();
-    final projects = c.snapshot.projects.where((p) {
+    final ordered = c.snapshot.projects.toList();
+    _projectOrder.apply(ordered, (p) => p.id, (p) => p.updatedAt);
+    final pins = object(object(c.localState['sections'])['pins']);
+    final projects = ordered.where((p) {
       final sessions = c.snapshot.sessions.where((s) => s.projectId == p.id);
-      final matches = '${p.name} ${p.goal} ${p.summary} ${p.nextStep} ${p.path} ${sessions.map((s) => s.name).join(' ')}'.toLowerCase().contains(needle);
-      return matches && (filter != 'waiting' || c.snapshot.pending.any((i) => i.projectId == p.id)) && (filter != 'live' || sessions.any((s) => !s.archived));
-    }).toList()..sort((a, b) => (b.updatedAt ?? DateTime(1970)).compareTo(a.updatedAt ?? DateTime(1970)));
-    return RefreshIndicator(onRefresh: c.refresh, child: CustomScrollView(physics: const AlwaysScrollableScrollPhysics(), slivers: [
+      final matches = '${p.name} ${p.goal} ${p.summary} ${p.nextStep} ${p.path}'.toLowerCase().contains(needle);
+      return matches && (filter != 'waiting' || c.snapshot.pending.any((i) => i.projectId == p.id)) && (filter != 'live' || sessions.any((s) => !s.archived)) && (filter != 'pinned' || pins['project:${p.id}'] == true);
+    }).toList();
+    final matchingSessions = needle.isEmpty ? <Session>[] : c.snapshot.sessions.where((s) => '${s.name} ${s.cwd}'.toLowerCase().contains(needle)).toList();
+    return RefreshIndicator(onRefresh: c.refresh, child: CustomScrollView(key: const PageStorageKey('project-overview'), physics: const AlwaysScrollableScrollPhysics(), slivers: [
       SliverToBoxAdapter(child: ConnectionBanner(c)),
       if (c.error != null) SliverToBoxAdapter(child: ErrorNotice(c.error!, onRetry: () => perform(context, () async { c.clearError(); await c.reconnect(); }))),
-      if (c.snapshot.pending.isNotEmpty) SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 8, 24, 20), child: Material(color: Theme.of(context).colorScheme.secondaryContainer, borderRadius: BorderRadius.circular(20), child: InkWell(borderRadius: BorderRadius.circular(20), onTap: () => setState(() => destination = 1), child: Padding(padding: const EdgeInsets.all(20), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [const Icon(Icons.pending_actions_rounded), const SizedBox(width: 16), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('${c.snapshot.pending.length} karar seni bekliyor', style: Theme.of(context).textTheme.titleMedium), const SizedBox(height: 6), Text(c.snapshot.pending.first.title, maxLines: 2, overflow: TextOverflow.ellipsis)])), const Icon(Icons.arrow_forward_rounded)])))))),
+      if (c.snapshot.pending.isNotEmpty) SliverToBoxAdapter(child: ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 24), leading: const Icon(Icons.pending_actions_rounded), title: Text('${c.snapshot.pending.length} karar seni bekliyor'), subtitle: Text(c.snapshot.pending.first.title, maxLines: 1, overflow: TextOverflow.ellipsis), trailing: const Icon(Icons.chevron_right_rounded), onTap: () => setState(() => destination = 1))),
       SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 8, 24, 0), child: Text('Kaldığın yerden.', style: Theme.of(context).textTheme.headlineLarge?.copyWith(fontWeight: FontWeight.w600, letterSpacing: -.7)))),
-      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 20, 24, 8), child: TextField(controller: search, onChanged: (s) => setState(() => query = s), decoration: InputDecoration(hintText: 'Proje veya oturum ara', prefixIcon: const Icon(Icons.search_rounded), suffixIcon: query.isEmpty ? null : IconButton(tooltip: 'Aramayı temizle', onPressed: () { search.clear(); setState(() => query = ''); }, icon: const Icon(Icons.close_rounded)))))),
-      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: Wrap(spacing: 8, children: [('all', 'Tümü'), ('waiting', 'Karar bekleyen'), ('live', 'Canlı oturumu olan')].map((item) => FilterChip(label: Text(item.$2), selected: filter == item.$1, onSelected: (_) => setState(() => filter = item.$1))).toList()))),
-      if (projects.isEmpty) SliverToBoxAdapter(child: EmptyState(icon: Icons.folder_open_rounded, title: c.snapshot.projects.isEmpty ? 'Projelerin bilgisayardan gelir.' : 'Eşleşen proje yok.', message: c.snapshot.projects.isEmpty ? 'Omputer bilgisayarındaki kayıtlı OMP projelerini ve oturumlarını otomatik bulur. Henüz kayıt yoksa ilk OMP çalışmandan sonra burada görünür. Bilgisayar uygulamasından keşif durumunu inceleyebilirsin.' : 'Başka bir arama dene veya filtreyi değiştir. Kayıtlı veriler çevrimdışıyken de okunabilir.')),
-      SliverList.builder(itemCount: projects.length, itemBuilder: (context, index) {
-        final p = projects[index];
-        final activity = p.activity;
-        final goal = p.goal.isNotEmpty ? p.goal : activity?.goal ?? '';
-        final next = p.nextStep.isNotEmpty ? p.nextStep : activity?.nextStep ?? '';
-        final latest = activity?.lastAssistantText ?? '';
-        return Column(children: [InkWell(onTap: () => openScreen(context, ProjectScreen(controller: c, projectId: p.id)), child: Padding(padding: const EdgeInsets.fromLTRB(24, 22, 24, 24), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: Text(p.name, style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w600))), const SizedBox(width: 12), const Icon(Icons.arrow_forward_rounded, size: 20)]), if (goal.isNotEmpty) ...[const SizedBox(height: 10), Text(goal, maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodyLarge)], if (latest.isNotEmpty) ...[const SizedBox(height: 14), Text(latest, maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant))], const SizedBox(height: 14), Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Icon(Icons.commit_rounded, size: 20, color: Theme.of(context).colorScheme.primary), const SizedBox(width: 10), Expanded(child: Text(next.isEmpty ? activity?.pendingCount != null && activity!.pendingCount > 0 ? '${activity.pendingCount} karar yanıtını bekliyor' : 'Son konuşmayı açıp kaldığın yerden devam et' : next, maxLines: 2, overflow: TextOverflow.ellipsis))]), const SizedBox(height: 12), Text('${p.sessionCount} oturum · ${dateLabel(activity?.updatedAt ?? p.updatedAt)}', style: Theme.of(context).textTheme.labelMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant))]))), const Padding(padding: EdgeInsets.symmetric(horizontal: 24), child: Divider())]);
-      }),
+      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 20, 24, 8), child: TextField(controller: search, onChanged: (s) => setState(() => query = s), onSubmitted: (s) { if (s.trim().isNotEmpty) openScreen(context, SessionSearchScreen(controller: c, initialQuery: s)); }, decoration: InputDecoration(labelText: 'Proje veya oturum ara', prefixIcon: const Icon(Icons.search_rounded), suffixIcon: query.isEmpty ? null : IconButton(tooltip: 'Aramayı temizle', onPressed: () { search.clear(); setState(() => query = ''); }, icon: const Icon(Icons.close_rounded)))))),
+      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: Wrap(spacing: 8, children: [('all', 'Tümü'), ('waiting', 'Karar bekleyen'), ('live', 'Canlı oturumu olan'), ('pinned', 'Sabitlenen')].map((item) => FilterChip(label: Text(item.$2), selected: filter == item.$1, onSelected: (_) => setState(() => filter = item.$1))).toList()))),
+      if (needle.isNotEmpty) ...[
+        const SliverToBoxAdapter(child: SectionHeading('Eşleşen oturumlar')),
+        SliverList.builder(itemCount: matchingSessions.length, itemBuilder: (context, index) => LocalSessionRow(controller: c, session: matchingSessions[index], key: ValueKey('search:${matchingSessions[index].id}'))),
+        SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: OutlinedButton.icon(onPressed: c.connection.connected ? () => openScreen(context, SessionSearchScreen(controller: c, initialQuery: query)) : null, icon: const Icon(Icons.manage_search_rounded), label: const Text('Konuşma içeriğinde ara')))),
+      ],
+      if (projects.isEmpty && matchingSessions.isEmpty) SliverToBoxAdapter(child: EmptyState(icon: Icons.folder_open_rounded, title: c.snapshot.projects.isEmpty ? 'Projelerin bilgisayardan gelir.' : 'Eşleşen proje yok.', message: c.snapshot.projects.isEmpty ? 'Bilgisayarındaki kayıtlı OMP projeleri ve oturumları otomatik bulunur. İlk çalışmandan sonra burada görünür.' : 'Başka bir arama dene veya filtreyi değiştir.')),
+      SliverList.builder(itemCount: projects.length, itemBuilder: (context, index) => ProjectOverviewRow(controller: c, project: projects[index], key: ValueKey(projects[index].id))),
       const SliverPadding(padding: EdgeInsets.only(bottom: 100)),
     ]));
   }

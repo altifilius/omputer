@@ -15,8 +15,15 @@ class DiscoveryNative implements NativeAdapter {
     calls.add((method, args));
     switch (method) {
       case 'connection': return {'paired': approved, 'connected': approved};
+      case 'connect': return {'paired': approved, 'connected': approved};
       case 'snapshot': return {'sequence': 1, 'projects': approved ? [{'id': 'new-project', 'name': 'New PC'}] : []};
       case 'preferences': return {'theme': 'system'};
+      case 'localState': return {'identity': approved ? 'test-server:test-device' : null, 'sections': <String, dynamic>{}};
+      case 'localStateSet': return {'identity': approved ? 'test-server:test-device' : null, 'sections': <String, dynamic>{}};
+      case 'operationList': return <Json>[];
+      case 'sharedImages': return <Json>[];
+      case 'operationSave':
+      case 'operationRemove': return null;
       case 'notifications': return true;
       case 'discover': return {'scanning': args!['enabled']};
       case 'pairRequest': return selectedRequest?.future ?? {'requestId': 'request', 'verificationCode': '123456', 'serverName': 'PC', 'fingerprint': 'pin'};

@@ -7,7 +7,7 @@ type UiMethod = (...args: unknown[]) => unknown;
 interface Request extends WireFrame { id: string; sessionId: string; method: string; title: string;
   createdAt: string; status: string; options?: { label: string; description?: string }[]; questions?: Question[]; }
 interface PendingDialog { id: string; request: Request; accept: (payload: WireFrame) => unknown;
-  finish: (value: unknown, status: string) => void; }
+  finish: (value: unknown, status: string) => void; cancel: () => void; }
 function invalid(message: string): never { throw Object.assign(new Error(message), { code: 'invalid_answer' }); }
 
 export function validateAsk(questions: Question[], answer: unknown): AskResult {
@@ -32,7 +32,7 @@ export function validateAsk(questions: Question[], answer: unknown): AskResult {
     if (note !== undefined && typeof note !== 'string') return invalid('Note must be text');
     const customInput = typeof custom === 'string' ? custom.trim() || undefined : undefined;
     if (!question.multi && (selected.length > 1 || (selected.length > 0 && customInput))) return invalid('Question is single-select');
-    if (!selected.length && !customInput) return invalid('Choose an option or enter a custom answer');
+    if (!question.multi && !selected.length && !customInput) return invalid('Choose an option or enter a custom answer');
     return { id: question.id, question: question.question, options: labels, multi: question.multi ?? false,
       selectedOptions: selected, customInput, ...(typeof note === 'string' ? { note } : {}) };
   }) };
@@ -55,16 +55,19 @@ function underlyingMethod(ui: ExtensionUIContext, key: string): UiMethod | undef
 export class DialogBridge {
   private pending = new Map<string, PendingDialog>();
   private restore: (() => void)[] = [];
+  private installation?: { active: boolean };
   constructor(private sessionId: () => string, private send: (frame: WireFrame) => boolean,
     private isReady: () => boolean, private managed: boolean, private changed: () => void) {}
   get waiting() { return this.pending.size > 0; }
   install(ui: ExtensionUIContext) {
-    if (this.restore.length) return;
+    if (this.installation) return;
+    const installation = this.installation = { active: true };
     for (const method of ['select', 'confirm', 'input', 'editor', 'askDialog']) {
       const original = underlyingMethod(ui, method);
       if (!original && method !== 'askDialog') continue;
       const descriptor = Object.getOwnPropertyDescriptor(ui, method);
-      const wrapper = (...args: unknown[]) => this.dialog(method, args, original);
+      const wrapper = (...args: unknown[]) => installation.active ? this.dialog(method, args, original) :
+        original ? original(...args) : Promise.resolve(method === 'confirm' ? false : undefined);
       Object.defineProperty(ui, method, { value: wrapper, writable: true, configurable: true, enumerable: true });
       this.restore.push(() => {
         if (Object.getOwnPropertyDescriptor(ui, method)?.value !== wrapper) return;
@@ -75,7 +78,9 @@ export class DialogBridge {
     if (notify) {
       const descriptor = Object.getOwnPropertyDescriptor(ui, 'notify');
       const wrapper = (message: string, level?: string) => {
-        try { this.send({ type: 'event', sessionId: this.sessionId(), event: { type: 'notification', message, level } }); } catch {}
+        if (installation.active) {
+          try { this.send({ type: 'event', sessionId: this.sessionId(), event: { type: 'notification', message, level } }); } catch {}
+        }
         return notify(message, level);
       };
       Object.defineProperty(ui, 'notify', { value: wrapper, writable: true, configurable: true, enumerable: true });
@@ -95,11 +100,13 @@ export class DialogBridge {
   reconnect() {
     for (const pending of this.pending.values()) {
       // The host is still waiting: replay the same first-answer fence and absolute deadline.
-      this.send({ type: 'interaction', sessionId: this.sessionId(), request: pending.request });
+      this.send({ type: 'interaction', sessionId: pending.request.sessionId, request: pending.request });
     }
   }
   close() {
-    for (const pending of [...this.pending.values()]) pending.finish(undefined, 'cancelled');
+    if (this.installation) this.installation.active = false;
+    this.installation = undefined;
+    for (const pending of [...this.pending.values()]) pending.cancel();
     for (const restore of this.restore.splice(0).reverse()) restore();
   }
   private dialog(method: string, args: unknown[], original?: UiMethod): Promise<unknown> {
@@ -129,11 +136,11 @@ export class DialogBridge {
       this.pending.delete(pending.id); clearTimeout(timer);
       opts.signal?.removeEventListener('abort', onAbort);
       localAbort.abort();
-      this.send({ type: 'interaction_end', sessionId: this.sessionId(), id: pending.id, status });
+      this.send({ type: 'interaction_end', sessionId: request.sessionId, id: pending.id, status });
       this.changed();
       if (error) reject(error); else resolve(value);
     };
-    const pending: PendingDialog = { id: request.id, request, finish, accept: payload => {
+    const pending: PendingDialog = { id: request.id, request, finish, cancel: onAbort, accept: payload => {
       if (payload.cancelled === true) return defaultValue;
       if (approval || method === 'confirm') {
         if (typeof payload.confirmed !== 'boolean') return invalid('Confirmation must be a boolean');
@@ -149,7 +156,16 @@ export class DialogBridge {
     this.send({ type: 'interaction', sessionId: this.sessionId(), request });
     this.changed();
     if (typeof opts.timeout === 'number' && opts.timeout > 0) {
-      timer = setTimeout(() => { try { opts.onTimeout?.(); } catch {} finish(defaultValue, 'expired'); }, opts.timeout);
+      timer = setTimeout(() => {
+        try { opts.onTimeout?.(); } catch {}
+        const value = request.questions ? { kind: 'submit', results: request.questions.map(question => {
+          const labels = question.options.map(option => option.label);
+          const index = Math.min(Math.max(question.recommended ?? 0, 0), Math.max(labels.length - 1, 0));
+          return { id: question.id, question: question.question, options: labels, multi: question.multi ?? false,
+            selectedOptions: labels[index] === undefined ? [] : [labels[index]], timedOut: true };
+        }) } : defaultValue;
+        finish(value, 'expired');
+      }, opts.timeout);
       timer.unref?.();
     }
     if (!this.managed && original) {

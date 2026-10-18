@@ -96,7 +96,9 @@ impl AdminSocket {
                         let app = app.clone(); let state = state.clone(); let token = token.clone();
                         clients.spawn(async move {
                             let _permit = permit;
-                            let _ = tokio::time::timeout(Duration::from_secs(30), connection(stream,app,state,&token)).await;
+                            // Each request read is bounded below. An admitted backup
+                            // must finish and release maintenance even if its UI closes.
+                            let _ = connection(stream,app,state,&token).await;
                         });
                     },
                     _ = clients.join_next(), if !clients.is_empty() => {},
@@ -199,9 +201,61 @@ async fn action(
             let snapshot = app.store.snapshot()?;
             let discovery = state.discovery.lock().clone();
             let urls = state.urls.lock().clone();
+            let components = crate::backup::components(app);
+            let blockers = app.update_blockers().await?;
             Ok(
-                json!({"serverId":state.server_id,"serverName":state.server_name,"fingerprint":state.fingerprint,"certificate":state.certificate,"port":state.port,"urls":urls,"ready":state.ready.load(Ordering::Acquire),"projects":snapshot["projects"].as_array().map_or(0,Vec::len),"sessions":snapshot["sessions"].as_array().map_or(0,Vec::len),"pendingPairs":state.pending_pairs(),"devices":snapshot["devices"],"discovery":discovery}),
+                json!({"serverId":state.server_id,"serverName":state.server_name,"fingerprint":state.fingerprint,"certificate":state.certificate,"port":state.port,"urls":urls,"ready":state.ready.load(Ordering::Acquire),"projects":snapshot["projects"].as_array().map_or(0,Vec::len),"sessions":snapshot["sessions"].as_array().map_or(0,Vec::len),"pendingPairs":state.pending_pairs(),"devices":snapshot["devices"],"discovery":discovery,"managedRpcSessions":app.managed_rpc_sessions(),"components":components,"update":blockers,"backups":crate::backup::list(&app.config.state_dir)?}),
             )
+        }
+        "update.prepare" => {
+            empty(payload)?;
+            app.prepare_update().await
+        }
+        "update.cancel" => {
+            empty(payload)?;
+            Ok(app.cancel_update().await)
+        }
+        "update.blockers" => {
+            empty(payload)?;
+            app.update_blockers().await
+        }
+        "update.closeIdle" => {
+            empty(payload)?;
+            app.close_idle_managed().await
+        }
+        "update.resume" => {
+            let session = identifier(payload, "sessionId")?;
+            app.command(&json!({"id":uuid::Uuid::new_v4().to_string(),"action":"session.resume","sessionId":session,"payload":{}})).await
+        }
+        "backup.create" => {
+            empty(payload)?;
+            app.prepare_update().await?;
+            let owned = app.clone();
+            let result = tokio::task::spawn_blocking(move || crate::backup::create(&owned)).await;
+            app.cancel_update().await;
+            result?
+        }
+        "backup.restore" => {
+            let id = identifier(payload, "backupId")?;
+            app.prepare_update().await?;
+            let result = crate::backup::schedule_restore(&app.config.state_dir, id);
+            if result.is_err() {
+                app.cancel_update().await;
+            }
+            result
+        }
+        "backup.cancelRestore" => {
+            empty(payload)?;
+            let request = app.config.state_dir.join("restore.request");
+            if request.exists() {
+                fs::remove_file(request)?;
+            }
+            Ok(app.cancel_update().await)
+        }
+        "diagnosis.export" => {
+            empty(payload)?;
+            let diagnosis = crate::backup::diagnosis(app).await?;
+            crate::backup::export_diagnosis(&app.config.state_dir, &diagnosis)
         }
         "pair.approve" => {
             state.decide_pair(identifier(payload, "requestId")?, true)?;

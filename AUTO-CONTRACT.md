@@ -4,25 +4,30 @@ User correction: no terminal commands, manual service start, project registratio
 
 ## Deliverable
 
-Linux desktop app (Rust/egui) launched by double-click: self-contained bundle includes `omputer`, patched compiled `omp-runtime`, and `bridge/` files; no Cargo/Bun/git download at user startup. Running `omputer` without a subcommand opens native PC application; existing explicit CLI subcommands remain diagnostic/developer interfaces, not onboarding. Desktop app handles single instance, installation to user-owned application directory, desktop-menu entry, enabled user service/autostart fallback, daemon health/readiness, LAN listener address/ephemeral port, current pair approval requests, devices and truthful status. No global compositor/browser manipulation. Closing desktop window does not stop daemon.
+Linux desktop app (Rust/egui) launched by double-click: self-contained bundle includes `omputer`, patched compiled `omp-runtime`, and `bridge/` files; no Cargo/Bun/git download at user startup. Running `omputer` without a subcommand opens native PC application; explicit CLI subcommands remain diagnostic/developer interfaces, not onboarding. Desktop owns installation, menu/service/autostart, readiness, a stable private LAN port, local approval, devices and truthful staged-versus-running update status. No global compositor/browser manipulation. Closing the window does not stop the daemon.
 
-## Exclusive implementation boundaries
-
-- Desktop owner: `pc/src/desktop.rs`, `pc/src/setup.rs`, `pc/src/supervisor.rs`; integration `main.rs` optional command/default desktop entry; root packaging owned by parent. May add eframe dependency to pc/Cargo.toml in coordination.
-- Service owner: `pc/src/discovery.rs`, `pc/src/local_admin.rs`, `pc/src/autodiscover.rs`, plus `server.rs`, `runtime.rs`, `archive.rs`, `store.rs` as needed; do not edit main.rs or Cargo.toml. Parent coordinates service initialization. No tests/build/lint/format while work runs.
-- Android owner: all `mobile/**`, including native Kotlin discovery, Flutter pairing/controller/settings, tests. Keep native-channel model, single-authority credentials and direct connection. No root contract/docs edits.
-- Parent: root contracts/docs/assets/scripts, OMP runtime build/core bundle and final integration/verification. Shared initializer APIs below fixed before edits.
 
 ## Desktop/service local admin
 
 Mode0600 Unix `<stateDir>/admin.sock`; same-user token `<stateDir>/bridge.token`. JSONL one request/response connection `{token,id,action,payload}` -> `{id,success,data?,error?:{code,message}}`. Desktop uses this, never network auth bypass. Actions:
-- `status` -> `{serverId,serverName,port,urls:[https origins],ready,projects,sessions,pendingPairs:[],devices:[],discovery:{...}}` counts allowed.
+- `status` -> `{serverId,serverName,fingerprint,certificate,port,urls,ready,projects,sessions,pendingPairs,devices,discovery,managedRpcSessions,components,update,backups}`; project/session values are counts. Component identity is distinct from staged package metadata.
 - `pair.approve` `{requestId}` -> `{approved:true}`; `pair.deny` `{requestId}` -> `{denied:true}`.
 - `pair.bundle` `{}` -> standard one-use bundle with automatically selected LAN URL; desktop can display real QR.
 - `device.revoke` `{deviceId}` -> `{revoked:true}`.
 - `rescan` -> import/discovery result.
+- `update.prepare` -> `{prepared:true,managedRpcSessions:0}` only after acknowledged work drains and all owned native children exit; reserves admission until application or cancellation. `update.cancel` releases reservation. Old daemons without the handshake are not forcibly restarted.
+- `update.blockers` reports actual managed/external writer and in-flight work blockers. `update.closeIdle` saves/flushes and closes only settled managed writers; active work, human decisions or external terminal ownership reject rather than force termination. `update.resume` `{sessionId}` uses the normal safe-resume command and lease checks.
+- `backup.create` prepares admission, creates a local manifest/checksummed backup, then releases admission. `backup.restore` `{backupId}` validates and schedules restore for normal service startup; success retains the preparation reservation. `backup.cancelRestore` cancels the pending request and releases it. No live database replacement is implied.
+- `diagnosis.export` creates a private local diagnostic export. Authenticated HTTPS `/v1/diagnostics` is read-only; backup/restore/admin remain on owner-only IPC.
+
+Backups are same-computer only: server ID and TLS fingerprint must match. TLS keys/certificate and bridge token are never backed up or replaced. Restore retains current device authorization/revocations, removes pairing challenges and never replays commands. Source journals restore to private copies, never overwrite original terminal journals. Manifests/checksums and bounded owned regular-file validation are checked before restore. Diagnostics/components show running daemon/runtime/bridge and staging/update information without exporting provider credentials.
+The authoritative SQLite database is opened through same-user regular-file validation without the 1 GiB component/journal cap. Migration creates an online SQLite recovery snapshot before schema changes; it does not truncate history to fit an archive limit. Explicit backup/restore bundles remain bounded to 8 GiB total, with 1 GiB per journal/component and the remaining total budget available to the database.
 
 Stable serverId generated once in private state. TLS fingerprint exact pin identity already exists. Mode0700 dir and mode0600 sockets/tokens. Admin not exposed on HTTP. Each action validates and bounds inputs.
+Reopening a newer package stages its byte-verified resources and integrations before activating the existing window. Locally edited/unrelated integrations are preserved and surfaced as warnings; unrelated units are not enabled/restarted. Applying a prepared update targets only the authenticated app-owned service or exact fallback child. Terminal OMP processes load bridge changes on their next normal launch, not through hot module replacement.
+
+The selected port persists in mode-0600 `lan-port`; fresh installations default to 8787, explicit user-service overrides take precedence. Busy-port recovery keeps the saved port. Network route changes rebind only HTTPS/advertisements inside the existing daemon, preserving native ownership, local admin/scanner and pending pairing.
+
 
 ## LAN discovery
 
@@ -37,7 +42,7 @@ Desktop local approval requires the human to compare the same six-digit code sho
 
 ## Service initialization APIs
 
-`LocalServices::start(app: Arc<App>, address: SocketAddr, server_name: &str) -> anyhow::Result<LocalServices>` in service module (owner may use `discovery::LocalServices` facade). Holds mDNS, admin socket, auto archive scanner and pair request queue for daemon lifetime. Uses app.store/config, automatic stable identity. Server router public pairing handlers need shared queue accessible via App (owner adds field). `main.rs` owner calls this after TCP bind, before OMPUTER_READY. Desktop admin status health checks do not leak model credentials.
+`LocalServices` owns local admin, discovery and automatic archive scanning for daemon lifetime. The HTTPS listener may rebind while these services and native runtime ownership remain alive. Public pairing handlers use the shared local pairing queue. Readiness follows listener/service initialization; desktop health/status must not leak model credentials.
 
 ## Automatic session/project discovery
 
@@ -53,4 +58,4 @@ Auto NSD updates for previously paired serverId may update only URL (never cert/
 
 ## Verification
 
-Must prove default native desktop path launches/prepares daemon with no shell bootstrap, repeated open reuses one daemon, crashed daemon restart bounded, service survives UI close, auto archive/project import, LAN discovery and approval/claim token single-use, unapproved request cannot control, Android actual discovery/pairing UI and native screenshots. Native desktop capture uses isolated Xvfb for automated input/screenshot (not user's compositor). Android emulator may need private virtual network for mDNS/UDP; state network limitation rather than test fake production endpoints. Build final release APK and self-contained desktop distribution.
+Required acceptance covers default native desktop startup with no shell bootstrap, daemon reuse/recovery, UI-close survival, read-only archive import, discovery/pairing single-use authorization, safe update/backup blockers, and Android real native flows. Evidence and remaining limits belong in `VERIFICATION.md`, not in an assumed release claim. Desktop automation uses isolated Xvfb, not the user's compositor. Emulator network constraints must be reported honestly. Physical Samsung acceptance is not claimed here; that device belongs to another session. Source changes do not establish newly packaged or installed artifacts.

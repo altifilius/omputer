@@ -19,13 +19,7 @@ use omputer::{
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{
-    fs::{self, OpenOptions},
-    net::SocketAddr,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{fs, net::SocketAddr, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
 
 #[derive(Parser)]
 #[command(
@@ -149,9 +143,52 @@ async fn run() -> Result<()> {
         bail!("--background cannot be combined with a diagnostic subcommand");
     }
     let command = cli.command.unwrap();
-    let hosts = match &command {
+    let mut hosts = match &command {
         Commands::Serve { tls_host, .. } => tls_host.clone(),
         _ => Vec::new(),
+    };
+    if matches!(&command, Commands::Serve { .. })
+        && std::env::var_os("OMPUTER_AUTOMATIC_LAN").is_some_and(|value| value == "1")
+    {
+        let ip = supervisor::automatic_address(0)?.ip().to_string();
+        if !hosts.contains(&ip) {
+            hosts.push(ip);
+        }
+    }
+    let _diagnostic_guard = if !matches!(&command, Commands::Serve { .. }) {
+        setup::private_dir(&dir)?;
+        let guard = setup::lock(&dir.join("daemon.lock"))?;
+        guard.try_lock_exclusive().context("The running service owns this database; use the native application's controls instead of an offline diagnostic mutation")?;
+        Some(guard)
+    } else {
+        None
+    };
+    // Acquire the single-writer lease before opening/migrating SQLite. Restore
+    // never swaps a database underneath a live Store or HTTP/bridge listener.
+    setup::private_dir(&dir)?;
+    let daemon_guard = if matches!(&command, Commands::Serve { .. }) {
+        let guard = setup::lock(&dir.join("daemon.lock"))?;
+        guard
+            .try_lock_exclusive()
+            .context("Another Omputer daemon already owns this state directory")?;
+        omputer::backup::recover_interrupted_restore(&dir)?;
+        if let Err(error) = omputer::backup::apply_pending_restore(&dir) {
+            omputer::backup::recover_interrupted_restore(&dir)?;
+            setup::atomic_write(
+                &dir.join("restore-error"),
+                format!("Restore rejected; original database retained: {error:#}").as_bytes(),
+                0o600,
+            )?;
+            if dir.join("restore.request").exists() {
+                fs::rename(
+                    dir.join("restore.request"),
+                    dir.join(format!("restore-rejected-{}.request", uuid::Uuid::new_v4())),
+                )?;
+            }
+        }
+        Some(guard)
+    } else {
+        None
     };
     security::initialize(&dir, &hosts)?;
     let server_name = match &command {
@@ -161,10 +198,18 @@ async fn run() -> Result<()> {
         }
         _ => fs::read_to_string(dir.join("server-name")).unwrap_or_else(|_| "Omputer".into()),
     };
-    let store = Arc::new(Store::open(
-        &dir.join("omputer.sqlite"),
-        server_name.clone(),
-    )?);
+    let opened = if daemon_guard.is_some() {
+        omputer::backup::open_store_recovering(&dir, server_name.clone())
+    } else {
+        Store::open(&dir.join("omputer.sqlite"), server_name.clone())
+    };
+    if opened.is_err() && daemon_guard.is_some() {
+        omputer::backup::finish_restore(&dir, false)?;
+    }
+    let store = Arc::new(opened?);
+    if daemon_guard.is_some() {
+        omputer::backup::finish_restore(&dir, true)?;
+    }
     match command {
         Commands::Project { command } => match command {
             ProjectCommands::Add { path, name } => println!(
@@ -255,17 +300,11 @@ async fn run() -> Result<()> {
             let automatic =
                 std::env::var_os("OMPUTER_AUTOMATIC_LAN").is_some_and(|value| value == "1");
             if automatic {
-                listen = supervisor::automatic_address(listen.port())?;
+                listen = supervisor::automatic_address(supervisor::automatic_port(
+                    &dir,
+                    listen.port(),
+                )?)?;
             }
-            let lock = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .mode(0o600)
-                .open(dir.join("daemon.lock"))?;
-            lock.try_lock_exclusive()
-                .context("Another Omputer daemon already owns this state directory")?;
             let socket = dir.join("bridge.sock");
             if socket.exists() {
                 if tokio::net::UnixStream::connect(&socket).await.is_ok() {
@@ -300,6 +339,8 @@ async fn run() -> Result<()> {
             };
             let app = App::new(store, config);
             app.initialize_disconnected()?;
+            // Capture immutable running hashes before publishing the admin API.
+            omputer::backup::components(&app);
             tokio::spawn(app.clone().ipc(listener));
             rustls::crypto::ring::default_provider()
                 .install_default()
@@ -309,13 +350,27 @@ async fn run() -> Result<()> {
                 dir.join("key.pem"),
             )
             .await?;
-            let listener = std::net::TcpListener::bind(listen)
-                .with_context(|| format!("Cannot bind {listen}; choose --listen HOST:PORT"))?;
+            let listener = loop {
+                match std::net::TcpListener::bind(listen) {
+                    Ok(listener) => break listener,
+                    Err(error) if automatic => {
+                        setup::atomic_write(&dir.join("listener-error"),
+                            format!("Yerel HTTPS {listen} adresinde başlatılamadı: {error}. Bağlantı noktası korunuyor; 5 saniyede yeniden deneniyor. Bu noktayı kullanan diğer uygulamayı kapatın veya Omputer kullanıcı hizmetindeki --listen ayarını düzeltin.").as_bytes(), 0o600)?;
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        listen = supervisor::automatic_address(listen.port())?;
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("Cannot bind {listen}; choose --listen HOST:PORT")
+                        });
+                    }
+                }
+            };
             listener.set_nonblocking(true)?;
-            let address = listener.local_addr()?;
-            let _local_services = LocalServices::start(app.clone(), address, &server_name)?;
-            let handle = axum_server::Handle::new();
-            let shutdown = handle.clone();
+            let mut address = listener.local_addr()?;
+            let mut local_services = LocalServices::start(app.clone(), address, &server_name)?;
+            fs::remove_file(dir.join("listener-error")).ok();
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
             tokio::spawn(async move {
                 let mut terminate =
                     match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -324,40 +379,55 @@ async fn run() -> Result<()> {
                         Err(_) => return,
                     };
                 tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
-                shutdown.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+                let _ = shutdown_tx.send(true);
             });
-            let network_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            if automatic {
-                let shutdown = handle.clone();
-                let changed = network_changed.clone();
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        if supervisor::automatic_address(address.port())
-                            .is_ok_and(|next| next.ip() != address.ip())
-                        {
-                            changed.store(true, std::sync::atomic::Ordering::Release);
-                            shutdown.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
-                            break;
+            let mut listener = listener;
+            'listeners: loop {
+                println!("OMPUTER_READY=https://{address}");
+                let handle = axum_server::Handle::new();
+                let serving_handle = handle.clone();
+                let router = server::router(app.clone());
+                let config = tls.clone();
+                let mut serving = tokio::spawn(async move {
+                    axum_server::from_tcp_rustls(listener, config)
+                        .handle(serving_handle)
+                        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+                        .await
+                });
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                loop {
+                    tokio::select! {
+                        outcome = &mut serving => {
+                            outcome.context("HTTPS listener task stopped")??;
+                            break 'listeners;
+                        }
+                        _ = shutdown_rx.changed() => {
+                            handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+                            serving.await.context("HTTPS shutdown failed")??;
+                            break 'listeners;
+                        }
+                        _ = interval.tick(), if automatic => {
+                            let next = supervisor::automatic_address(address.port())?;
+                            if next.ip() == address.ip() { continue; }
+                            match std::net::TcpListener::bind(next) {
+                                Ok(next_listener) => {
+                                    next_listener.set_nonblocking(true)?;
+                                    handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+                                    serving.await.context("HTTPS rebind failed")??;
+                                    local_services.update_address(next).await?;
+                                    local_services.listener_error(None);
+                                    address = next;
+                                    listener = next_listener;
+                                    continue 'listeners;
+                                }
+                                Err(error) => local_services.listener_error(Some(format!(
+                                    "Yerel ağ adresi {next} henüz açılamadı: {error}. Çalışan oturumlar korunuyor; 5 saniyede yeniden deneniyor."))),
+                            }
                         }
                     }
-                });
+                }
             }
-            println!("OMPUTER_READY=https://{address}");
-            if !address.ip().is_loopback() {
-                eprintln!(
-                    "Explicit LAN/VPN listener enabled on {address}. Restrict network access to trusted devices; no public relay or router changes are configured."
-                );
-            }
-            axum_server::from_tcp_rustls(listener, tls)
-                .handle(handle)
-                .serve(server::router(app).into_make_service_with_connect_info::<SocketAddr>())
-                .await?;
             fs::remove_file(socket).ok();
-            drop(lock);
-            if network_changed.load(std::sync::atomic::Ordering::Acquire) {
-                bail!("Private LAN route changed; supervisor will safely rebind");
-            }
         }
     }
     Ok(())

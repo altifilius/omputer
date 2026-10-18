@@ -1,0 +1,48 @@
+diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
+--- a/packages/coding-agent/src/index.ts
++++ b/packages/coding-agent/src/index.ts
+@@ -1,6 +1,7 @@
+ import { HookEditorComponent, HookInputComponent, HookSelectorComponent } from "./modes/components";
+ 
+ // Core session management
++export { AgentLifecycleManager } from "./registry/agent-lifecycle";
+ 
+ export * as zod from "@oh-my-pi/omptype/zod";
+ export { z } from "@oh-my-pi/omptype/zod";
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-mode.ts b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+--- a/packages/coding-agent/src/modes/rpc/rpc-mode.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+@@ -389,6 +389,12 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
+ 	if (isRpcExtensionUIResponse(parsed)) {
+ 		const pending = deps.pendingExtensionRequests.get(parsed.id);
+ 		if (pending) pending.resolve(parsed);
++		if (parsed.responseId) {
++			deps.output(pending
++				? { type: "response", id: parsed.responseId, command: "extension_ui_response", success: true, data: { delivered: true } }
++				: { type: "response", id: parsed.responseId, command: "extension_ui_response", success: false,
++					error: { code: "stale_interaction", message: "Question is no longer pending" } });
++		}
+ 		return true;
+ 	}
+ 
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-types.ts b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+--- a/packages/coding-agent/src/modes/rpc/rpc-types.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+@@ -872,7 +872,7 @@ export interface RpcHostUriResult {
+ // ============================================================================
+ 
+ /** Response to an extension UI request */
+-export type RpcExtensionUIResponse =
++export type RpcExtensionUIResponse = { responseId?: string } & (
+ 	| { type: "extension_ui_response"; id: string; value: string }
+ 	| { type: "extension_ui_response"; id: string; confirmed: boolean }
+ 	| { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean }
+@@ -881,7 +881,7 @@ export type RpcExtensionUIResponse =
+ 			type: "extension_ui_response";
+ 			id: string;
+ 			answers: Array<{ id: string; selectedOptions: string[]; customInput?: string }>;
+-	  };
++	  });
+ 
+ // ============================================================================
+ // Helper type for extracting command types
