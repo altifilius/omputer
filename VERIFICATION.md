@@ -1,8 +1,24 @@
 # Verification record
 
+## October 20 Samsung connected acceptance — Android 1.1.0 (4)
+
+The final signed APK was read back from Samsung SM-G990E with exact SHA-256 `86e98ec9313951a7a41f98cbbe8b635e9e7911613ffc1d035861ad172df1da86`, version **1.1.0 / 4**, original `firstInstallTime` and existing phone authorization. No reinstall, data clear or re-pair occurred. After earlier USB `-71` / libusb errors, the owner reported improved stability on the same port; actual ADB shell, screenshots and interactive checks then succeeded. This does not establish which physical USB condition changed.
+
+| Exercised flow | Observed result | Boundary |
+| --- | --- | --- |
+| Direct connection and reconnect | Settings showed **Bağlı** at `https://192.168.1.107:33975`; **Şimdi yeniden dene** replaced peer port `60062` with `56554`, retaining server ID, certificate, fingerprint, port, phone authorization and app PID | Real Wi-Fi, no ADB reverse tunnel, router/firewall change or PC-service restart |
+| Structured selection | Actual bundled OMP received **Mavi**; command `c49f9be9-938a-4af9-a058-c11de74c929b` succeeded and the phone showed **Yanıtlandı** with the accepted answer | Real bridge dialog, Unix IPC and phone HTTPS/WSS; no model inference |
+| Exclusive custom answer | Selecting **Özel yanıt** cleared the offered selection; actual OMP received `selectedOptions: []`, `customInput: "morcivert-110"`; command `c03be695-fc37-4d3f-8bf9-c8ce4220dca6` succeeded | Single-choice custom mode and actual native keyboard exercised, not every form/accessibility variant |
+| Background notification reply | With the launcher foreground, the actual **Samsung bildirim yanıtı** notification exposed **Cevapla** / Android RemoteInput. Sending `Bildirim-110-tamam` resolved command `4ffe28a6-39c1-4910-9c1c-ceaf9ab96dc5`; OMP received that exact text and the question notification retired while Omputer remained backgrounded | Background connection was enabled only for this test, then restored to its original **off** state; no Doze/overnight guarantee |
+| Bounded stability and preservation | PID **31886** remained identical across interactive observations spanning at least **382 seconds**. Exact-PID AndroidRuntime crash and AndroidRuntime/Flutter error reads were empty. Production daemon remained PID **1083880**, ready, with its original managed session and component hash | Not a continuous long-run observer; unrelated historical device crash rows were excluded. One Java-heap PSS reading was **14,580 KiB**, not a memory-growth benchmark |
+
+Evidence: `.impeccable/review/phone-110-connected-oct20.json` and inspected `samsung-110-oct20-{settings,reconnected,choice-accepted,custom-keyboard,notification-shade,notification-reply-filled,notification-replied,restored-settings}.png` captures. A disposable extension drove the real bundled runtime without provider inference; its first pre-registration ask returned locally with no answer and is excluded from acceptance. The later registered dialogs above returned real phone answers. Closing only the owned runtime's stdin exited **0**; the user's PC service and existing OMP sessions were not restarted. End-to-end question intervals include automation delay and are not network-latency measurements.
+
+This closes the final APK's **core same-pair connection, manual reconnect, choice/custom response and background inline-reply** gap, not the complete roadmap hardware matrix. Physical picker/camera/share, process-death/offline restoration, branch and file/export navigation, TalkBack, predictive Back, 200% keyboard/theme/landscape, 30-minute Dart navigation, OEM/Doze/overnight battery and owner VPN/WAN remain unverified. No product code changed or build/test suite was rerun for this hardware-only acceptance.
+
 ## October 18 roadmap release — PC 0.2.0 / Android 1.1.0 (4)
 
-**Source, signed distribution builds and final Samsung APK installation are complete; connected physical-workflow acceptance is not.** Bridge 1.1.0 and private OMP 18.10.2 ship in the self-contained desktop package. Older device evidence below remains version- and hash-scoped.
+**Source, signed distribution builds and final Samsung APK installation are complete.** The October 20 section above additionally accepts bounded core connected-phone flows; the complete native roadmap matrix remains open. Bridge 1.1.0 and private OMP 18.10.2 ship in the self-contained desktop package. Older device evidence below remains version- and hash-scoped.
 
 Evidence index: `.impeccable/review/roadmap-runtime-evidence.json`. Final compiled runtime smoke: `/home/emre/.cache/omputer-roadmap-evidence/omputer-roadmap-http-oviinbyk`; fresh PTY terminal: `/tmp/omputer-terminal-acceptance-56qlak7e`; packaged desktop: `/home/emre/.cache/omputer-desktop-020-d2h_o2h3`. Private fixtures are evidence, not production setup requirements; stopped runtime fixtures were moved out of `/tmp` to avoid automatic session discovery.
 
