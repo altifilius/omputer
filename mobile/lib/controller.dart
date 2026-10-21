@@ -192,14 +192,14 @@ class OmputerController extends ChangeNotifier {
       buildNumber = preferences['buildNumber']?.toString();
       protocol = (preferences['protocol'] as num?)?.toInt();
       if (connection.paired) {
-        connection = ConnectionState.fromJson(object(await _guard(() => native.invoke('connect'))));
         await _loadLocalState();
         await _restoreOperations();
-        if (connection.connected) await reconcileOperations();
+        connection = ConnectionState.fromJson(object(await _guard(() => native.invoke('connect'))));
       }
     } catch (e) { error = '$e'; }
     ready = true;
     if (!_disposed) notifyListeners();
+    if (!_disposed && connection.connected) _reconcileInBackground();
   }
 
   void _event(Object? raw) {

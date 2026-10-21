@@ -1,5 +1,52 @@
 # Verification record
 
+## October 21 build-only delivery — tests deferred by user
+
+The user explicitly deferred tests and requested plan/build delivery. `PLAN.md` now makes that execution order authoritative for this run. No analyze, lint, automated/physical test, phone installation or running-service update was performed.
+
+Android release build ran directly as `flutter build apk --release --no-pub --target-platform android-arm64,android-x64` in bounded unit `omputer-android-buildonly-oct21-a.service`, not the wrapper that automatically analyzes/tests. `assembleRelease` succeeded in **33.452 seconds**, with **1.1 GiB** observed memory peak and **45.7 MiB** swap peak. The built APK was atomically published to `dist/omputer-android.apk`; package inspection reported **1.1.1 / code 5**, and the original release signer was retained. SHA-256 remains `653e75e4042e412a5903fdb4cb322f99bfd38efe1e2b588ad0286cc482ee9441`, byte-identical to the prior package.
+
+PC 0.2.0, bridge 1.1.0 and bundled OMP 18.10.2 required no rebuild: desktop/package/bridge source inputs had no diff from product baseline `af00084`; staged bridge files and runtime matched source/installed resources, and `dist/Omputer` matched the installed executable at SHA-256 `dcedf4fd180f1f909603c82648047b63a24837e0736da23beea3cc390ef3a2dc`. The existing desktop package was retained without launching or updating it.
+
+Build-only provenance: `.impeccable/review/build-only-oct21.json`. Test counts in the older sections and `dist/build-info.json.verification` are historical observations, not checks run for this delivery. Phone installation, physical startup acceptance and the remaining native matrix are deferred; a successful build is not a test or installed-device pass.
+
+## October 20–21 cached startup repair — Android 1.1.1 (5)
+
+**Android 1.1.1 (5) is built, signed and source-verified; it has not been installed or physically accepted on Samsung.** Final APK SHA-256 is `653e75e4042e412a5903fdb4cb322f99bfd38efe1e2b588ad0286cc482ee9441`, with the original signer `6ed5f72965a3a883055898632494cdd23f2f0aa50393ac10959caeecd0e2f2a1`. PC 0.2.0 and bridge 1.1.0 are unchanged. The last physically confirmed phone build remains 1.1.0 (4); its results below are not transferred to the new APK.
+
+An actual 1.1.0 activity showed only the startup spinner while the saved PC was unreachable. Native snapshot bootstrap used the same single worker as local snapshot/draft/state jobs; Flutter also awaited remote uncertain-operation reconciliation before publishing `ready`. The repair isolates bootstrap on a bounded single-thread worker, restores local state before connecting, and reconciles UUID outcomes in the background after readiness. Verified endpoint rediscovery now reuses `reconnect()` to cancel the obsolete snapshot call before opening its replacement. Exact certificate, identity, revocation and generation fences remain enforced; no timeout was shortened or pairing bypass added.
+
+The delayed-outcome startup regression failed before the fix (`ready`: expected true, actual false). Final bounded build `omputer-android-2663015-2874980.service` completed with clean analysis and **141 Flutter tests passing**; `omputer-native-unit-oct20-final-b.service` passed **24 Kotlin tests**. The manual detector returned `[]` for `mobile/lib/controller.dart`. Existing Kotlin/Gradle deprecation and safe-call warnings remain; no blanket warning-free claim is made. Logs and release identity: `.impeccable/review/android-111-startup-oct20.json`, `android-111-build-oct20.txt`, `android-111-startup-failing-before.txt` and `android-111-native-tests-oct20.txt`.
+
+On October 21 the host had rebooted, the temporary extended-test fixture no longer existed, and Samsung was absent from both ADB and USB enumeration. A 90-second device wait timed out. The APK hash/version/signature were inspected again, but no new installation or physical startup pass was manufactured. The current PC daemon was ready at the same `https://192.168.1.107:33975` origin with the same native hash and unrevoked original phone authorization; its new PID **851** and zero managed RPC children reflect the post-reboot observation, not an assistant-requested restart or proof that the previous managed session resumed.
+
+Remaining immediate gate: same-signer `install -r`, exact installed-APK read-back and timed interactive cached-home/draft access while an actual bootstrap is pending. Recover the owned phone test media/JAR/scratch files and drafts before cleanup; no personal media, pairing or unrelated conversation should be removed. An owned cold-start driver and original setting baseline were recovered under `~/.cache/omputer-roadmap-evidence/phone-native-recovery-oct21/`; this is preparation, not an executed phone test.
+
+## October 20 extended Samsung observation — installed Android 1.1.0 (4)
+
+System DocumentsUI selected only the owned `omputer-owned-image.png` (320 × 240, 2,485 bytes); the actual composer showed its preview without sending. Independent A/prompt text plus image, A/steer text and B/prompt text were saved. Force-stopping only Omputer and cold-launching it produced PID **10726**; offline A/steer `Taslak-A-steer-owned` and B/prompt `Taslak-B-prompt-owned` restored separately with the last mode retained. A/prompt image restoration and actual phone-to-OMP image delivery were **not** completed. Real camera/system-share, branch/file/diff/export flows remain open.
+
+The actual font setting was read back as **2.0**; portrait composer/keyboard and landscape captures were inspected. Complete landscape composer reachability was not accepted because a later intended scroll landed on the launcher. Light settings rendered correctly and the original **system** theme was restored. Font 1.0, rotation 0, Wi-Fi enabled and the original closed background preference were restored in the observed checks. TalkBack remained off after Samsung warned that Turkish system text and the installed English-US voice differed; no voice was installed or changed. Predictive Back, reduced-motion and full screen-reader acceptance remain open. These captures establish only the named states, not the full accessibility matrix.
+
+The phone reassociated to the same Wi-Fi and reached its gateway, but subsequent peer ARP/TCP failed (`FAILED`/`INCOMPLETE` on the phone, incomplete TCP handshakes visible on PC). One further phone-only reassociation did not establish recovery. Router/firewall/PC-network policy and pairing were not changed. Saved UFW rules included the exact phone/port allowance; observed protocol-2 multicast drops do not establish that TCP 33975 was blocked. The network root cause remains unproven.
+
+### Thirty-minute cached navigation and whole-app memory
+
+The owned native observer completed **90 twenty-second A/B/C conversation slots in 1,800.006 seconds**, asserting unchanged drafts and a fixed PID. USB transport dropped after roughly 1,470 seconds, but the device-local `--nohup` observer continued; a later read returned `slots=90 elapsedMs=1800006`, final PID **10726**, and restored `stay_on_while_plugged_in=0`.
+
+| Completed slot | Sample elapsed ms | PID | Whole-app PSS KiB | Whole-app RSS KiB | Swap PSS KiB |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 47 | 10726 | 156513 | 271654 | 4672 |
+| 15 | 291509 | 10726 | 161598 | 276330 | 4626 |
+| 30 | 591568 | 10726 | 156257 | 228594 | 25548 |
+| 45 | 891520 | 10726 | 158820 | 232026 | 25012 |
+| 60 | 1191522 | 10726 | 154945 | 231070 | 24896 |
+| 90 | 1791516 | 10726 | 156140 | 232142 | 24744 |
+
+These are **whole-app `dumpsys meminfo` samples**, not isolated Dart-heap measurements or proof of monotonic retained-memory behavior. The workload used three cached owned conversations, remained below the eight-inactive-transcript eviction threshold and did not submit a phone prompt. Sample 75 was not recovered and is not invented. Raw temporary PC fixture files were lost across reboot; the observed tool outputs were recovered from persisted session `01a1560f-d11b-753e-9a55-cb4a65294af6` (completion `9e4cba4b`, intermediate metrics `7584e06c`) into `.impeccable/review/phone-110-navigation-oct20.json` and `phone-110-navigation-oct20-completion.txt`.
+
+Overnight battery/Doze/OEM delivery and owner VPN/WAN remain unverified. The phone was USB-powered and battery-exempt; PC NetBird reported `NeedsLogin`. No VPN authentication, public listener, router/firewall change, forced Doze or weakened power policy was introduced to manufacture acceptance.
+
 ## October 20 Samsung connected acceptance — Android 1.1.0 (4)
 
 The final signed APK was read back from Samsung SM-G990E with exact SHA-256 `86e98ec9313951a7a41f98cbbe8b635e9e7911613ffc1d035861ad172df1da86`, version **1.1.0 / 4**, original `firstInstallTime` and existing phone authorization. No reinstall, data clear or re-pair occurred. After earlier USB `-71` / libusb errors, the owner reported improved stability on the same port; actual ADB shell, screenshots and interactive checks then succeeded. This does not establish which physical USB condition changed.

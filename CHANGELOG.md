@@ -1,5 +1,13 @@
 # Changelog
 
+## Android 1.1.1 (5)
+
+- Kept authenticated connection bootstrap on a separate bounded worker so an unreachable PC cannot queue ahead of cached startup, local preferences or durable drafts.
+- Published local readiness before reconciling uncertain command outcomes; reconciliation remains UUID-bound, GET-only and incapable of authorizing replay. The new delayed-outcome startup regression failed before the fix and passed in the 141-test Flutter run.
+- Reused the existing reconnect cancellation path after verified endpoint rediscovery, cancelling the obsolete snapshot call before the replacement bootstrap. Pairing identity, exact TLS pin and generation fences are unchanged.
+- Rebuilt with the original Android signing identity; PC 0.2.0 and bridge 1.1.0 are unchanged. Physical installed-build acceptance is recorded separately in `VERIFICATION.md`.
+- October 21 build-only delivery: Android release rebuilt and published without analyze/lint/tests at the user's request; unchanged PC/bridge/runtime artifacts were retained. Installation and physical acceptance remain separate deferred gates.
+
 ## PC 0.2.0 / Android 1.1.0 (4) / bridge 1.1.0
 
 - Separated stable visible session identity, journal/provider identity, bridge binding generation, writer liveness and turn/work state. Branch/navigation outcomes retain the visible session and preserve source provenance without duplicating its writer.
@@ -13,7 +21,7 @@
 - Removed the package/journal 1 GiB admission limit from authoritative SQLite migration opens. Existing multi-GiB databases are paged by SQLite and retained; bounded backup bundles still enforce their total-byte budget. A large sparse-database regression protects upgrade startup without deleting history.
 - Source bootstrap now uses both current and previous runtime patches for conflict-detecting private-runtime upgrades. Already-running terminal closures require a normal fresh launch to activate host exports.
 
-Signed Android and self-contained Linux distribution packages were built; the final packaged desktop passed isolated native install/reopen/close/diagnostics acceptance. Source commit `af00084` was pushed and rebuilt; final Android 1.1.0 (4) installed on Samsung with the same signer and an exact base-APK read-back hash, retaining data and pairing. Direct phone–PC LAN access failed and USB later dropped, so connected native workflow acceptance remains open. See `VERIFICATION.md` for exact evidence and limits.
+Signed Android and self-contained Linux distribution packages were built; the packaged desktop passed isolated native install/reopen/close/diagnostics acceptance. Source commit `af00084` was pushed and rebuilt; Android 1.1.0 (4) installed on Samsung with the same signer and exact base-APK read-back hash, retaining data and pairing. Its October 20 bounded same-pair Wi-Fi/reconnect, choice/custom and Android inline-notification reply acceptance passed; later offline-follow-up LAN and USB instability remain separately recorded. See `VERIFICATION.md` for version-scoped evidence and limits.
 
 ## Unreleased — local Android companion
 

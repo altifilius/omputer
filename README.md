@@ -6,7 +6,7 @@ Monitor OMP sessions on your own PC from an Android phone, answer agent question
 
 The current application interface is in Turkish. This README uses English descriptions and includes the existing interface labels where needed.
 
-Release artifacts: **PC 0.2.0 · Android 1.1.0 (4) · bridge 1.1.0**, built with the private OMP 18.10.2 runtime. `dist/build-info.json` distinguishes packaged, installed and running hashes; `VERIFICATION.md` records exercised workflows and remaining hardware acceptance. A successful build is not a physical-device pass.
+Release artifacts: **PC 0.2.0 · Android 1.1.1 (5) · bridge 1.1.0**, built with the private OMP 18.10.2 runtime. `dist/build-info.json` distinguishes packaged, installed and running hashes; `VERIFICATION.md` records exercised workflows and remaining hardware acceptance. A successful build is not a physical-device pass.
 
 ## Components
 
@@ -56,6 +56,8 @@ The automatic listener retains a private saved port (8787 on fresh installs, or 
 The Android settings footer shows the actual installed version/build. A same-signer `adb install -r` update preserves pairing and private data; do not uninstall or clear data to update. External pairing links always require explicit PC identity/fingerprint and replacement confirmation before changing that trust.
 
 Offline project data and recently opened pages use a bounded disposable cache, not a second authoritative history store. Reconnect loads a fresh authenticated snapshot and reloads open conversations. A process death can lose the newest debounced cache checkpoint; PC history and committed credentials are unaffected. The PC coalesces superseded full message revisions but retains unique history, decisions and command outcomes; total PC history is not arbitrarily capped.
+
+Android 1.1.1 keeps cached startup and durable drafts independent of a slow connection bootstrap. Uncertain operation outcomes reconcile in the background after the saved view becomes usable; no unknown command is automatically resubmitted.
 
 
 ## Project continuity

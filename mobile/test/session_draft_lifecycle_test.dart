@@ -132,6 +132,7 @@ void main() {
       await first.saveDraft(promptKey, draft('New prompt after acceptance'));
       first.dispose(); native.succeed();
       final restored = await open(native);
+      await restored.reconcileOperations();
       expect((await restored.loadDraft(promptKey))?['text'], 'New prompt after acceptance');
       final operation = restored.pendingBranchDrafts('session').single;
       expect((await restored.loadDraft('${operation['branchDraftKey']}'))?['text'], 'Original selected prompt');
@@ -153,6 +154,7 @@ void main() {
       await expectLater(submit(first, value), throwsA(isA<ControllerFailure>().having((e) => e.code, 'code', 'submission_pending')));
       first.dispose(); native.succeed();
       final restored = await open(native);
+      await restored.reconcileOperations();
       expect(await restored.loadDraft(promptKey), isNull);
       expect(native.removed, [importedId]);
       expect(native.posts, 1);

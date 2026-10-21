@@ -85,6 +85,41 @@ Json liveSession({String journal = 'journal', String binding = 'binding'}) => {
 };
 
 void main() {
+  test('cached projects and drafts are usable while startup outcome reconciliation is pending', () async {
+    final native = DurableNative()
+      ..data = {'sequence': 7, 'projects': [{'id': 'project', 'name': 'Cached project'}]};
+    native.drafts[native.identity] = {'session:session:session.prompt': {'text': 'Unsent local draft', 'attachments': <Json>[], 'files': <Json>[]}};
+    native.pending['uncertain-command'] = {'id': 'uncertain-command', 'action': 'session.prompt', 'sessionId': 'session', 'status': 'unknown', 'identity': native.identity};
+    final requested = Completer<void>();
+    final outcome = Completer<Object?>();
+    native.requestHandler = (request) {
+      if (request['path'] != '/v1/commands/uncertain-command') throw StateError('Unexpected request $request');
+      if (!requested.isCompleted) requested.complete();
+      return outcome.future;
+    };
+    final controller = OmputerController(adapter: native);
+    var initialized = false;
+    final startup = controller.initialize().then((_) => initialized = true);
+    try {
+      await requested.future;
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.ready, isTrue);
+      expect(initialized, isTrue);
+      expect(controller.snapshot.project('project')!.name, 'Cached project');
+      expect((await controller.loadDraft('session:session:session.prompt'))!['text'], 'Unsent local draft');
+      expect(controller.operations.single['status'], 'unknown');
+      outcome.complete({'id': 'uncertain-command', 'action': 'session.prompt', 'status': 'succeeded', 'result': {'success': true}});
+      await controller.reconcileOperations();
+      expect(controller.operations.single['status'], 'succeeded');
+      expect(native.requests.where((request) => request['method'] == 'POST'), isEmpty);
+    } finally {
+      if (!outcome.isCompleted) outcome.complete({'id': 'uncertain-command', 'status': 'unknown'});
+      await startup;
+      controller.dispose();
+      await native.stream.close();
+    }
+  });
+
   test('lost ACK retains original UUID and relaunch reconciles GET without replay', () async {
     final native = DurableNative()..loseAck = true;
     final first = OmputerController(adapter: native);
@@ -97,6 +132,7 @@ void main() {
     first.dispose();
     final second = OmputerController(adapter: native);
     await second.initialize();
+    await second.reconcileOperations();
     expect(second.operations.single['id'], id);
     expect(second.operations.single['status'], 'succeeded');
     expect(native.requests.where((request) => request['method'] == 'POST'), hasLength(1));

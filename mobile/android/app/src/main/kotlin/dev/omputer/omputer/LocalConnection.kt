@@ -49,6 +49,7 @@ internal object LocalConnection {
     private val requests = executor(4, 32)
     private val replies = executor(1, 8)
     private val pairing = executor(1, 8)
+    private val connectionWorker = executor(1, 1)
     private val rediscovery = Executors.newSingleThreadScheduledExecutor()
     private val rediscoveryBusy = AtomicBoolean(false)
     private var rediscoveryCandidate: NearbyComputer? = null
@@ -374,9 +375,7 @@ internal object LocalConnection {
                 if (saved.optString("serverId") != state.third.id || saved.getString("fingerprint") != state.third.fingerprint ||
                     saved.getString("certificate") != state.second.getString("certificate")) return
                 saved.put("url", origin); vault.saveCredentials(saved)
-                socket?.cancel(); socket = null; connecting = false; connected = false
-                if (active) openSocket(++generation)
-                publishConnection()
+                if (active) reconnect() else publishConnection()
             }
         } catch (_: Exception) { /* An untrusted announcement never replaces a verified address. */ }
         finally {
@@ -730,7 +729,8 @@ internal object LocalConnection {
             if (!active || ticket != generation || connecting) return
             connecting = true
         }
-        submit(worker, { _, error -> if (error != null) lost(ticket, error.message ?: "Bağlantı başlatılamadı.", false) }) {
+        // Bootstrap can wait on an unreachable PC; never queue local cache/draft work behind it.
+        submit(connectionWorker, { _, error -> if (error != null) lost(ticket, error.message ?: "Bağlantı başlatılamadı.", false) }) {
             try {
                 val (saved, http) = synchronized(this) {
                     if (!active || ticket != generation || vault.revoked) return@submit null
