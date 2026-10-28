@@ -3,7 +3,7 @@ title: "Omputer — Fiziksel Android kurulumu ve Git yayını"
 project: omputer
 type: project-report
 date: "2026-10-29"
-status: kurulum-tamamlandi
+status: tamamlandi
 ---
 
 # Omputer — Fiziksel Android kurulumu ve Git yayını
@@ -44,7 +44,7 @@ Depo kayıtları ve GitHub API ile doğrulanan hedef: **[altifilius/omputer](htt
 
 Commit kapsamı mobil oturum/composer düzeltmeleri, sürüm ve ilgili test/doküman/kurulum kayıtlarıdır. Önceden değişmiş `PLAN.md` ve geçici `.playwright-mcp/` dosyaları kapsam dışıdır; silinmez veya başka değişikliklerle birleştirilmez. `dist/` mevcut Git dışlama kuralı nedeniyle kaynak commit'ine eklenmez; kullanıcı GitHub Release yüklemesi istemedi. Yerel APK telefona kurulmuştur.
 
-Bu kayıt kurulumdan sonra, Git yayın komutundan önce hazırlanmıştır. Git teslim sonucu komut çıktısı ve uzak dal kimliği ile ayrıca kaydedilir; bu cümle henüz gerçekleşmemiş push'u başarılı diye sunmaz.
+Kaynak/kurulum commit'i **[`b46ac24a4e9c9bd4764ed02d67e3788375ea3e1e`](https://github.com/altifilius/omputer/commit/b46ac24a4e9c9bd4764ed02d67e3788375ea3e1e)**, `fix: list parallel mobile sessions and anchor composer` başlığıyla oluşturuldu. `git push origin main` başarılı oldu; ardından `git ls-remote --heads origin main`, yerel commit ile aynı tam hash'i döndürdü. Bu teslim sonucunu içeren son rapor kaydı ayrı bir dokümantasyon commit'iyle gönderilir; kaynak commit'i değiştirilmez.
 
 ## Doğrulama sınırları
 
