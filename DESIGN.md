@@ -133,6 +133,8 @@ Common page gutters are 24dp. Related content uses the frontmatter spacing steps
 
 Home reserves 100dp bottom scroll padding near its extended new-session FAB; project detail reserves 110dp. `SafeArea(top: false)` protects body insets beneath app bars; forms use scrollable content. Filters wrap rather than forcing a single horizontal line. Empty, missing, loading, disconnected, and failed states remain explicit instead of being filled with demonstration data.
 
+Android 1.1.2 shows each open session directly beneath its project, with stable visible-ID references for identical names. Terminal-open sessions remain explicitly read-only. Closed history stays in project detail rather than filling the home list. The conversation editor/send row is anchored to the resized safe-area bottom; only ancillary composer controls/attachments scroll. Header metadata and notices use a bounded scroll area on short screens so the keyboard cannot collapse the editable row. October 28 native emulator acceptance covers the changed phone flow and 200% text, not physical-device or tablet certification.
+
 ## Elevation & Depth
 
 Depth is primarily tonal. Project overview rows are flat; activity context uses `primaryContainer`, and waiting decisions use `secondaryContainer`. The app bar specifies scrolled-under elevation 1. FABs, dialogs, state layers, and navigation indicators retain Material behavior; there are no authored bespoke shadow tokens. Do not substitute glow, glass, or decorative gradients for this hierarchy.

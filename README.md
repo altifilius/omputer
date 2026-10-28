@@ -6,7 +6,7 @@ Monitor OMP sessions on your own PC from an Android phone, answer agent question
 
 The current application interface is in Turkish. This README uses English descriptions and includes the existing interface labels where needed.
 
-Release artifacts: **PC 0.2.0 · Android 1.1.1 (5) · bridge 1.1.0**, built with the private OMP 18.10.2 runtime. `dist/build-info.json` distinguishes packaged, installed and running hashes; `VERIFICATION.md` records exercised workflows and remaining hardware acceptance. A successful build is not a physical-device pass.
+Release artifacts: **PC 0.2.0 · Android 1.1.2 (6) · bridge 1.1.0**, built with the private OMP 18.10.2 runtime. `dist/build-info.json` distinguishes packaged, installed and running hashes; `VERIFICATION.md` records exercised workflows and remaining hardware acceptance. A successful build is not a physical-device pass.
 
 ## Components
 
@@ -43,6 +43,10 @@ The PC application selects a private IPv4 LAN interface and an available port. I
 The PC application scans configured OMP storage directories and profiles, imports saved JSONL history read-only without modifying the source, and registers project paths automatically. A user-scoped extension loader connects the bridge for future normal OMP launches. The system `omp` executable is not modified.
 
 **Already running processes without the bridge are not injected into or restarted.** Their history remains visible with an explicit unbridged status; live control is not falsely advertised. Inactive saved sessions can be resumed from the phone, but a second resume is rejected while a live ownership lease exists. Disconnecting the phone does not stop work on the PC.
+
+Each open session is listed separately beneath its project on the phone, including terminal-open read-only sessions. Identical names remain distinguishable by their session reference; selecting a row opens that exact conversation. Closed history remains under **Open project** (`Projeyi aç`). Incoming activity updates content without moving established rows.
+
+The conversation editor and send button stay at the usable bottom above the Android keyboard. Extra tools and attachments scroll separately; on short screens the status/model section also scrolls instead of squeezing the editable field.
 
 The phone offers **Resume session** (`Oturumu sürdür`) only when the service advertises safe resume. A terminal session marked **Open in terminal · read-only on phone** (`Terminalde açık · telefonda salt okunur`) can be inspected, not resumed into a second process. Use **New session in this project** (`Bu projede yeni oturum`) for a separate controllable conversation, or continue the original in its terminal. Valid closed, failed and disconnected saved sessions recover safe resume only after checking the canonical project, actual journal identity and inactive writer lease.
 
@@ -128,3 +132,5 @@ On a workstation running OMP and an Android emulator, build serially rather than
 Discovery is not authorization. Initial pairing requires two-sided v2 commit/reveal and human comparison of the codes; the alternative QR flow carries a one-use access secret. Subsequent connections pin the exact TLS certificate. Arbitrary self-signed certificates are not accepted, and identities are never silently rotated. Only device-token hashes are stored on the PC; revocation closes the device's stream. Linux `openat2 RESOLVE_BENEATH` confines file reads to registered project roots. Interaction IDs, deadlines, and first-valid-response arbitration handle competing desktop/phone answers. API keys and provider transport details are excluded from snapshots; conversation content is sent to the paired phone.
 
 See [VERIFICATION.md](VERIFICATION.md) for exercised checks and their limits. Emulator results do not establish physical-device battery or Doze behavior.
+
+Project work reports: [Raporlar](Raporlar/README.md). Latest: [October 29 — physical Android installation and Git delivery](Raporlar/2026-10-29-android-kurulum-ve-git-yayini.md).

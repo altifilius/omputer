@@ -25,7 +25,8 @@ class _ProjectOverviewRowState extends State<ProjectOverviewRow> {
     final next = p.nextStep.isNotEmpty ? p.nextStep : p.activity?.nextStep ?? '';
     final sessions = c.snapshot.sessions.where((s) => s.projectId == p.id).toList();
     order.apply(sessions, (s) => s.id, (s) => s.updatedAt);
-    final recent = sessions.where((s) => !s.archived).firstOrNull ?? sessions.firstOrNull;
+    final liveSessions = sessions.where((s) => !s.archived || s.activeUnbridged).toList();
+    final recentArchive = liveSessions.isEmpty ? sessions.firstOrNull : null;
     final pinned = object(object(c.localState['sections'])['pins'])['project:${p.id}'] == true;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Padding(padding: const EdgeInsets.fromLTRB(24, 16, 16, 8), child: Row(children: [
@@ -39,11 +40,12 @@ class _ProjectOverviewRowState extends State<ProjectOverviewRow> {
         if (expanded && p.activity?.lastAssistantText.isNotEmpty == true) Padding(padding: const EdgeInsets.only(top: 12), child: LocalMarkdown(data: p.activity!.lastAssistantText)),
         Text('${sessions.length} oturum · ${dateLabel(p.activity?.updatedAt ?? p.updatedAt)}', style: Theme.of(context).textTheme.labelMedium),
         Wrap(spacing: 8, children: [
-          if (recent != null) TextButton.icon(key: ValueKey('recent:${p.id}'), onPressed: () => openScreen(context, SessionScreen(controller: c, sessionId: recent.id)), icon: Icon(recent.archived ? Icons.history_rounded : Icons.chat_bubble_outline_rounded), label: Text(recent.archived ? 'Son konuşma' : 'Canlı konuşma')),
+          if (recentArchive != null) TextButton.icon(key: ValueKey('recent:${p.id}'), onPressed: () => openScreen(context, SessionScreen(controller: c, sessionId: recentArchive.id)), icon: const Icon(Icons.history_rounded), label: const Text('Son konuşma')),
           TextButton.icon(onPressed: () => openScreen(context, ProjectScreen(controller: c, projectId: p.id)), icon: const Icon(Icons.arrow_forward_rounded), label: const Text('Projeyi aç')),
           TextButton(onPressed: () => setState(() => expanded = !expanded), child: Text(expanded ? 'Özeti daralt' : 'Özeti genişlet')),
         ]),
       ])),
+      for (final session in liveSessions) LocalSessionRow(key: ValueKey(session.id), controller: c, session: session),
       const Padding(padding: EdgeInsets.symmetric(horizontal: 24), child: Divider()),
     ]);
   }
@@ -61,7 +63,18 @@ class LocalSessionRow extends StatelessWidget {
     final transcript = controller.loadedTranscript(session.id);
     final last = transcript == null || transcript.ids.isEmpty ? null : transcript.messages[transcript.ids.last]?.value;
     final unread = last != null && (marker['messageId'] != last.id || marker['revision'] != last.revision);
-    return ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8), leading: Icon(pinned ? Icons.push_pin_rounded : session.archived ? Icons.history_rounded : Icons.chat_bubble_outline_rounded), title: Text(session.name.isEmpty ? 'Adsız oturum' : session.name, maxLines: 2, overflow: TextOverflow.ellipsis), subtitle: Text('${session.statusLabel}${unread ? ' · Okunmadı' : marker.isNotEmpty ? ' · Okundu' : ''}\n${dateLabel(session.updatedAt)}'), onTap: () => openScreen(context, SessionScreen(controller: controller, sessionId: session.id)), trailing: IconButton(tooltip: pinned ? 'Oturum sabitlemesini kaldır' : 'Oturumu sabitle', icon: Icon(pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined), onPressed: () => perform(context, () => controller.updateLocalState('pins', 'session:${session.id}', !pinned))));
+    var reference = session.id;
+    for (var length = 8; length < session.id.length; length++) {
+      final suffix = session.id.substring(session.id.length - length);
+      if (!controller.snapshot.sessions.any((other) => other.id != session.id && other.id.endsWith(suffix))) {
+        reference = '…$suffix';
+        break;
+      }
+    }
+    return ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8), leading: Icon(pinned ? Icons.push_pin_rounded : session.archived && !session.activeUnbridged ? Icons.history_rounded : Icons.chat_bubble_outline_rounded), title: Text(session.name.isEmpty ? 'Adsız oturum' : session.name, maxLines: 2, overflow: TextOverflow.ellipsis), subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('${session.statusLabel}${unread ? ' · Okunmadı' : marker.isNotEmpty ? ' · Okundu' : ''}\n${dateLabel(session.updatedAt)}'),
+      Text('Oturum $reference', style: Theme.of(context).textTheme.bodySmall),
+    ]), onTap: () => openScreen(context, SessionScreen(controller: controller, sessionId: session.id)), trailing: IconButton(tooltip: pinned ? 'Oturum sabitlemesini kaldır' : 'Oturumu sabitle', icon: Icon(pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined), onPressed: () => perform(context, () => controller.updateLocalState('pins', 'session:${session.id}', !pinned))));
   }
 }
 
@@ -83,7 +96,7 @@ class _ProjectScreenState extends State<ProjectScreen> {
     final ordered = c.snapshot.sessions.where((s) => s.projectId == p.id).toList();
     _sessionOrder.apply(ordered, (s) => s.id, (s) => s.updatedAt);
     final pins = object(object(c.localState['sections'])['pins']);
-    final sessions = ordered.where((s) => s.name.toLowerCase().contains(query.toLowerCase()) && (filter == 'all' || (filter == 'pinned' ? pins['session:${s.id}'] == true : filter == 'archive' ? s.archived : !s.archived))).toList();
+    final sessions = ordered.where((s) => s.name.toLowerCase().contains(query.toLowerCase()) && (filter == 'all' || (filter == 'pinned' ? pins['session:${s.id}'] == true : filter == 'archive' ? s.archived && !s.activeUnbridged : !s.archived || s.activeUnbridged))).toList();
     final pending = c.snapshot.pending.where((i) => i.projectId == p.id).toList();
     return Scaffold(appBar: AppBar(title: Text(p.name), actions: [IconButton(tooltip: 'Yeni oturum', onPressed: c.connection.connected ? () => openScreen(context, NewSessionScreen(controller: c, projectId: p.id)) : null, icon: const Icon(Icons.add_rounded)), IconButton(tooltip: 'Proje dosyalarını incele', onPressed: () => openScreen(context, ProjectFilesScreen(controller: c, project: p)), icon: const Icon(Icons.folder_copy_outlined))]), body: SafeArea(top: false, child: CustomScrollView(key: PageStorageKey('project:${p.id}'), slivers: [
       SliverToBoxAdapter(child: ConnectionBanner(c)),

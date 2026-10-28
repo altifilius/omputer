@@ -14,6 +14,10 @@ An acknowledged decision immediately settles the latest native and Flutter snaps
 
 Project and session lists capture their activity order when first shown. Subsequent snapshots replace live row content without sorting existing IDs again by their changing `updatedAt`. Filtering/searching does not reset those positions. Newly discovered IDs enter once in recent-first order; removed IDs are released. Reopening a screen establishes a fresh recent-first order.
 
+Home project groups expose every open session by visible session ID, including `active-unbridged` terminal writers even though their saved transport is `archive`. Open-session filters use that same UI classification; closed-history filters exclude active terminal writers. This does not change `archived`, `writerConnected`, message capabilities or resume authorization. Same-name rows show the shortest unique suffix of at least eight characters from their visible session ID. Search does not render a second copy of an open session already shown beneath a matching project.
+
+The session editor/send row is bottom-anchored within Scaffold's resized safe area; Android `adjustResize` remains the IME owner. Ancillary composer controls and attachment previews scroll independently from input/send. Header notices/model metadata are bounded and scrollable on short screens. Multiline drafts remain editable when keyboard and system font scaling reduce available height.
+
 
 Single-choice `ask` forms expose **Özel yanıt** as a radio choice, mutually exclusive with offered labels. Selecting custom clears the offered selection; selecting a label leaves a custom draft inactive and omits it from the submitted payload. Empty custom text cannot submit. Multi-choice forms use a separate custom checkbox, permitting labels plus a nonblank custom answer only while that checkbox is selected. Context notes are not additional answers. `allowCustom:false` hides and excludes custom mode. Canonical raw `select` dialogs still accept only offered labels.
 

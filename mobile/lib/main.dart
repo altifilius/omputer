@@ -154,6 +154,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String query = '', filter = 'all';
   final search = TextEditingController();
   final _projectOrder = StableActivityOrder();
+  final _searchSessionOrder = StableActivityOrder();
   @override
   void dispose() { search.dispose(); super.dispose(); }
   @override
@@ -180,12 +181,18 @@ class _HomeScreenState extends State<HomeScreen> {
     final ordered = c.snapshot.projects.toList();
     _projectOrder.apply(ordered, (p) => p.id, (p) => p.updatedAt);
     final pins = object(object(c.localState['sections'])['pins']);
-    final projects = ordered.where((p) {
-      final sessions = c.snapshot.sessions.where((s) => s.projectId == p.id);
-      final matches = '${p.name} ${p.goal} ${p.summary} ${p.nextStep} ${p.path}'.toLowerCase().contains(needle);
-      return matches && (filter != 'waiting' || c.snapshot.pending.any((i) => i.projectId == p.id)) && (filter != 'live' || sessions.any((s) => !s.archived)) && (filter != 'pinned' || pins['project:${p.id}'] == true);
-    }).toList();
-    final matchingSessions = needle.isEmpty ? <Session>[] : c.snapshot.sessions.where((s) => '${s.name} ${s.cwd}'.toLowerCase().contains(needle)).toList();
+    bool matchesFilter(String projectId) {
+      return (filter != 'waiting' || c.snapshot.pending.any((i) => i.projectId == projectId)) &&
+          (filter != 'live' || c.snapshot.sessions.any((s) => s.projectId == projectId && (!s.archived || s.activeUnbridged))) &&
+          (filter != 'pinned' || pins['project:$projectId'] == true);
+    }
+    final projects = ordered.where((p) => '${p.name} ${p.goal} ${p.summary} ${p.nextStep} ${p.path}'.toLowerCase().contains(needle) && matchesFilter(p.id)).toList();
+    final visibleProjectIds = projects.map((p) => p.id).toSet();
+    final orderedSessions = c.snapshot.sessions.toList();
+    _searchSessionOrder.apply(orderedSessions, (s) => s.id, (s) => s.updatedAt);
+    final matchingSessions = needle.isEmpty ? <Session>[] : orderedSessions.where((s) =>
+        '${s.name} ${s.cwd}'.toLowerCase().contains(needle) && matchesFilter(s.projectId) &&
+        !((!s.archived || s.activeUnbridged) && visibleProjectIds.contains(s.projectId))).toList();
     return RefreshIndicator(onRefresh: c.refresh, child: CustomScrollView(key: const PageStorageKey('project-overview'), physics: const AlwaysScrollableScrollPhysics(), slivers: [
       SliverToBoxAdapter(child: ConnectionBanner(c)),
       if (c.error != null) SliverToBoxAdapter(child: ErrorNotice(c.error!, onRetry: () => perform(context, () async { c.clearError(); await c.reconnect(); }))),

@@ -1,5 +1,31 @@
 # Verification record
 
+## October 29 Samsung installation — Android 1.1.2 (6)
+
+**Installed on the physical Samsung SM-G990E with `adb install -r`; no uninstall, data clear, permission grant or re-pair.** The previous version was 1.1.0 (4). Package Manager now reports **1.1.2 / code 6**, with the original first-install timestamp unchanged. The installed base APK SHA-256 is exactly `ae2844ef7e802fed97936f38fd9a770fd333a4518f3aced3e825cc718b44fdcd`, matching the published APK and original release signer.
+
+The shared system ADB server did not enumerate the USB device despite its accessible ADB interface. A private SDK ADB server, limited to the one phone and using the documented libusb backend, established authorized USB access without restarting the shared server or altering USB/security settings.
+
+The real installed application opened with its saved projects rather than pairing again. Two existing live conversations belonging to the same project were independently selected by their session references. The actual Samsung software keyboard was opened without entering or sending text: editor bounds were `(45,2149)–(866,2306)` with keyboard closed and `(45,1108)–(866,1265)` with keyboard open on the 1080×2340 display. The original draft remained unchanged. Screenshots were inspected privately; production conversation content and device identifiers are excluded from Git. The app-PID `flutter:E` / `AndroidRuntime:E` read was empty during this bounded check.
+
+Font scale remained 1.0. No background, pairing, network/VPN, firewall or PC-service setting was changed. Initial startup briefly displayed cached/offline content; this check does not certify network recovery, live prompt delivery, notifications or cold-start timing. Existing tests/build were not rerun because the installed package is the exact previously verified artifact. Canonical continuation report: [October 29 installation and Git delivery](Raporlar/2026-10-29-android-kurulum-ve-git-yayini.md).
+
+## October 28 mobile session list and composer — Android 1.1.2 (6)
+
+**Signed Android 1.1.2 (6) is published at `dist/omputer-android.apk`; no physical phone was attached or updated.** SHA-256: `ae2844ef7e802fed97936f38fd9a770fd333a4518f3aced3e825cc718b44fdcd`. Package name/version/code and the original release signer were independently inspected. PC 0.2.0, bridge 1.1.0 and the running service were not modified or restarted.
+
+Home previously exposed only one recent-session shortcut per project. Each open session now has its own identity-keyed row, including terminal-open `archive` / `active-unbridged` sessions without changing their read-only capabilities. A bounded read-only production SQLite query observed two distinct running bridge sessions and two distinct terminal-open journals for the Omputer project; no production session content was copied or changed.
+
+The composer no longer uses a loose proportional flex slot. Input/send stay at the resized safe-area bottom while tools/attachments scroll separately. Actual native keyboard inspection exposed an additional short-height case with model metadata; bounded header scrolling and a minimum editor allowance fixed that before final delivery.
+
+- `omputer-mobile-final-checks-oct28-uTt3BL.service`: Flutter analyzer clean; **all 151 tests passed**. Regressions exercise exact same-name bridged/terminal session navigation, stable order, filters/search, read-only boundaries, empty/long transcript, attachments, multi-line draft/send, system padding, large text and a tall keyboard. Earlier new-test finder/semantics lifecycle failures were repaired before this final full pass.
+- Impeccable manual detector for `mobile/lib/{projects,main,session}.dart`: **`[]`**.
+- Actual Flutter Android35 native app in an owned, headless 720×1280 emulator: both same-name bridged sessions opened their exact IDs; drafts stayed separate; both terminal-open sessions opened exact IDs read-only. The actual software keyboard preserved the editor/send row; 200% system font remained editable. Observed editor bounds with keyboard: `(32,522)–(568,634)`, and 200%: `(32,466)–(568,634)`. Error-priority Flutter/AndroidRuntime log read for the app PID was empty in the final native run.
+- Native UI used a disposable injected `NativeAdapter` with explicit owned fixture records, not a fake production default, live PC transport or provider inference. Attachment layout was exercised with the fixture's decoder error state; real image picker/camera/share and image delivery are not accepted by that fixture. The first emulator attempt failed under its resource limit; the smaller-screen bounded emulator booted. A system-UI wait dialog appeared after boot; it was dismissed with **Wait**, and no emulator-performance guarantee is inferred.
+- `omputer-android-112-oct28-uTt3BL.service`: production `lib/main.dart` release build succeeded (Gradle 268.2 s, observed memory peak 2.3 GiB). The temporary debug UI adapter is not the release entrypoint. Original signer retained; same-signer updates need no uninstall/data clear. Owned emulator/temporary drivers were removed; physical phone, network/VPN, credentials and compositor were untouched.
+
+Canonical report and selected privacy-reviewed screenshots: [October 28 mobile fixes](Raporlar/2026-10-28-mobil-oturumlar-ve-mesaj-alani.md). Physical-phone installation/read-back, OEM keyboard/gesture feel, tablet/landscape/TalkBack and live phone-to-PC message delivery remain outside this acceptance; earlier hardware results below are not transferred to this APK.
+
 ## October 21 build-only delivery — tests deferred by user
 
 The user explicitly deferred tests and requested plan/build delivery. `PLAN.md` now makes that execution order authoritative for this run. No analyze, lint, automated/physical test, phone installation or running-service update was performed.

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'controller.dart';
@@ -298,6 +299,7 @@ class _SessionScreenState extends State<SessionScreen> {
       for (final item in [('model', 'session.model', 'Modeli değiştir'), ('thinking', 'session.thinking', 'Düşünme düzeyi'), ('rename', 'session.rename', 'Yeniden adlandır'), ('compact', 'session.compact', 'Konuşmayı sıkıştır'), ('refresh', 'session.refresh', 'Oturum durumunu yenile'), ('bash', 'session.bash', 'Kabuk komutu çalıştır'), ('abort', 'session.abort', 'Çalışmayı kes')])
         if (!session.archived && !session.activeUnbridged && session.supports(item.$2)) PopupMenuItem(value: item.$1, enabled: c.connection.connected && !sending, child: Text(item.$3)),
     ])]), body: SafeArea(top: false, child: Column(children: [
+      ConstrainedBox(constraints: BoxConstraints(maxHeight: math.max(0, (MediaQuery.sizeOf(context).height - MediaQuery.viewInsetsOf(context).bottom - MediaQuery.paddingOf(context).vertical - kToolbarHeight) * .3)), child: SingleChildScrollView(primary: false, child: Column(children: [
       Padding(padding: const EdgeInsets.fromLTRB(24, 4, 24, 12), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Hero(tag: 'checkpoint-thread', child: Icon(Icons.commit_rounded, color: Theme.of(context).colorScheme.primary)), const SizedBox(width: 10), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(c.snapshot.project(session?.projectId ?? '')?.name ?? 'Kaynak konuşma', style: Theme.of(context).textTheme.labelLarge), const SizedBox(height: 4), Text('${session?.statusLabel ?? 'Oturum bilgisi alınamadı'}${c.connection.connected ? '' : ' · Çevrimdışı'}', style: Theme.of(context).textTheme.bodySmall)]))])),
       if (session?.lastError != null) ErrorNotice(session!.lastError!),
       if (session?.turnError != null) ErrorNotice('Tur hatası: ${session!.turnError}. Bağlantı açıksa oturumu yönlendirmeye devam edebilirsin.'),
@@ -305,6 +307,8 @@ class _SessionScreenState extends State<SessionScreen> {
       if (session?.model != null || session?.thinkingLevel != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8), child: Align(alignment: Alignment.centerLeft, child: Text([session?.model?.name, session?.thinkingLevel == null ? null : 'Düşünme: ${session!.thinkingLevel}'].whereType<String>().join(' · '), style: Theme.of(context).textTheme.labelMedium))),
       if (locating) const LinearProgressIndicator(),
       if (focusedMessage != null) Material(color: Theme.of(context).colorScheme.secondaryContainer, child: ListTile(title: const Text('Arama sonucu konumunda okuyorsun'), subtitle: Text(focusedMessage!), trailing: IconButton(tooltip: 'Canlı son mesaja dön', onPressed: () => setState(() => focusedMessage = null), icon: const Icon(Icons.close_rounded)))),
+      ]))),
+      Expanded(child: LayoutBuilder(builder: (context, constraints) => Column(children: [
       Expanded(child: ListenableBuilder(listenable: transcript, builder: (context, _) {
         if (transcript.ids.isEmpty && transcript.loading) return const Center(child: CircularProgressIndicator());
         if (transcript.ids.isEmpty && transcript.error != null) return SingleChildScrollView(child: ErrorNotice(transcript.error!, onRetry: () => c.loadMessages(widget.sessionId)));
@@ -317,7 +321,7 @@ class _SessionScreenState extends State<SessionScreen> {
         });
       })),
       if (showLatest) Align(alignment: Alignment.centerRight, child: TextButton.icon(onPressed: () { scroll.jumpTo(0); final id = transcript.ids.lastOrNull; if (id != null) widget.controller.updateLocalState('read', 'session:${widget.sessionId}', {'messageId': id, 'revision': transcript.messages[id]!.value.revision}); }, icon: const Icon(Icons.arrow_downward_rounded), label: const Text('Son mesaja git'))),
-      if (session != null && !live) Flexible(child: SingleChildScrollView(padding: const EdgeInsets.all(16), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+      if (session != null && !live) ConstrainedBox(constraints: BoxConstraints(maxHeight: constraints.maxHeight * .75), child: SingleChildScrollView(padding: const EdgeInsets.all(16), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(session.activeUnbridged
           ? 'Bu oturum terminalde açık, ancak telefon bağlantısı etkin değil. Konuşmayı burada okuyabilirsin; açık oturum telefondan yeniden başlatılmaz.'
           : session.canResume
@@ -327,13 +331,16 @@ class _SessionScreenState extends State<SessionScreen> {
         if (session.canResume) ...[const SizedBox(height: 10), FilledButton.icon(key: const ValueKey('session-resume'), onPressed: !c.connection.connected || sending ? null : resume, icon: const Icon(Icons.play_arrow_rounded), label: const Text('Oturumu sürdür'))],
         if (c.snapshot.project(session.projectId) != null) ...[const SizedBox(height: 10), OutlinedButton.icon(key: const ValueKey('session-new-project'), onPressed: !c.connection.connected || sending ? null : () => openScreen(context, NewSessionScreen(controller: c, projectId: session.projectId)), icon: const Icon(Icons.add_rounded), label: const Text('Bu projede yeni oturum'))],
       ]))),
-      if (live) Flexible(flex: 2, child: LayoutBuilder(builder: (context, constraints) => ConstrainedBox(constraints: BoxConstraints(maxHeight: constraints.maxHeight), child: SingleChildScrollView(key: PageStorageKey('composer:${widget.sessionId}'), primary: false, child: _composer(context, session!, availableModes))))),
+      // This is a height cap, not a flex allocation: the transcript keeps unused space.
+      if (live) ConstrainedBox(constraints: BoxConstraints(maxHeight: math.min(constraints.maxHeight, math.max(160, constraints.maxHeight * .75))), child: _composer(context, session!, availableModes)),
+      ]))),
     ])));
   });
 
   Widget _composer(BuildContext context, Session session, List<String> modes) {
     final enabled = widget.controller.connection.connected && !sending && !draftLoading && identity == attachedIdentity;
-    return Material(color: Theme.of(context).colorScheme.surfaceContainerLow, child: Padding(padding: const EdgeInsets.fromLTRB(16, 8, 16, 12), child: Column(mainAxisSize: MainAxisSize.min, children: [
+    return Material(color: Theme.of(context).colorScheme.surfaceContainerLow, child: Padding(padding: const EdgeInsets.fromLTRB(16, 8, 16, 12), child: LayoutBuilder(builder: (context, constraints) => Column(mainAxisSize: MainAxisSize.min, children: [
+      Flexible(child: SingleChildScrollView(key: PageStorageKey('composer:${widget.sessionId}'), primary: false, child: Column(mainAxisSize: MainAxisSize.min, children: [
       if (draftError != null) ErrorNotice(draftError!),
       for (final operation in widget.controller.pendingBranchDrafts(widget.sessionId)) Padding(padding: const EdgeInsets.only(bottom: 12), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [Text('Dal istemi güvenle saklandı', style: Theme.of(context).textTheme.titleSmall), const Text('Geçerli taslağı değiştirmeden önce metni ve görselleri incele.'), Align(alignment: Alignment.centerLeft, child: TextButton(onPressed: enabled ? () => reviewBranch(operation) : null, child: const Text('İncele')))])),
       Wrap(spacing: 8, children: [IconButton(tooltip: 'Komut paletini aç', onPressed: enabled ? palette : null, icon: const Icon(Icons.terminal_rounded)), IconButton(tooltip: 'Galeriden görsel ekle', onPressed: enabled ? () => addImages() : null, icon: const Icon(Icons.add_photo_alternate_outlined)), IconButton(tooltip: 'Kameradan görsel ekle', onPressed: enabled ? () => addImages(camera: true) : null, icon: const Icon(Icons.photo_camera_outlined)), IconButton(tooltip: 'Paylaşılan görselleri ekle', onPressed: enabled ? () => addImages(shared: true) : null, icon: const Icon(Icons.share_outlined)), IconButton(tooltip: 'Taslağı sil', onPressed: enabled && (message.text.isNotEmpty || attachments.isNotEmpty || fileContext.isNotEmpty) ? discardDraft : null, icon: const Icon(Icons.delete_outline_rounded))]),
@@ -341,10 +348,13 @@ class _SessionScreenState extends State<SessionScreen> {
       if (attachments.isNotEmpty) Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Text('Görsel desteği seçili modele bağlıdır; desteklenmeyen modelde gönderim reddedilebilir.', style: Theme.of(context).textTheme.bodySmall)),
       Wrap(spacing: 8, children: [TextButton.icon(onPressed: enabled ? () => addFile(session) : null, icon: const Icon(Icons.attach_file_rounded), label: const Text('Dosya metni ekle')), if (message.text.startsWith('/')) TextButton(onPressed: enabled ? () async { if (await confirm(context, 'Komut değil, düz metin gönder?', 'Başındaki / işareti çalıştırılmaz. Metin aynen modele gönderilir.', action: 'Düz metin gönder')) await send(session, literal: true); } : null, child: const Text('/ metnini aynen gönder'))]),
       for (final file in fileContext) ListTile(title: Text('${file['path']}'), subtitle: Text('${'${file['text']}'.length} karakter · ${file['truncated'] == true ? 'kesilmiş' : 'tam'} metin'), trailing: IconButton(tooltip: 'Dosya bağlamını kaldır', onPressed: enabled ? () { setState(() => fileContext.remove(file)); draftChanged(); } : null, icon: const Icon(Icons.close_rounded))),
-      Row(children: [Expanded(child: Semantics(label: 'Mesaj gönderme biçimi', child: DropdownButtonHideUnderline(child: DropdownButton<String>(value: mode, isExpanded: true, items: modes.map((m) => DropdownMenuItem(value: m, child: Text(modeLabel(m)))).toList(), onChanged: enabled ? (value) => switchMode(value!) : null)))), if (session.supports('session.abort') && session.status == 'running') IconButton(tooltip: 'Çalışmayı kes', onPressed: enabled ? () => action(session, 'abort') : null, icon: const Icon(Icons.stop_circle_outlined))]),
+      Row(children: [Expanded(child: Semantics(label: 'Mesaj gönderme biçimi', child: DropdownButtonHideUnderline(child: DropdownButton<String>(value: mode, isExpanded: true, itemHeight: null, items: modes.map((m) => DropdownMenuItem(value: m, child: Text(modeLabel(m)))).toList(), onChanged: enabled ? (value) => switchMode(value!) : null)))), if (session.supports('session.abort') && session.status == 'running') IconButton(tooltip: 'Çalışmayı kes', onPressed: enabled ? () => action(session, 'abort') : null, icon: const Icon(Icons.stop_circle_outlined))]),
       Padding(padding: const EdgeInsets.only(bottom: 8), child: Align(alignment: Alignment.centerLeft, child: Text(switch (mode) { 'session.steer' => 'Devam eden çalışmayı yönlendirir; yeni bir oturum açmaz.', 'session.follow_up' => 'Geçerli turdan sonra ele alınacak takip istemi.', _ => 'Bu konuşmaya yeni bir istem gönder.' }, style: Theme.of(context).textTheme.bodySmall))),
-      Row(crossAxisAlignment: CrossAxisAlignment.end, children: [Expanded(child: TextField(controller: message, enabled: !sending && !draftLoading, minLines: 1, maxLines: 6, textCapitalization: TextCapitalization.sentences, decoration: const InputDecoration(labelText: 'OMP’ye mesaj', hintText: 'OMP’ye yaz… / ile komut aç', alignLabelWithHint: true))), const SizedBox(width: 8), IconButton.filled(tooltip: message.text.startsWith('/') ? 'Komut paletini aç' : modeLabel(mode), onPressed: enabled && (message.text.trim().isNotEmpty || attachments.isNotEmpty || fileContext.isNotEmpty) ? () => send(session) : null, icon: sending ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.arrow_upward_rounded), style: IconButton.styleFrom(minimumSize: const Size(52, 52)))])
-    ])));
+      ]))),
+      const SizedBox(height: 8),
+      // Only ancillary controls scroll; typing and sending stay above the IME.
+      Row(crossAxisAlignment: CrossAxisAlignment.end, children: [Expanded(child: ConstrainedBox(constraints: BoxConstraints(maxHeight: math.min(math.max(0, constraints.maxHeight - 8), math.max(MediaQuery.textScalerOf(context).scale(24) + 48, constraints.maxHeight - 56))), child: TextField(controller: message, enabled: !sending && !draftLoading, minLines: 1, maxLines: 6, textCapitalization: TextCapitalization.sentences, decoration: const InputDecoration(labelText: 'OMP’ye mesaj', hintText: 'OMP’ye yaz… / ile komut aç', alignLabelWithHint: true)))), const SizedBox(width: 8), IconButton.filled(tooltip: message.text.startsWith('/') ? 'Komut paletini aç' : modeLabel(mode), onPressed: enabled && (message.text.trim().isNotEmpty || attachments.isNotEmpty || fileContext.isNotEmpty) ? () => send(session) : null, icon: sending ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.arrow_upward_rounded), style: IconButton.styleFrom(minimumSize: const Size(52, 52)))])
+    ]))));
   }
 }
 

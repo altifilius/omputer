@@ -43,6 +43,29 @@ OmputerController navigationController(NavigationNative native) => OmputerContro
   ..connection = ConnectionState.fromJson({'paired': true, 'connected': true})
   ..snapshot = Snapshot.fromJson({'sequence': 1, 'projects': [{'id': 'project', 'name': 'Proje', 'goal': List.filled(60, 'uzun hedef').join(' '), 'summary': 'Hidden durable memory', 'nextStep': 'Sıradaki gerçek adım', 'activity': {'sessionId': 'session', 'lastAssistantText': 'Hidden live answer'}}], 'sessions': [{'id': 'session', 'projectId': 'project', 'name': 'Unique session result', 'transport': 'bridge', 'status': 'idle', 'capabilities': ['session.prompt']}]});
 
+Snapshot parallelSnapshot({bool terminal = false, bool updated = false}) {
+  Json live(String id, String projectId, int minute) => {
+    'id': id, 'projectId': projectId, 'name': 'Proje',
+    'transport': terminal ? 'archive' : 'bridge',
+    'status': terminal ? 'active-unbridged' : 'running',
+    'writerConnected': !terminal,
+    'updatedAt': '2026-10-28T12:${minute.toString().padLeft(2, '0')}:00Z',
+    'capabilities': terminal ? <String>[] : ['session.prompt'],
+  };
+  final first = live('terminal-first-12345678', 'project', 2);
+  final second = live('terminal-second-12345678', 'project', updated ? 5 : 1);
+  return Snapshot.fromJson({
+    'projects': [{'id': 'project', 'name': 'Proje'}, {'id': 'other', 'name': 'Başka proje'}],
+    'sessions': [
+      if (updated) second else first,
+      if (updated) first else second,
+      live('other-live', 'other', 3),
+      {'id': 'past-one', 'projectId': 'project', 'name': 'Eski konuşma', 'transport': 'archive', 'status': 'closed'},
+      {'id': 'past-two', 'projectId': 'project', 'name': 'Daha eski konuşma', 'transport': 'archive', 'status': 'closed'},
+    ],
+  });
+}
+
 void main() {
   testWidgets('share picker cannot apply an old identity event after computer changes', (tester) async {
     final native = NavigationNative(); final c = navigationController(native);
@@ -50,7 +73,7 @@ void main() {
     c.pendingNavigation = {'sharedImages': true}; c.navigation.value = c.pendingNavigation;
     await tester.pumpAndSettle(); await tester.tap(find.text('Konuşma seç')); await tester.pumpAndSettle();
     c.localState = {'identity': 'other-computer', 'sections': {}};
-    await tester.tap(find.text('Unique session result')); await tester.pumpAndSettle();
+    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('Unique session result'))); await tester.pumpAndSettle();
     expect(find.byType(SessionScreen), findsNothing); expect(native.sharedImageReads, 0);
     expect(native.calls.where((call) => call['method'] == 'POST'), isEmpty);
     await tester.pumpWidget(const SizedBox.shrink());
@@ -96,19 +119,26 @@ void main() {
     expect(native.calls.where((call) => call['method'] == 'POST'), isEmpty);
     await tester.pumpWidget(const SizedBox.shrink());
   });
-  testWidgets('overview uses explicit two-line goal and hides long content until expand', (tester) async {
+  testWidgets('overview expands and collapses project context without leaving home', (tester) async {
     final native = NavigationNative();
     final c = navigationController(native);
     await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.light), home: HomeScreen(controller: c)));
     await tester.pump();
-    expect(tester.widget<Text>(find.byKey(const ValueKey('overview-goal:project'))).maxLines, 2);
     expect(find.text('Hidden durable memory'), findsNothing);
     expect(find.text('Hidden live answer'), findsNothing);
     await tester.ensureVisible(find.text('Özeti genişlet'));
     await tester.tap(find.text('Özeti genişlet'));
     await tester.pump();
-    expect(tester.widget<Text>(find.byKey(const ValueKey('overview-goal:project'))).maxLines, isNull);
     expect(find.text('Hidden durable memory'), findsOneWidget);
+    expect(find.text('Hidden live answer'), findsOneWidget);
+    expect(find.byType(ProjectScreen), findsNothing);
+    await tester.ensureVisible(find.text('Özeti daralt'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Özeti daralt'));
+    await tester.pump();
+    expect(find.text('Hidden durable memory'), findsNothing);
+    expect(find.text('Hidden live answer'), findsNothing);
+    expect(find.byType(HomeScreen), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
     c.dispose();
   });
@@ -117,11 +147,133 @@ void main() {
     final native = NavigationNative();
     final c = navigationController(native);
     await tester.pumpWidget(MaterialApp(home: HomeScreen(controller: c)));
-    await tester.ensureVisible(find.byKey(const ValueKey('recent:project')));
-    await tester.tap(find.byKey(const ValueKey('recent:project')));
+    await tester.ensureVisible(find.byKey(const ValueKey('session')));
+    await tester.tap(find.descendant(of: find.byKey(const ValueKey('session')), matching: find.byType(ListTile)));
     await tester.pumpAndSettle();
     expect(tester.widget<SessionScreen>(find.byType(SessionScreen)).sessionId, 'session');
     expect(find.byType(ProjectScreen), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    c.dispose();
+  });
+
+  for (final terminal in [false, true]) {
+    testWidgets('overview selects both same-name ${terminal ? 'terminal-open' : 'bridged'} sessions by identity and retains order', (tester) async {
+      tester.view.physicalSize = const Size(540, 1800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final native = NavigationNative();
+      final c = navigationController(native)..snapshot = parallelSnapshot(terminal: terminal);
+      await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.light), home: HomeScreen(controller: c)));
+      await tester.pump();
+      final project = find.byKey(const ValueKey('project'));
+      Finder rows() => find.descendant(of: project, matching: find.byType(LocalSessionRow));
+      List<String> ids() => tester.widgetList<LocalSessionRow>(rows()).map((row) => row.session.id).toList();
+      expect(ids(), ['terminal-first-12345678', 'terminal-second-12345678']);
+      final labels = <String, String>{};
+      for (final row in tester.widgetList<LocalSessionRow>(rows())) {
+        final tile = tester.widget<ListTile>(find.descendant(of: find.byKey(row.key!), matching: find.byType(ListTile)));
+        labels[row.session.id] = ((tile.subtitle! as Column).children.last as Text).data!;
+      }
+      expect(labels.values.toSet(), hasLength(2));
+      expect(find.byKey(const ValueKey('recent:project')), findsNothing);
+      expect(find.text('Eski konuşma'), findsNothing);
+      c.snapshot = parallelSnapshot(terminal: terminal, updated: true);
+      c.notifyListeners();
+      await tester.pump();
+      expect(ids(), ['terminal-first-12345678', 'terminal-second-12345678']);
+      for (final id in ids()) {
+        final row = find.byKey(ValueKey(id));
+        await tester.ensureVisible(row);
+        final tileFinder = find.descendant(of: row, matching: find.byType(ListTile));
+        final tile = tester.widget<ListTile>(tileFinder);
+        expect(((tile.subtitle! as Column).children.last as Text).data, labels[id]);
+        await tester.tap(tileFinder);
+        await tester.pumpAndSettle();
+        expect(tester.widget<SessionScreen>(find.byType(SessionScreen)).sessionId, id);
+        expect(find.byType(ProjectScreen), findsNothing);
+        expect(native.calls.any((call) => Uri.parse('${call['path']}').path == '/v1/sessions/$id/messages'), isTrue);
+        if (terminal) {
+          expect(find.byType(TextField), findsNothing);
+          expect(find.byKey(const ValueKey('session-resume')), findsNothing);
+          expect(c.snapshot.session(id)!.writerConnected, isFalse);
+          expect(c.snapshot.session(id)!.canSendMessages, isFalse);
+        }
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+      }
+      await tester.pumpWidget(const SizedBox.shrink());
+      c.dispose();
+    });
+  }
+
+  testWidgets('overview search does not duplicate project sessions and honors live and pinned filters', (tester) async {
+    tester.view.physicalSize = const Size(540, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final c = navigationController(NavigationNative())..snapshot = parallelSnapshot(terminal: true);
+    c.localState = {'identity': 'test', 'sections': {'pins': {'project:project': true}}};
+    await tester.pumpWidget(MaterialApp(home: HomeScreen(controller: c)));
+    await tester.enterText(find.byType(TextField), 'Proje');
+    await tester.pump();
+    expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) => row.session.id).toSet(), {'terminal-first-12345678', 'terminal-second-12345678', 'other-live'});
+    expect(find.byType(LocalSessionRow), findsNWidgets(3));
+    expect(find.byKey(const ValueKey('search:terminal-first-12345678')), findsNothing);
+    await tester.tap(find.widgetWithText(FilterChip, 'Canlı oturumu olan'));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('project')), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilterChip, 'Sabitlenen'));
+    await tester.pump();
+    expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) => row.session.id).toList(), ['terminal-first-12345678', 'terminal-second-12345678']);
+    expect(find.byKey(const ValueKey('other')), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    c.dispose();
+  });
+
+  testWidgets('project live filter includes terminal-open sessions and history remains separately selectable', (tester) async {
+    tester.view.physicalSize = const Size(540, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final c = navigationController(NavigationNative())..snapshot = parallelSnapshot(terminal: true);
+    await tester.pumpWidget(MaterialApp(home: HomeScreen(controller: c)));
+    final project = find.byKey(const ValueKey('project'));
+    await tester.tap(find.descendant(of: project, matching: find.text('Projeyi aç')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilterChip, 'Canlı'));
+    await tester.pump();
+    expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) => row.session.id).toList(), ['terminal-first-12345678', 'terminal-second-12345678']);
+    final references = tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) {
+      final tile = tester.widget<ListTile>(find.descendant(of: find.byKey(row.key!), matching: find.byType(ListTile)));
+      return ((tile.subtitle! as Column).children.last as Text).data;
+    }).toSet();
+    expect(references, hasLength(2));
+    await tester.tap(find.widgetWithText(FilterChip, 'Geçmiş'));
+    await tester.pump();
+    expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) => row.session.id).toSet(), {'past-one', 'past-two'});
+    await tester.tap(find.text('Eski konuşma'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<SessionScreen>(find.byType(SessionScreen)).sessionId, 'past-one');
+    await tester.pumpWidget(const SizedBox.shrink());
+    c.dispose();
+  });
+
+  testWidgets('archive-only project retains recent history shortcut without dumping history rows', (tester) async {
+    final c = navigationController(NavigationNative())..snapshot = Snapshot.fromJson({
+      'projects': [{'id': 'project', 'name': 'Proje'}],
+      'sessions': [
+        {'id': 'older', 'projectId': 'project', 'name': 'Older', 'transport': 'archive', 'status': 'closed', 'updatedAt': '2026-10-27T12:00:00Z'},
+        {'id': 'latest', 'projectId': 'project', 'name': 'Latest', 'transport': 'archive', 'status': 'closed', 'updatedAt': '2026-10-28T12:00:00Z'},
+      ],
+    });
+    await tester.pumpWidget(MaterialApp(home: HomeScreen(controller: c)));
+    expect(find.byType(LocalSessionRow), findsNothing);
+    final recent = find.byKey(const ValueKey('recent:project'));
+    await tester.ensureVisible(recent);
+    await tester.tap(recent);
+    await tester.pumpAndSettle();
+    expect(tester.widget<SessionScreen>(find.byType(SessionScreen)).sessionId, 'latest');
     await tester.pumpWidget(const SizedBox.shrink());
     c.dispose();
   });

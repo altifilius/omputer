@@ -1,5 +1,13 @@
 # Changelog
 
+## Android 1.1.2 (6)
+
+- Listed each open session beneath its project on the home screen instead of exposing only one recent-session shortcut. Same-name sessions have collision-aware identity references; live updates keep established row order and search avoids duplicate rows.
+- Included terminal-open, unbridged sessions in open-session discovery and filters without granting message or resume capabilities. Closed history stays in project detail and retains the recent-history shortcut when no session is open.
+- Anchored the message editor and send action at the usable bottom above the Android keyboard. Ancillary composer controls scroll independently; short-screen headers are bounded and multiline input retains usable height with model metadata, attachments and large text.
+- Added behavioral coverage for parallel-session navigation, read-only terminal sessions, filters, independent drafts and short/large-text keyboard layouts. See `VERIFICATION.md` for the native emulator scope and physical-device limit.
+- October 29: installed 1.1.2 (6) over the existing Samsung application with the same signer; exact installed APK hash, preserved first-install record, separate session navigation and actual keyboard layout verified without sending a prompt.
+
 ## Android 1.1.1 (5)
 
 - Kept authenticated connection bootstrap on a separate bounded worker so an unreachable PC cannot queue ahead of cached startup, local preferences or durable drafts.

@@ -31,6 +31,50 @@ class ProjectNative implements NativeAdapter {
   }
 }
 
+class ComposerNative extends ProjectNative {
+  ComposerNative({required this.withHistory, required this.withAttachments}) {
+    if (withAttachments) drafts['session:session:session.prompt'] = {
+      'text': 'Saved draft',
+      'attachments': [for (var i = 0; i < 4; i++) {'type': 'image', 'mimeType': 'image/png', 'data': png}],
+      'files': [{'path': 'lib/source.dart', 'text': 'Selected source', 'truncated': false}],
+    };
+  }
+  static const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+  final bool withHistory, withAttachments;
+  final drafts = <String, Json>{};
+  final commands = <Json>[];
+  Json get data => {'projects': [{'id': 'project', 'name': 'Project'}], 'sessions': [{'id': 'session', 'projectId': 'project', 'transport': 'rpc', 'status': 'running', 'model': {'name': 'Selected model', 'provider': 'local', 'id': 'model'}, 'thinkingLevel': 'high', 'capabilities': ['session.prompt', 'session.steer', 'session.follow_up', 'session.abort']}]};
+  @override
+  Future<Object?> invoke(String method, [Json? args]) async {
+    if (method == 'draftLoad') return drafts[args!['key']];
+    if (method == 'draftSave') { drafts['${args!['key']}'] = object(args['value']); return null; }
+    if (method == 'draftDelete') { drafts.remove(args!['key']); return null; }
+    if (method == 'draftList') return drafts;
+    if (method == 'operationSave') return null;
+    if (method == 'request') {
+      if (args!['path'] == '/v1/snapshot') return data;
+      if ('${args['path']}'.contains('/messages')) return {'messages': [if (withHistory) for (var i = 0; i < 30; i++) {'id': 'message-$i', 'role': 'assistant', 'sequence': i, 'content': 'Transcript message $i\nPreserved conversation history.'}], 'hasMore': false};
+      if (args['path'] == '/v1/commands') { final body = object(args['body']); commands.add(body); return {'id': body['id'], 'success': true}; }
+    }
+    return super.invoke(method, args);
+  }
+}
+
+void expectBottomComposer(WidgetTester tester, double usableBottom) {
+  final input = find.byType(TextField);
+  final send = find.widgetWithIcon(IconButton, Icons.arrow_upward_rounded);
+  final inputRect = tester.getRect(input);
+  final sendRect = tester.getRect(send);
+  expect(input.hitTestable(), findsOneWidget);
+  expect(send.hitTestable(), findsOneWidget);
+  expect(inputRect.top, greaterThanOrEqualTo(tester.getRect(find.byType(AppBar)).bottom));
+  expect(inputRect.height, greaterThanOrEqualTo(48), reason: 'The editable must retain a readable touch target when the IME consumes most of a short screen.');
+  expect(inputRect.bottom, lessThanOrEqualTo(usableBottom));
+  expect(sendRect.bottom, lessThanOrEqualTo(usableBottom));
+  expect(usableBottom - inputRect.bottom, inInclusiveRange(0, 24), reason: 'The editable row belongs at the usable bottom, not at the top of a loose flex slot.');
+  expect(usableBottom - sendRect.bottom, inInclusiveRange(0, 24));
+}
+
 OmputerController projectController(ProjectNative native) => OmputerController(adapter: native)
   ..connection = ConnectionState.fromJson({'paired': true, 'connected': true})
   ..snapshot = Snapshot.fromJson({'sequence': 1, 'projects': [{'id': 'project', 'name': 'Project', 'sourceSessionId': 'missing-session', 'summary': 'Original'}]});
@@ -164,20 +208,76 @@ void main() {
     await removeScreen(tester, controller);
   });
 
-  testWidgets('composer has an accessible name and remains scrollable at large font with keyboard', (tester) async {
-    tester.view.physicalSize = const Size(393, 851);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    final native = ProjectNative();
-    final controller = projectController(native);
-    controller.snapshot = Snapshot.fromJson({'sessions': [{'id': 'session', 'transport': 'rpc', 'status': 'idle', 'capabilities': ['session.prompt']}]});
-    final semantics = tester.ensureSemantics();
-    await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.light), builder: (context, child) => MediaQuery(data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(2), viewInsets: const EdgeInsets.only(bottom: 280)), child: child!), home: SessionScreen(controller: controller, sessionId: 'session')));
-    await tester.pumpAndSettle();
-    expect(find.bySemanticsLabel(RegExp('OMP’ye mesaj')), findsOneWidget);
-    expect(tester.takeException(), isNull);
-    semantics.dispose();
-    await removeScreen(tester, controller);
-  });
+  for (final layout in [
+    (name: 'phone', size: const Size(393, 851), scale: 1.0, keyboard: 280.0),
+    (name: 'short large-text phone', size: const Size(360, 640), scale: 2.0, keyboard: 220.0),
+    (name: 'short phone with tall native keyboard', size: const Size(360, 640), scale: 1.0, keyboard: 310.0),
+  ]) {
+    for (final withHistory in [false, true]) {
+      testWidgets('${layout.name} keeps editable and send at bottom with ${withHistory ? 'long transcript and attachments' : 'empty transcript'} before and after IME', (tester) async {
+        tester.view.physicalSize = layout.size;
+        tester.view.devicePixelRatio = 1;
+        tester.view.padding = const FakeViewPadding(top: 48, bottom: 24);
+        addTearDown(() { tester.view.resetPhysicalSize(); tester.view.resetDevicePixelRatio(); tester.view.resetPadding(); tester.view.resetViewInsets(); });
+        final native = ComposerNative(withHistory: withHistory, withAttachments: withHistory);
+        final controller = projectController(native)..snapshot = Snapshot.fromJson(native.data);
+        final semantics = tester.ensureSemantics();
+        await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.light), builder: (context, child) => MediaQuery(data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(layout.scale)), child: child!), home: SessionScreen(controller: controller, sessionId: 'session')));
+        await tester.pumpAndSettle();
+        expect(find.bySemanticsLabel(RegExp('OMP’ye mesaj')), findsOneWidget);
+        expectBottomComposer(tester, layout.size.height - 24);
+        final input = find.byType(TextField);
+        await tester.tap(input);
+        await tester.enterText(input, 'Keep my keyboard draft');
+        tester.view.padding = const FakeViewPadding(top: 48);
+        tester.view.viewInsets = FakeViewPadding(bottom: layout.keyboard);
+        await tester.pumpAndSettle();
+        expectBottomComposer(tester, layout.size.height - layout.keyboard);
+        expect(tester.widget<EditableText>(find.descendant(of: input, matching: find.byType(EditableText))).focusNode.hasFocus, isTrue);
+
+        if (withHistory) {
+          final tools = find.byKey(const PageStorageKey('composer:session'));
+          final toolScroll = find.descendant(of: tools, matching: find.byType(Scrollable)).first;
+          expect(tester.state<ScrollableState>(toolScroll).position.maxScrollExtent, greaterThan(0));
+          final inputBottom = tester.getRect(input).bottom;
+          for (final tooltip in ['Galeriden görsel ekle', 'Kameradan görsel ekle', 'Paylaşılan görselleri ekle', 'Taslağı sil', 'Eklenen görseli kaldır', 'Dosya bağlamını kaldır', 'Çalışmayı kes']) {
+            final control = find.byTooltip(tooltip).first;
+            await tester.ensureVisible(control);
+            await tester.pumpAndSettle();
+            expect(control.hitTestable(), findsOneWidget);
+            expect(tester.getRect(input).bottom, closeTo(inputBottom, 1));
+          }
+          final fileAction = find.widgetWithText(TextButton, 'Dosya metni ekle');
+          await tester.ensureVisible(fileAction);
+          await tester.pumpAndSettle();
+          expect(fileAction.hitTestable(), findsOneWidget);
+          expect(native.drafts['session:session:session.prompt']?['text'], 'Keep my keyboard draft');
+          expect(objects(native.drafts['session:session:session.prompt']?['attachments']), hasLength(4));
+          expect(objects(native.drafts['session:session:session.prompt']?['files']).single['path'], 'lib/source.dart');
+        }
+
+        await tester.enterText(input, List.generate(10, (i) => 'Draft line $i').join('\n'));
+        await tester.pumpAndSettle();
+        expectBottomComposer(tester, layout.size.height - layout.keyboard);
+        tester.view.viewInsets = const FakeViewPadding();
+        tester.view.padding = const FakeViewPadding(top: 48, bottom: 24);
+        await tester.pumpAndSettle();
+        expectBottomComposer(tester, layout.size.height - 24);
+        tester.view.padding = const FakeViewPadding(top: 48);
+        tester.view.viewInsets = FakeViewPadding(bottom: layout.keyboard);
+        await tester.pumpAndSettle();
+        expectBottomComposer(tester, layout.size.height - layout.keyboard);
+        await tester.tap(find.widgetWithIcon(IconButton, Icons.arrow_upward_rounded));
+        await tester.pumpAndSettle();
+        expect(native.commands.single['sessionId'], 'session');
+        expect(native.commands.single['action'], 'session.prompt');
+        expect(object(native.commands.single['payload'])['message'], startsWith('Draft line 0\nDraft line 1'));
+        expect(objects(object(native.commands.single['payload'])['images']), hasLength(withHistory ? 4 : 0));
+        expect(tester.widget<TextField>(input).controller!.text, isEmpty);
+        expect(tester.takeException(), isNull);
+        semantics.dispose();
+        await removeScreen(tester, controller);
+      });
+    }
+  }
 }
