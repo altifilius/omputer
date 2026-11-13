@@ -105,3 +105,12 @@ Ortak dosyaların tümü körlemesine stage edilmez. Kaynak yayını temiz HEAD 
 Yayın öncesi HEAD tabanından ayrılan gerçek1.1.2 içeriğinde `bun test bridge/dialogs.test.ts bridge/lifecycle.test.ts` yeniden çalıştı: **10/10**, **74 assertion**, yaklaşık **2,19s**. Bu kontrol eşzamanlı1.2.0 değişikliklerini kullanmaz; önceki fiziksel telefon kabulü tekrar edilmiş gibi sunulmaz.
 
 İki JSON kanıtında kullanıcı konuşması, cihaz/oturum kimliği, özel adres, parola veya token yoktur. Makineye özgü kurulum hash’leri gizli erişim değeri değildir. Ham ekran/XML/log, APK/dist ve imzalama dosyaları yayımlanmaz. Commit/push sonucu gerçekleştikten sonra bu bölümde kanıtlı SHA ve uzak dal sonucu kaydedilir.
+
+### Tamamlanan kaynak yayını
+
+**[`d37f7a23dd31398242e1f9332b7761eb5e887338`](https://github.com/altifilius/omputer/commit/d37f7a23dd31398242e1f9332b7761eb5e887338)** — `fix(bridge): forward HTML-form questions to Android`. **11 dosya, 252 ekleme / 3 silme**; yukarıdaki dar kaynak, rapor ve yalnız-sentetik kanıt kapsamı. Commit GPG ile imzalandı; `git verify-commit` **Good signature** döndü. Bu yerel kriptografik doğrulamadır; GitHub Verified rozeti ayrıca sorgulanmadı.
+
+SSH push **`58ca2ac..d37f7a2` → `origin/main`** başarılı. Bağımsız `git ls-remote origin refs/heads/main` aynı tam SHA’yı verdi; sonuç **14 Kasım 2026 01:13 +03:00** itibarıyla doğrulandı. Force-push, amend veya farklı uzak dal yok. İlk imza denemesi kilitli anahtar/pinentry ortamı nedeniyle zaman aşımına uğradı; HEAD değişmedi ve yalnız o denemenin boş index kilidi kaldırıldı. Mevcut imzalama ayarı kapatılmadan doğru terminal ortamıyla sonraki deneme başarılı oldu; parola alınmadı/kaydedilmedi.
+
+Eşzamanlı1.2.0/Android/PC çalışma dosyaları ve index’teki ilgisiz kayıtlar korunarak yalnız seçili içerik yayımlandı. Bu kaynak yayını üretim daemon’ı, telefon verisi, kurulu APK veya açık OMP süreçlerini değiştirmez. Kaynak commit/push sonucu bu ek belge kaydıyla da yayıma alınır; açık eski terminal süreçleri için `/restart` ve eski `dist/Omputer` sınırları geçerlidir.
+

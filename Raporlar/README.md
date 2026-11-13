@@ -11,7 +11,7 @@ updated: 2026-11-14
 
 | Tarih | Rapor | Durum |
 |---|---|---|
-| 2026-11-13 | [HTML-form OMP sorularının Android’e iletimi](2026-11-13-omp-soru-iletimi.md) | Terminal OMP18.20 formDialog uyumsuzluğu bridge1.1.2 ile düzeltildi;10dar test, gerçek form ve fizikseltelefon→AskTool yanıtı geçti. Yeni hash-sahipli release aktif, özgün release korunur; servis/telefon restart yok. Açık eski terminal modülleri normal `/restart` bekliyor; dist eski paket |
+| 2026-11-13 | [HTML-form OMP sorularının Android’e iletimi](2026-11-13-omp-soru-iletimi.md) | Bridge1.1.2:10dar test, gerçek form/fizikseltelefon yanıtı geçti; dar kaynak+rapor+sentetikkanıt GPG imzalı `d37f7a2` ile origin/main’e push edildi, uzak SHA eşleşti. Yeni yan-yana release aktif; açık eski terminal normal `/restart` bekliyor, dist eski |
 | 2026-11-13 | [Bütünsel neumorphic UI planı ve uygulama](2026-11-13-butunsel-neumorphic-ui.md) | Plan→execute tamam; tüm Android yüzeylerinde tek grafit/sis sistemi.187 test/analiz temiz, bağımsız phone review ship;1.2.0(9) Samsung’a exact-APK/same-signer kuruldu. Telefon native/IME geçti; tablet kapsam dışı |
 | 2026-11-13 | [Dönen projeler ve çalışan oturum avatarı](2026-11-13-donen-projeler-ve-calisan-avatar.md) | Android1.1.4(8) özgün imzayla Samsung’a kuruldu; exact APK/ilk kurulum korundu. 39 test+kontrol regresyonu geçti; gerçek 18 proje/çalışma avatarı/IME görüldü. FAB çakışması giderildi, PC/bridge aynı |
 | 2026-11-13 | [Neumorphic mesaj alanı](2026-11-13-neumorphic-mesaj-alani.md) | Grafit dış kabartma/iç gölge ve amber odak uygulandı. Altı klavye/yerleşim + bir erişilebilir ad testi geçti; Android35 gerçek IME, açık/koyu ve %200 metin görüntüleri incelendi. Kaynak tamam; telefon/dağıtım aynı |
