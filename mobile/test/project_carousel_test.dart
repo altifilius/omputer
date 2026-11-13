@@ -78,7 +78,6 @@ class _HarnessState extends State<_Harness> {
           projects: projects,
           selectedProjectId: selected,
           autoAdvance: allowAuto,
-          initiallyPaused: false,
           height: height,
           pauseSignal: pauseSignal,
           onSelected: (id) => setState(() { selected = id; selections.add(id); }),
@@ -111,9 +110,10 @@ Finder get _rail => find.byKey(const ValueKey('project-carousel-rail'));
 Finder get _front => find.byWidgetPredicate((widget) => widget is ProjectOverviewCard && widget.selected);
 String _frontId(WidgetTester tester) => tester.widget<ProjectOverviewCard>(_front).project.id;
 
-Rect _paintRect(WidgetTester tester, Finder finder) {
-  final box = tester.renderObject<RenderBox>(finder);
-  return Rect.fromPoints(box.localToGlobal(Offset.zero), box.localToGlobal(box.size.bottomRight(Offset.zero)));
+Future<void> _finishAuto(WidgetTester tester) async {
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 1201));
+  await tester.pump();
 }
 
 Future<void> _choose(WidgetTester tester, int index, int count) async {
@@ -137,12 +137,12 @@ Future<void> _settle(WidgetTester tester) async {
 }
 
 Future<void> _advance(WidgetTester tester) async {
-  await tester.pump(const Duration(seconds: 6));
-  await _settle(tester);
+  await tester.pump(const Duration(seconds: 7));
+  await _finishAuto(tester);
 }
 
 void main() {
-  testWidgets('default paused entry keeps sessions stable until explicit play', (tester) async {
+  testWidgets('default deck waits seven idle seconds and slides slowly without play controls', (tester) async {
     final controller = _controller();
     final selections = <String>[];
     await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.light), home: Scaffold(
@@ -150,93 +150,86 @@ void main() {
         selectedProjectId: 'phone', onSelected: selections.add),
     )));
     await tester.pump();
-    await tester.pump(const Duration(minutes: 1));
-    expect(_frontId(tester), 'phone');expect(selections,isEmpty);
-    expect(find.byTooltip('Oynat'),findsOneWidget);
-    await tester.tap(_auto);await tester.pump();
-    await _advance(tester);
-    expect(_frontId(tester),'bridge');expect(selections,['bridge']);
-    await _dispose(tester,controller);
-  });
-
-  testWidgets('upright neighbors remain layered and every card slides downward after six seconds', (tester) async {
-    final controller = _controller();
-    final key = GlobalKey<_HarnessState>();
-    await _mount(tester, controller, key, selected: 'notes');
-    final stage = tester.getRect(_deck);
-    final front = _paintRect(tester, _card('notes'));
-    final above = _paintRect(tester, _card('files'));
-    final below = _paintRect(tester, _card('bridge'));
-    expect(stage.height, 248);
-    expect(front.height, 192);
-    expect(front.top - stage.top, 28);
-    expect(above.top - stage.top, closeTo(9.76, .01));
-    expect(below.top - stage.top, closeTo(57.76, .01));
-    expect(above.width, closeTo(front.width * .94, .01));
-    expect(below.bottom, greaterThan(front.bottom));
-    expect(above.intersect(stage).top, lessThan(front.top));
-    expect(find.byIcon(Icons.expand_less_rounded), findsNothing);
-    expect(find.byIcon(Icons.expand_more_rounded), findsNothing);
-    final before = {for (final id in ['phone', 'bridge', 'notes', 'files', 'network']) id: tester.getTopLeft(_card(id)).dy};
-    await tester.pump(const Duration(milliseconds: 5999));
-    expect(tester.getTopLeft(_card('notes')).dy, front.top);
-    expect(key.currentState!.selections, isEmpty);
+    expect(_auto, findsNothing);
+    expect(find.byIcon(Icons.play_arrow_rounded), findsNothing);
+    expect(find.byIcon(Icons.pause_rounded), findsNothing);
+    expect(find.byIcon(Icons.replay_rounded), findsNothing);
+    final top = tester.getTopLeft(_card('phone')).dy;
+    await tester.pump(const Duration(milliseconds: 6999));
+    expect(tester.getTopLeft(_card('phone')).dy, top);
+    expect(selections, isEmpty);
     await tester.pump(const Duration(milliseconds: 1));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 40));
-    // There is no page-sized gap or replacement: the actual neighboring
-    // content follows the same downward trajectory, upright, in depth.
-    for (final id in ['bridge', 'notes', 'files', 'network']) {
-      expect(tester.getTopLeft(_card(id)).dy, greaterThan(before[id]!));
-    }
-    expect(tester.getTopLeft(_card('files')).dy, lessThan(front.top));
-    // Flutter's interpolation simulation completes strictly after its duration;
-    // at exactly 40 + 240ms it paints the endpoint but has not scheduled dwell.
-    await tester.pump(const Duration(milliseconds: 241));
-    await tester.pump();
-    expect(_frontId(tester), 'files');
-    expect(key.currentState!.selections, ['files']);
-    expect(tester.getTopLeft(_card('files')).dy, front.top);
-    await _advance(tester);
-    expect(_frontId(tester), 'network');
-    expect(key.currentState!.selections, ['files', 'network']);
-    expect(find.byTooltip('Başa dön'), findsOneWidget);
-    await tester.pump(const Duration(minutes: 2));
-    expect(_frontId(tester), 'network');
-    expect(key.currentState!.selections, ['files', 'network']);
-    await tester.tap(_auto);
-    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    final earlyTop = tester.getTopLeft(_card('phone')).dy;
+    expect(earlyTop, greaterThan(top));
     expect(_frontId(tester), 'phone');
-    expect(key.currentState!.selections, ['files', 'network', 'phone']);
-    await tester.pump(const Duration(seconds: 30));
-    expect(_frontId(tester), 'phone');
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(tester.getTopLeft(_card('phone')).dy, greaterThan(earlyTop));
+    expect(tester.getTopLeft(_card('bridge')).dy, lessThan(top));
+    await tester.pump(const Duration(milliseconds: 301));
+    await tester.pump();
+    expect(_frontId(tester), 'bridge');
+    expect(selections, ['bridge']);
+    final settledTop = tester.getTopLeft(_card('bridge')).dy;
+    await tester.pump(const Duration(milliseconds: 6999));
+    expect(tester.getTopLeft(_card('bridge')).dy, settledTop);
+    expect(selections, ['bridge']);
+    await tester.pump(const Duration(milliseconds: 1));
+    await _finishAuto(tester);
+    expect(_frontId(tester), 'notes');
+    expect(selections, ['bridge', 'notes']);
     await _dispose(tester, controller);
   });
 
-  testWidgets('rail endpoints and scrubbing select directly with no intermediate callbacks', (tester) async {
+  testWidgets('automatic progress stops at the last project and manual navigation remains finite', (tester) async {
+    final controller = _controller();
+    final key = GlobalKey<_HarnessState>();
+    await _mount(tester, controller, key, selected: 'files');
+    await _advance(tester);
+    expect(_frontId(tester), 'network');
+    expect(key.currentState!.selections, ['network']);
+    expect(_auto, findsNothing);
+    await tester.pump(const Duration(minutes: 2));
+    expect(_frontId(tester), 'network');
+    expect(key.currentState!.selections, ['network']);
+    await _key(tester, LogicalKeyboardKey.arrowDown);
+    expect(_frontId(tester), 'network');
+    await _key(tester, LogicalKeyboardKey.home);
+    expect(_frontId(tester), 'phone');
+    await _key(tester, LogicalKeyboardKey.arrowUp);
+    expect(_frontId(tester), 'phone');
+    expect(key.currentState!.selections, ['network', 'phone']);
+    await _advance(tester);
+    expect(_frontId(tester), 'bridge');
+    await _dispose(tester, controller);
+  });
+
+  testWidgets('rail endpoints and scrubbing select directly then restart idle countdown', (tester) async {
     final controller = _controller();
     final key = GlobalKey<_HarnessState>();
     await _mount(tester, controller, key);
-    expect(tester.getSize(_rail).width, 48);
-    final rail = tester.getRect(_rail);
-    await tester.tapAt(Offset(rail.center.dx, rail.bottom - 16));
-    await tester.pump();
+    await _choose(tester, 4, 5);
     expect(_frontId(tester), 'network');
-    expect(find.text('5/5'), findsOneWidget);
     expect(key.currentState!.selections, ['network']);
-    expect(find.byTooltip('Başa dön'), findsOneWidget);
-    await tester.tapAt(Offset(rail.center.dx, rail.top + 16));
-    await tester.pump();
+    await _choose(tester, 0, 5);
     expect(_frontId(tester), 'phone');
+    final rail = tester.getRect(_rail);
     final gesture = await tester.startGesture(Offset(rail.center.dx, rail.top + 16));
-    await gesture.moveTo(Offset(rail.center.dx, rail.center.dy));
+    await gesture.moveTo(rail.center);
     await tester.pump();
+    expect(_frontId(tester), 'notes');
+    await tester.pump(const Duration(seconds: 30));
+    expect(_frontId(tester), 'notes');
     await gesture.up();
     await tester.pump();
-    expect(_frontId(tester), 'notes');
     expect(key.currentState!.selections, ['network', 'phone', 'notes']);
-    await tester.pump(const Duration(seconds: 60));
+    await tester.pump(const Duration(milliseconds: 6999));
     expect(_frontId(tester), 'notes');
+    await tester.pump(const Duration(milliseconds: 1));
+    await _finishAuto(tester);
+    expect(_frontId(tester), 'files');
+    expect(key.currentState!.selections, ['network', 'phone', 'notes', 'files']);
     await _dispose(tester, controller);
   });
 
@@ -247,9 +240,8 @@ void main() {
     await _choose(tester, 1, 5);
     await _settle(tester);
     expect(key.currentState!.selections, ['bridge']);
-    expect(find.text('Yerel köprü'), findsOneWidget);
-    expect(find.text('Bilgisayarla yerel bağlantıyı koru'), findsOneWidget);
-    await tester.tap(find.text('Yerel köprü'));
+    expect(_frontId(tester), 'bridge');
+    await tester.tapAt(tester.getCenter(_card('bridge')));
     await _settle(tester);
     expect(tester.widget<ProjectScreen>(find.byType(ProjectScreen)).projectId, 'bridge');
     expect((controller.native as _NoRequests).calls, isEmpty);
@@ -285,7 +277,7 @@ void main() {
     await gesture.moveTo(Offset(rail.center.dx, y));
     await tester.pump();
     expect(_frontId(tester), 'files');
-    expect(tester.getTopLeft(_card('notes')).dy - frontTop, closeTo(22.32, .1));
+    expect(tester.getTopLeft(_card('notes')).dy, greaterThan(frontTop));
     expect(key.currentState!.selections, ['files']);
     await gesture.moveTo(Offset(rail.center.dx, rail.bottom - 16));
     await tester.pump();
@@ -299,50 +291,115 @@ void main() {
     await _dispose(tester, controller);
   });
 
-  testWidgets('manual downward page gesture pauses and never wraps at endpoints', (tester) async {
+  testWidgets('manual downward drag settles quickly and idle resumes without wrapping', (tester) async {
     final controller = _controller();
     final key = GlobalKey<_HarnessState>();
     await _mount(tester, controller, key);
-    final cardScroll = tester.state<ScrollableState>(find.descendant(
-      of: find.byKey(const ValueKey('project-card-scroll:phone')),
-      matching: find.byType(Scrollable),
-    ));
-    expect(cardScroll.position.maxScrollExtent, 0, reason: 'A fitting card must leave vertical gestures to the pager');
-    await tester.drag(_deck, const Offset(0, 180));
-    await tester.pump(const Duration(milliseconds: 800));
-    await tester.pump();
+    await tester.drag(_deck, const Offset(0, 100));
+    await _settle(tester);
     expect(_frontId(tester), 'bridge');
     expect(key.currentState!.selections, ['bridge']);
-    expect(find.byTooltip('Oynat'), findsOneWidget);
-    await tester.pump(const Duration(seconds: 60));
+    await tester.pump(const Duration(milliseconds: 6699));
     expect(_frontId(tester), 'bridge');
+    await tester.pump(const Duration(milliseconds: 1));
+    await _finishAuto(tester);
+    expect(_frontId(tester), 'notes');
     await _key(tester, LogicalKeyboardKey.home);
-    await _settle(tester);
     await tester.drag(_deck, const Offset(0, -180));
-    await tester.pump(const Duration(milliseconds: 800));
+    await _settle(tester);
     expect(_frontId(tester), 'phone');
-    expect(key.currentState!.selections, ['bridge', 'phone']);
+    await _key(tester, LogicalKeyboardKey.end);
+    await tester.drag(_deck, const Offset(0, 180));
+    await _settle(tester);
+    expect(_frontId(tester), 'network');
+    expect(key.currentState!.selections, ['bridge', 'notes', 'phone', 'network']);
     await _dispose(tester, controller);
   });
 
-  testWidgets('pause signal and data updates stay paused until explicit fresh play', (tester) async {
+  testWidgets('parent interaction signal cancels motion immediately and starts a fresh idle dwell', (tester) async {
     final controller = _controller();
     final key = GlobalKey<_HarnessState>();
     await _mount(tester, controller, key);
-    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(seconds: 7));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
     key.currentState!.pause();
     await tester.pump();
+    final interruptedTop = tester.getTopLeft(_card('phone')).dy;
     controller.notifyListeners();
-    await tester.pump(const Duration(minutes: 1));
-    expect(key.currentState!.selections, isEmpty);
-    expect(find.byTooltip('Oynat'), findsOneWidget);
-    await tester.tap(_auto);
     await tester.pump();
-    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(milliseconds: 6999));
+    expect(tester.getTopLeft(_card('phone')).dy, interruptedTop);
     expect(key.currentState!.selections, isEmpty);
-    await tester.pump(const Duration(seconds: 1));
-    await _settle(tester);
+    await tester.pump(const Duration(milliseconds: 1));
+    await _finishAuto(tester);
+    expect(_frontId(tester), 'bridge');
     expect(key.currentState!.selections, ['bridge']);
+    await _dispose(tester, controller);
+  });
+
+  for (final release in ['up', 'cancel']) {
+    testWidgets('touch $release freezes an active step and waits after the final held pointer', (tester) async {
+      final controller = _controller();
+      final key = GlobalKey<_HarnessState>();
+      await _mount(tester, controller, key);
+      final initialTop = tester.getTopLeft(_card('phone')).dy;
+      await tester.pump(const Duration(seconds: 7));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      final movingTop = tester.getTopLeft(_card('phone')).dy;
+      final first = await tester.startGesture(tester.getCenter(_deck), pointer: 1);
+      await tester.pump();
+      final stoppedTop = tester.getTopLeft(_card('phone')).dy;
+      expect(stoppedTop, greaterThan(initialTop));
+      expect(stoppedTop, movingTop);
+      final rail = tester.getRect(_rail);
+      final second = await tester.startGesture(Offset(rail.center.dx, tester.getRect(_deck).top + 4), pointer: 2);
+      await tester.pump();
+      final heldTop = tester.getTopLeft(_card('phone')).dy;
+      await tester.pump(const Duration(seconds: 30));
+      expect(tester.getTopLeft(_card('phone')).dy, heldTop);
+      if (release == 'up') {
+        await first.up();
+      } else {
+        await first.cancel();
+      }
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 30));
+      expect(_frontId(tester), 'phone');
+      expect(key.currentState!.selections, isEmpty);
+      await second.cancel();
+      await tester.pump();
+      final releasedTop = tester.getTopLeft(_card('phone')).dy;
+      await tester.pump(const Duration(milliseconds: 6999));
+      expect(tester.getTopLeft(_card('phone')).dy, releasedTop);
+      await tester.pump(const Duration(milliseconds: 1));
+      await _finishAuto(tester);
+      expect(_frontId(tester), 'bridge');
+      expect(key.currentState!.selections, ['bridge']);
+      await _dispose(tester, controller);
+    });
+  }
+
+  testWidgets('held keyboard input suppresses autoplay until release and fresh idle dwell', (tester) async {
+    final controller = _controller();
+    final key = GlobalKey<_HarnessState>();
+    await _mount(tester, controller, key);
+    Focus.of(tester.element(_deck)).requestFocus();
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    expect(_frontId(tester), 'bridge');
+    await tester.pump(const Duration(seconds: 30));
+    expect(key.currentState!.selections, ['bridge']);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 6999));
+    expect(key.currentState!.selections, ['bridge']);
+    await tester.pump(const Duration(milliseconds: 1));
+    await _finishAuto(tester);
+    expect(_frontId(tester), 'notes');
+    expect(key.currentState!.selections, ['bridge', 'notes']);
     await _dispose(tester, controller);
   });
 
@@ -358,7 +415,10 @@ void main() {
       if (mode == 'scroll') state.scroll.jumpTo(240);
       if (mode == 'input') state.setAuto(false);
       if (mode == 'lifecycle') tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
-      if (mode == 'route') state.navigator.currentState!.push(MaterialPageRoute<void>(builder: (_) => const Scaffold(body: Text('Başka ekran'))));
+      if (mode == 'route') state.navigator.currentState!.push(PageRouteBuilder<void>(
+        pageBuilder: (context, animation, secondary) => const Scaffold(body: Text('Başka ekran')),
+        transitionDuration: Duration.zero, reverseTransitionDuration: Duration.zero,
+      ));
       await _settle(tester);
       await tester.pump(const Duration(minutes: 1));
       expect(state.selections, isEmpty);
@@ -368,11 +428,54 @@ void main() {
       if (mode == 'input') state.setAuto(true);
       if (mode == 'lifecycle') tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       if (mode == 'route') state.navigator.currentState!.pop();
-      await _settle(tester);
-      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 6999));
       expect(state.selections, isEmpty);
-      await tester.pump(const Duration(seconds: 1));
-      await _settle(tester);
+      await tester.pump(const Duration(milliseconds: 1));
+      await _finishAuto(tester);
+      expect(state.selections, ['bridge']);
+      await _dispose(tester, controller);
+    });
+  }
+
+  for (final mode in ['offstage', 'ticker', 'scroll', 'input', 'lifecycle', 'route']) {
+    testWidgets('$mode gate interrupts an active step with no hidden catchup', (tester) async {
+      final controller = _controller();
+      final key = GlobalKey<_HarnessState>();
+      await _mount(tester, controller, key);
+      await tester.pump(const Duration(seconds: 7));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      final state = key.currentState!;
+      if (mode == 'offstage') state.setHidden(true);
+      if (mode == 'ticker') state.setTicking(false);
+      if (mode == 'scroll') state.scroll.jumpTo(240);
+      if (mode == 'input') state.setAuto(false);
+      if (mode == 'lifecycle') tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      if (mode == 'route') state.navigator.currentState!.push(PageRouteBuilder<void>(
+        pageBuilder: (context, animation, secondary) => const Scaffold(body: Text('Başka ekran')),
+        transitionDuration: Duration.zero, reverseTransitionDuration: Duration.zero,
+      ));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(minutes: 1));
+      expect(state.selections, isEmpty);
+      if (mode == 'offstage') state.setHidden(false);
+      if (mode == 'ticker') state.setTicking(true);
+      if (mode == 'scroll') state.scroll.jumpTo(0);
+      if (mode == 'input') state.setAuto(true);
+      if (mode == 'lifecycle') tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      if (mode == 'route') state.navigator.currentState!.pop();
+      await tester.pump();
+      await tester.pump();
+      final stoppedTop = tester.getTopLeft(_card('phone')).dy;
+      await tester.pump(const Duration(milliseconds: 6999));
+      expect(tester.getTopLeft(_card('phone')).dy, stoppedTop);
+      expect(state.selections, isEmpty);
+      await tester.pump(const Duration(milliseconds: 1));
+      await _finishAuto(tester);
+      expect(_frontId(tester), 'bridge');
       expect(state.selections, ['bridge']);
       await _dispose(tester, controller);
     });
@@ -385,12 +488,10 @@ void main() {
       await _mount(tester, controller, key, reduced: setting == 'reduced', accessible: setting == 'accessible');
       await tester.pump(const Duration(minutes: 1));
       expect(key.currentState!.selections, isEmpty);
-      expect(tester.widget<IconButton>(_auto).onPressed, isNull);
+      expect(_auto, findsNothing);
       await _choose(tester, 1, 2);
       await tester.pump();
       expect(_frontId(tester), 'bridge');
-      expect(tester.getTopLeft(_card('bridge')).dy, 28);
-      expect(find.byTooltip('Başa dön'), findsOneWidget);
       await _choose(tester, 0, 2);
       await tester.pump();
       expect(_frontId(tester), 'phone');
@@ -399,7 +500,7 @@ void main() {
     });
   }
 
-  testWidgets('keyboard and adjustable rail semantics select instantly and pause', (tester) async {
+  testWidgets('keyboard and adjustable rail semantics select instantly then restart idle', (tester) async {
     final semantics = tester.ensureSemantics();
     final controller = _controller();
     final key = GlobalKey<_HarnessState>();
@@ -409,7 +510,6 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
     await tester.pump();
     expect(_frontId(tester), 'bridge');
-    expect(tester.getTopLeft(_card('bridge')).dy, 28);
     tester.semantics.increase(find.semantics.byAction(SemanticsAction.increase));
     await tester.pump();
     expect(_frontId(tester), 'notes');
@@ -424,8 +524,14 @@ void main() {
     await tester.pump();
     expect(_frontId(tester), 'phone');
     expect(find.semantics.byAction(SemanticsAction.decrease), findsNothing);
-    await tester.pump(const Duration(minutes: 1));
-    expect(key.currentState!.selections, ['bridge', 'notes', 'bridge', 'network', 'phone']);
+    final manualSelections = ['bridge', 'notes', 'bridge', 'network', 'phone'];
+    expect(key.currentState!.selections, manualSelections);
+    await tester.pump(const Duration(milliseconds: 6999));
+    expect(_frontId(tester), 'phone');
+    expect(key.currentState!.selections, manualSelections);
+    await tester.pump(const Duration(milliseconds: 1));
+    await _finishAuto(tester);
+    expect(key.currentState!.selections, [...manualSelections, 'bridge']);
     await _dispose(tester, controller);
     semantics.dispose();
   });
@@ -434,7 +540,7 @@ void main() {
     final controller = _controller();
     final key = GlobalKey<_HarnessState>();
     await _mount(tester, controller, key, selected: 'notes');
-    await tester.pump(const Duration(seconds: 6));
+    await tester.pump(const Duration(seconds: 7));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 40));
     final state = key.currentState!;
@@ -477,7 +583,7 @@ void main() {
     state.replace(controller.snapshot.projects.take(1).toList());
     await tester.pump();
     expect(_frontId(tester), 'phone');
-    expect(tester.widget<IconButton>(_auto).onPressed, isNull);
+    expect(_auto, findsNothing);
     expect(state.selections, isEmpty);
     expect(tester.takeException(), isNull);
     await _dispose(tester, controller);
@@ -498,21 +604,23 @@ void main() {
     key.currentState!.replace(controller.snapshot.projects);
     await tester.pump();
     expect(_frontId(tester), 'bridge');
-    expect(find.text('Güncel köprü'), findsOneWidget);
-    expect(find.text('3 karar bekliyor'), findsOneWidget);
-    expect(find.text('1 açık oturum'), findsOneWidget);
+    final refreshed = tester.widget<ProjectOverviewCard>(_front);
+    expect(refreshed.project.name, 'Güncel köprü');
+    expect(refreshed.summary.pending, 3);
+    expect(refreshed.summary.open, 1);
+    expect(refreshed.summary.working, isTrue);
     expect(find.byType(WorkingAvatar), findsOneWidget);
     controller.connection = ConnectionState.fromJson({'connected': false});
     controller.notifyListeners();
     await tester.pump();
-    expect(find.descendant(of: _front, matching: find.text('Bağlantı kesik')), findsOneWidget);
+    expect(tester.widget<ProjectOverviewCard>(_front).summary.working, isFalse);
     expect(find.byType(WorkingAvatar), findsNothing);
     expect(key.currentState!.selections, isEmpty);
     await _dispose(tester, controller);
   });
 
   for (final width in [280.0, 360.0]) {
-    testWidgets('$width dp bounded deck keeps controls and scrollable content at 200 percent', (tester) async {
+    testWidgets('$width dp deck keeps selection and rail usable at 200 percent text', (tester) async {
       tester.view.physicalSize = Size(width, 800);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
@@ -524,17 +632,10 @@ void main() {
       final key = GlobalKey<_HarnessState>();
       await _mount(tester, controller, key, scale: 2);
       expect(tester.getSize(find.byType(ProjectCarousel)).height, 248);
-      expect(tester.getSize(_front).height, 192);
       expect(tester.takeException(), isNull);
-      final scroll = find.byKey(const ValueKey('project-card-scroll:phone'));
-      await tester.drag(scroll, const Offset(0, -500));
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(find.text('12 karar bekliyor'), findsOneWidget);
-      final pin = find.byKey(const ValueKey('project-pin:phone'));
-      expect(tester.getRect(_front).contains(tester.getCenter(pin)), isTrue);
-      for (final control in [_auto, _rail]) {
-        expect(tester.getSize(control).width, greaterThanOrEqualTo(48));
-      }
+      expect(_frontId(tester), 'phone');
+      expect(tester.getSize(_rail).width, greaterThanOrEqualTo(48));
+      expect(_auto, findsNothing);
       await _choose(tester, 1, 2);
       await _settle(tester);
       expect(_frontId(tester), 'bridge');
@@ -543,24 +644,24 @@ void main() {
     });
   }
 
-  testWidgets('short Home viewport stays at 216 total and rapid controls do not restart auto', (tester) async {
+  testWidgets('short viewport and rapid controls reset a full idle countdown', (tester) async {
     final controller = _controller();
     final key = GlobalKey<_HarnessState>();
     await _mount(tester, controller, key);
     key.currentState!.setHeight(216);
     await tester.pump();
     expect(tester.getSize(find.byType(ProjectCarousel)).height, 216);
-    expect(tester.getSize(_deck).height, 216);
-    expect(tester.getSize(_front).height, 160);
     await _choose(tester, 1, 5);
+    await tester.pump(const Duration(seconds: 6));
     await _choose(tester, 2, 5);
-    await _settle(tester);
     expect(_frontId(tester), 'notes');
-    final selected = List<String>.of(key.currentState!.selections);
-    await tester.pump(const Duration(minutes: 1));
-    expect(key.currentState!.selections, selected);
-    expect(_frontId(tester), 'notes');
-    expect(find.byTooltip('Oynat'), findsOneWidget);
+    expect(key.currentState!.selections, ['bridge', 'notes']);
+    await tester.pump(const Duration(milliseconds: 6999));
+    expect(key.currentState!.selections, ['bridge', 'notes']);
+    await tester.pump(const Duration(milliseconds: 1));
+    await _finishAuto(tester);
+    expect(_frontId(tester), 'files');
+    expect(key.currentState!.selections, ['bridge', 'notes', 'files']);
     expect(tester.takeException(), isNull);
     await _dispose(tester, controller);
   });
@@ -579,6 +680,21 @@ void main() {
     expect(_frontId(tester), 'project-499');
     expect(key.currentState!.selections, ['project-499']);
     expect(find.byType(ProjectOverviewCard).evaluate().length, lessThanOrEqualTo(5));
+    await _key(tester, LogicalKeyboardKey.home);
+    await tester.pump(const Duration(seconds: 7));
+    await tester.pump();
+    for (var frame = 0; frame < 4; frame++) {
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byType(ProjectOverviewCard).evaluate().length, lessThanOrEqualTo(5));
+      final cards = tester.widgetList<ProjectOverviewCard>(find.byType(ProjectOverviewCard));
+      for (final card in cards) {
+        expect(card.project, same(controller.snapshot.projects.firstWhere((project) => project.id == card.project.id)));
+      }
+    }
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump();
+    expect(_frontId(tester), 'project-1');
+    expect(key.currentState!.selections, ['project-499', 'project-0', 'project-1']);
     expect(tester.takeException(), isNull);
     await _dispose(tester, controller);
   });

@@ -108,6 +108,8 @@ class Session {
     if (turnError != null || status == 'failed') return 'turn_error';
     return 'settled';
   }
+  bool get isWorking => writerConnected && !activeUnbridged &&
+      (workState == 'running' || workState == 'background');
   bool get isSettled => workState == 'settled' && !hasPendingAsyncWork && queuedMessages.isEmpty;
   bool supports(String action) => capabilities.contains(action) || capabilities.contains(action.replaceFirst('session.', ''));
   String get statusLabel => activeUnbridged ? 'Terminalde açık · telefonda salt okunur' : switch (workState) {

@@ -1,5 +1,30 @@
 # Changelog
 
+## Android 1.2.10 (19) — larger Sisyphus before project names
+
+- Move the working project-card GIF from the continuation preview's trailing edge to the start of the heading, enlarged from40dp to64dp with12dp before the project name.
+- Let continuation text use a full-width row below. Preserve wrapping title, native pin, session-row indicators, real-work/motion gates, idle navigation and direct bottom join.
+
+Scoped analyzer clean; 30 targeted card/avatar/carousel scenarios passed. Original-signed 1.2.10 installed on the authorized Samsung; installed APK and dist match, first-install and pairing preserved. Physical dark/light heading and GIF motion inspected; app errors empty. Source publication includes the related 1.2.8–1.2.10 Android changes; no full-suite rerun or PC/bridge change. Local acceptance record: `Raporlar/2026-11-13-sisyphus-baslik-yerlesimi.md` (not included in source publication).
+
+## Android 1.2.9 (18) — direct body and bottom-tab join
+
+- Remove the separate8dp gap and12dp full-width connector band above bottom navigation; the selected tab opens directly into the matching content without a closing line/shadow.
+- Apply the same join to Projects and Inbox, including active filter tints. Preserve the inset session-reading panel, existing selected-tab/concave-shoulder form, fixed navigation and native safe area.
+- Keep New session as a separate action/route; project cards, work GIF, idle behavior, Live filtering and data boundaries unchanged.
+
+Scoped analysis and62distinct targeted scenarios passed earlier; no suite rerun for physical delivery. Same original-signed production1.2.9APK installed on authorized Samsung, matching dist/pulled-base hash and preserving first-install/pairing. Actual dark/light join pixels, real workingGIF, finite idle/manual/end navigation, separate form/Back, supplied icon and empty composer/native Samsung IME verified; app errors empty, font/density/theme preserved. No source defect, new build, provider submission or PC/bridge activation. Local acceptance record: `Raporlar/2026-11-13-alt-menu-tek-govde.md` (not included in source publication).
+
+## Android 1.2.8 (17) — Sisyphus identity and idle project navigation
+
+- Use the supplied Sisyphus image for Android launcher/splash with adaptive and monochrome assets; animate the supplied local GIF only while work is actually running.
+- Raise the foreground project card above neutral back layers, enlarge names and show recorded continuation previews instead of goal/status/count stacks.
+- Remove Play/Pause/Restart; begin slow finite card steps after seven idle seconds, interrupt on input, restart full dwell after release and stop at the last project.
+- Replace light-theme brown action roles with dark-scheme navy; preserve dark amber, native theme controls and contrast pairs.
+- Canlı aggregates only connected running/background sessions across all projects with project names; Tümü and detail keep history. Human-waiting, settled, unbridged and disconnected sessions are not live work.
+
+Scoped analysis clean;100distinct scenarios passed across focused runs, not full suite. Exact original-signed production APK accepted on owned Android35x86_64 emulator: launcher/cold-start icon, actualGIFframes, dark/light/formIME/Back, finiteidle/held-input/reduced-motion and globalLive inspected; app errors empty. Physical-phone installation was deferred at this milestone and completed in the subsequent1.2.9/1.2.10 acceptance. PC/bridge/provider untouched. Local acceptance record: `Raporlar/2026-11-13-sisyphus-ikon-ve-canli-akis.md` (not included in source publication).
+
 ## Android 1.2.7 (16) — restored layered cards and unified native materials
 
 - Restore upright sliding upper/lower project neighbors; keep finite project rail, paused entry and selected-project complete history.

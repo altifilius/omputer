@@ -154,23 +154,49 @@ class HomeScreen extends StatefulWidget {
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int destination = 0;
   String query = '', filter = 'all';
   String? selectedProjectId;
   bool savingTheme = false;
   int _pauseSignal = 0;
+  final _heldPointers = <int>{};
+  final _heldKeys = <LogicalKeyboardKey>{};
   final search = TextEditingController();
   final searchFocus = FocusNode();
   final _projectOrder = StableActivityOrder();
   final _sessionOrder = StableActivityOrder();
 
   @override
-  void initState() { super.initState(); searchFocus.addListener(searchFocusChanged); }
+  void initState() { super.initState(); WidgetsBinding.instance.addObserver(this); searchFocus.addListener(searchFocusChanged); }
   void searchFocusChanged() { if (mounted) setState(() {}); }
   void _pauseCards() { if (mounted) setState(() => _pauseSignal++); }
+  void _pointerDown(PointerDownEvent event) => setState(() {
+    _heldPointers.add(event.pointer);
+    _pauseSignal++;
+  });
+  void _pointerUp(PointerEvent event) => setState(() => _heldPointers.remove(event.pointer));
+  KeyEventResult _keyInput(FocusNode node, KeyEvent event) {
+    setState(() {
+      if (event is KeyUpEvent) {
+        _heldKeys.remove(event.logicalKey);
+      } else {
+        _heldKeys.add(event.logicalKey);
+        _pauseSignal++;
+      }
+    });
+    return KeyEventResult.ignored;
+  }
   @override
-  void dispose() { searchFocus.removeListener(searchFocusChanged); searchFocus.dispose(); search.dispose(); super.dispose(); }
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) setState(() {
+      _heldPointers.clear();
+      _heldKeys.clear();
+      _pauseSignal++;
+    });
+  }
+  @override
+  void dispose() { WidgetsBinding.instance.removeObserver(this); searchFocus.removeListener(searchFocusChanged); searchFocus.dispose(); search.dispose(); super.dispose(); }
 
   Future<void> changeTheme(bool dark) async {
     if (savingTheme) return;
@@ -183,9 +209,9 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) => ListenableBuilder(listenable: widget.controller, builder: (context, _) {
     final c = widget.controller;
     final connected = c.connection.connected;
-    final panelColor = NeoPalette.of(context).raised;
+    final panelColor = destination == 1 ? NeoPalette.of(context).raised : _filterPanelColor(context);
     final content = destination == 1 ? InboxScreen(controller: c) : _projects(context);
-    return Scaffold(
+    final scaffold = Scaffold(
       appBar: AppBar(
         toolbarHeight: (MediaQuery.textScalerOf(context).scale(28) + MediaQuery.textScalerOf(context).scale(16) + 12).clamp(64, double.infinity),
         automaticallyImplyLeading: false, centerTitle: true, titleSpacing: 4, leadingWidth: 88,
@@ -196,8 +222,14 @@ class _HomeScreenState extends State<HomeScreen> {
         ]),
         actions: [SizedBox(width: 88, child: Align(alignment: Alignment.center, child: IconButton(tooltip: 'Ayarlar', onPressed: () => openScreen(context, Scaffold(appBar: AppBar(title: const Text('Ayarlar')), body: SafeArea(top: false, child: SettingsScreen(controller: c)))), icon: const Icon(Icons.tune_rounded))))],
       ),
-      body: SafeArea(top: false, child: content),
-      bottomNavigationBar: SafeArea(top: false, child: Padding(padding: const EdgeInsets.fromLTRB(8, 8, 8, 0), child: NeoJoinedTabs(
+      body: SafeArea(key: const ValueKey('home-body'), top: false, bottom: false, child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (destination == 1) Positioned.fill(left: 8, right: 8, child: ColoredBox(color: panelColor)),
+          content,
+        ],
+      )),
+      bottomNavigationBar: SafeArea(top: false, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: NeoJoinedTabs(
         key: const ValueKey('home-bottom-tabs'), panelColor: panelColor, panelAbove: true, selectedId: destination == 1 ? 'inbox' : 'projects',
         tabs: [const JoinedTab(id: 'projects', label: 'Projeler', icon: Icons.folder_outlined), JoinedTab(id: 'new-session', label: 'Yeni oturum', icon: Icons.add_rounded, action: true, enabled: connected && c.snapshot.projects.isNotEmpty), JoinedTab(id: 'inbox', label: 'Gelen kutusu', icon: Icons.inbox_outlined, count: c.snapshot.pending.length)],
         onSelected: (id) {
@@ -210,6 +242,9 @@ class _HomeScreenState extends State<HomeScreen> {
         },
       ))),
     );
+    return Focus(canRequestFocus: false, skipTraversal: true, onKeyEvent: _keyInput,
+      child: Listener(onPointerDown: _pointerDown, onPointerUp: _pointerUp,
+        onPointerCancel: _pointerUp, onPointerSignal: (_) => _pauseCards(), child: scaffold));
   });
 
   Color _filterPanelColor(BuildContext context) {
@@ -230,16 +265,28 @@ class _HomeScreenState extends State<HomeScreen> {
     final ordered = c.snapshot.projects.toList();
     _projectOrder.apply(ordered, (p) => p.id, (p) => p.updatedAt);
     final pins = object(object(c.localState['sections'])['pins']);
-    bool matchesFilter(String projectId) =>
-      (filter != 'live' || c.snapshot.sessions.any((s) => s.projectId == projectId && (!s.archived || s.activeUnbridged))) &&
-      (filter != 'pinned' || pins['project:$projectId'] == true);
-    final eligible = ordered.where((p) => matchesFilter(p.id)).toList();
-    final projects = eligible.where((p) => '${p.name} ${p.goal} ${p.summary} ${p.nextStep} ${p.path}'.toLowerCase().contains(needle) || c.snapshot.sessions.any((s) => s.projectId == p.id && '${s.name} ${s.cwd}'.toLowerCase().contains(needle))).toList();
+    final live = filter == 'live';
+    final workingSessions = c.connection.connected
+        ? c.snapshot.sessions.where((s) => s.isWorking).toList(growable: false)
+        : const <Session>[];
+    final workingProjects = workingSessions.map((s) => s.projectId).toSet();
+    final eligible = ordered.where((p) => (!live || workingProjects.contains(p.id)) &&
+        (filter != 'pinned' || pins['project:${p.id}'] == true)).toList();
+    bool projectMatches(Project p) => '${p.name} ${p.goal} ${p.summary} ${p.nextStep} ${p.path}'.toLowerCase().contains(needle);
+    bool sessionMatches(Session s) => '${s.name} ${s.cwd}'.toLowerCase().contains(needle);
+    final projects = eligible.where((p) => projectMatches(p) ||
+        (live ? workingSessions : c.snapshot.sessions).any((s) => s.projectId == p.id && sessionMatches(s))).toList();
     final selected = projects.where((p) => p.id == selectedProjectId).firstOrNull ?? projects.firstOrNull;
     selectedProjectId = selected?.id;
     final orderedSessions = c.snapshot.sessions.toList();
     _sessionOrder.apply(orderedSessions, (s) => s.id, (s) => s.updatedAt);
-    final sessions = orderedSessions.where((s) => s.projectId == selected?.id).toList(growable: false);
+    bool includeSession(Session session) {
+      if (!live) return session.projectId == selected?.id;
+      final project = c.snapshot.project(session.projectId);
+      return c.connection.connected && session.isWorking &&
+          (sessionMatches(session) || (project != null && projectMatches(project)));
+    }
+    final sessions = orderedSessions.where(includeSession).toList(growable: false);
     void openProject(Project project) {
       setState(() => selectedProjectId = project.id);
       openScreen(context, ProjectScreen(controller: c, projectId: project.id));
@@ -270,8 +317,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _filters(panelColor),
         Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: DecoratedBox(
           key: const ValueKey('home-filter-panel'),
-          decoration: BoxDecoration(color: panelColor,
-            borderRadius: const BorderRadius.vertical(bottom: Radius.circular(20))),
+          decoration: BoxDecoration(color: panelColor),
           child: Column(children: [
             if (!c.connection.connected || c.error != null) Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -285,41 +331,46 @@ class _HomeScreenState extends State<HomeScreen> {
                 }), icon: const Icon(Icons.refresh_rounded)),
               ]),
             ),
-            if (projects.isEmpty) Expanded(child: RefreshIndicator(onRefresh: c.refresh,
+            if (projects.isEmpty && (!live || sessions.isEmpty)) Expanded(child: RefreshIndicator(onRefresh: c.refresh,
               child: CustomScrollView(physics: const AlwaysScrollableScrollPhysics(), slivers: [
                 SliverFillRemaining(hasScrollBody: false, child: Center(child: SingleChildScrollView(child: EmptyState(
-                  icon: Icons.folder_open_rounded,
-                  title: c.snapshot.projects.isEmpty ? 'Projelerin bilgisayardan gelir' : 'Eşleşen proje yok',
-                  message: c.snapshot.projects.isEmpty ? 'Bilgisayarındaki kayıtlı projeler ve oturumlar burada görünür.' : 'Başka bir arama dene veya filtreyi değiştir.',
+                  icon: live ? Icons.task_alt_rounded : Icons.folder_open_rounded,
+                  title: live ? c.connection.connected ? 'Çalışan oturum yok' : 'Canlı durum için bağlantı gerekiyor'
+                      : c.snapshot.projects.isEmpty ? 'Projelerin bilgisayardan gelir' : 'Eşleşen proje yok',
+                  message: live ? c.connection.connected ? 'Yeni bir iş başladığında burada görünür. Geçmiş oturumlar Tümü sekmesinde kalır.'
+                      : 'Kaydedilmiş oturumlar Tümü sekmesinde; güncel çalışma durumunu bağlantı kurulunca görebilirsin.'
+                      : c.snapshot.projects.isEmpty ? 'Bilgisayarındaki kayıtlı projeler ve oturumlar burada görünür.' : 'Başka bir arama dene veya filtreyi değiştir.',
                 )))),
               ]),
             )) else ...[
-              Padding(padding: const EdgeInsets.only(top: 8), child: ProjectCarousel(
-                controller: c, projects: projects, selectedProjectId: selected!.id,
+              if (selected != null) Padding(padding: const EdgeInsets.only(top: 8), child: ProjectCarousel(
+                controller: c, projects: projects, selectedProjectId: selected.id,
                 height: deckHeight, pauseSignal: _pauseSignal,
-                autoAdvance: query.isEmpty && !searchFocus.hasFocus,
+                autoAdvance: query.isEmpty && !searchFocus.hasFocus && MediaQuery.viewInsetsOf(context).bottom == 0 &&
+                    _heldPointers.isEmpty && _heldKeys.isEmpty,
                 onSelected: (id) => setState(() => selectedProjectId = id),
               )),
               Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: Row(children: [
-                Expanded(child: Text('${selected.name} · Oturumlar (${sessions.length})',
+                Expanded(child: Text(live ? 'Çalışan oturumlar (${sessions.length})' : '${selected!.name} · Oturumlar (${sessions.length})',
                   key: const ValueKey('home-session-heading'), maxLines: 2,
                   overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.titleSmall)),
-                IconButton(tooltip: 'Seçili projeyi aç', onPressed: () => openProject(selected),
+                if (!live) IconButton(tooltip: 'Seçili projeyi aç', onPressed: () => openProject(selected!),
                   icon: const Icon(Icons.open_in_new_rounded)),
               ])),
-              Expanded(child: Listener(onPointerDown: (_) => _pauseCards(), child: Padding(
+              Expanded(child: NotificationListener<UserScrollNotification>(
+                onNotification: (notification) { _pauseCards(); return false; }, child: Padding(
                 padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
                 child: NeoSurface(depth: NeoDepth.inset, radius: 16,
                   child: ClipRRect(borderRadius: BorderRadius.circular(16), child: RefreshIndicator(
                     onRefresh: c.refresh,
-                    child: CustomScrollView(key: ValueKey('home-project-sessions:${selected.id}'),
+                    child: CustomScrollView(key: live ? const ValueKey('home-live-sessions') : ValueKey('home-project-sessions:${selected!.id}'),
                       physics: const AlwaysScrollableScrollPhysics(),
                       slivers: [
-                        if (sessions.isEmpty) const SliverFillRemaining(hasScrollBody: false,
-                          child: Center(child: Padding(padding: EdgeInsets.all(16),
-                            child: Text('Bu projede oturum yok', textAlign: TextAlign.center)))),
+                        if (sessions.isEmpty) SliverFillRemaining(hasScrollBody: false,
+                          child: Center(child: Padding(padding: const EdgeInsets.all(16),
+                            child: Text(live ? 'Çalışan oturum yok' : 'Bu projede oturum yok', textAlign: TextAlign.center)))),
                         SliverList.builder(itemCount: sessions.length, itemBuilder: (context, index) =>
-                          LocalSessionRow(controller: c, session: sessions[index], compact: true,
+                          LocalSessionRow(controller: c, session: sessions[index], compact: true, showProject: live,
                             key: ValueKey(sessions[index].id))),
                       ],
                     ),

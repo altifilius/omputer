@@ -12,11 +12,11 @@ ThemeData omputerTheme(Brightness brightness) {
   final neo = NeoPalette.forBrightness(brightness);
   final foreground = dark ? const Color(0xfff1f3f5) : const Color(0xff252c35);
   final secondary = dark ? const Color(0xffc0c6cf) : const Color(0xff505b68);
-  final accent = dark ? const Color(0xfff3ca68) : const Color(0xff775500);
-  final scheme = ColorScheme.fromSeed(seedColor: const Color(0xffa87920), brightness: brightness).copyWith(
+  final accent = dark ? const Color(0xfff3ca68) : const Color(0xff292e37);
+  final scheme = ColorScheme.fromSeed(seedColor: dark ? const Color(0xffa87920) : accent, brightness: brightness).copyWith(
     primary: accent, onPrimary: dark ? const Color(0xff272016) : Colors.white,
-    primaryContainer: dark ? const Color(0xff463c28) : const Color(0xfff1dfb5),
-    onPrimaryContainer: dark ? const Color(0xffffe3a2) : const Color(0xff4a370d),
+    primaryContainer: dark ? const Color(0xff463c28) : const Color(0xffd5dde8),
+    onPrimaryContainer: dark ? const Color(0xffffe3a2) : const Color(0xff23272f),
     secondary: secondary, onSecondary: neo.base,
     secondaryContainer: neo.inset, onSecondaryContainer: foreground,
     tertiary: accent, onTertiary: neo.base,

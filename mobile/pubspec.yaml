@@ -1,7 +1,7 @@
 name: omputer
 description: Yerel OMP oturumları için Android denetleyicisi.
 publish_to: none
-version: 1.2.7+16
+version: 1.2.11+20
 environment:
   sdk: '>=3.5.0 <4.0.0'
 dependencies:
@@ -17,3 +17,5 @@ dev_dependencies:
     sdk: flutter
 flutter:
   uses-material-design: true
+  assets:
+    - assets/sisyphus-working.gif

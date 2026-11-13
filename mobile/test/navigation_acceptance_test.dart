@@ -216,7 +216,7 @@ void main() {
     expect(find.byKey(const ValueKey('search:terminal-first-12345678')), findsNothing);
     await tester.tap(find.descendant(of: find.byKey(const ValueKey('home-filter-tabs')), matching: find.text('Canlı')));
     await tester.pump();
-    expect(tester.widget<ProjectCarousel>(find.byType(ProjectCarousel)).projects.any((p)=>p.id=='project'),isTrue);
+    expect(find.byType(LocalSessionRow), findsNothing);
     await tester.tap(find.descendant(of: find.byKey(const ValueKey('home-filter-tabs')), matching: find.text('Sabitlenen')));
     await tester.pump();
     expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) => row.session.id).toList(), ['terminal-first-12345678', 'terminal-second-12345678', 'past-one','past-two']);
@@ -225,7 +225,7 @@ void main() {
     c.dispose();
   });
 
-  testWidgets('project live filter includes terminal-open sessions and history remains separately selectable', (tester) async {
+  testWidgets('project live filter excludes terminal-only sessions while all and history retain exact access', (tester) async {
     tester.view.physicalSize = const Size(540, 1800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -237,12 +237,14 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilterChip, 'Canlı'));
     await tester.pump();
-    expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) => row.session.id).toList(), ['terminal-first-12345678', 'terminal-second-12345678']);
+    expect(find.byType(LocalSessionRow), findsNothing);
+    await tester.tap(find.widgetWithText(FilterChip, 'Tümü'));
+    await tester.pump();
     final references = tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) {
       final tile = tester.widget<ListTile>(find.descendant(of: find.byKey(row.key!), matching: find.byType(ListTile)));
       return ((tile.subtitle! as Column).children.last as Text).data;
     }).toSet();
-    expect(references, hasLength(2));
+    expect(references, hasLength(4));
     await tester.tap(find.widgetWithText(FilterChip, 'Geçmiş'));
     await tester.pump();
     expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) => row.session.id).toSet(), {'past-one', 'past-two'});

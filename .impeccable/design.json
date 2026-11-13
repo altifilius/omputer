@@ -25,16 +25,16 @@
       "light-shadow": {"role": "neutral", "displayName": "Fog shadow", "value": "#bdc6d0"},
       "light-text": {"role": "neutral", "displayName": "Light reading text", "value": "#252c35"},
       "light-secondary": {"role": "neutral", "displayName": "Light secondary text", "value": "#505b68"},
-      "light-primary": {"role": "primary", "displayName": "Light amber action", "value": "#775500"},
-      "light-on-primary": {"role": "neutral", "displayName": "On light amber", "value": "#ffffff"},
-      "light-primary-container": {"role": "primary", "displayName": "Light primary container", "value": "#f1dfb5"},
-      "light-on-primary-container": {"role": "primary", "displayName": "On light primary container", "value": "#4a370d"},
+      "light-primary": {"role": "primary", "displayName": "Light navy action", "value": "#292e37"},
+      "light-on-primary": {"role": "neutral", "displayName": "On light navy", "value": "#ffffff"},
+      "light-primary-container": {"role": "primary", "displayName": "Light primary container", "value": "#d5dde8"},
+      "light-on-primary-container": {"role": "primary", "displayName": "On light primary container", "value": "#23272f"},
       "light-outline": {"role": "neutral", "displayName": "Light outline", "value": "#677482"},
       "light-outline-variant": {"role": "neutral", "displayName": "Light outline variant", "value": "#bdc7d1"}
     },
     "typographyMeta": {
       "native": {"displayName": "Android Roboto", "purpose": "Material 2021 headline/title/body/label roles; preserve system text scaling and wrapping, no remote font."},
-      "project-title": {"displayName": "Project title", "purpose": "Native titleLarge with weight 600; app-bar titleLarge also uses 600."},
+      "project-title": {"displayName": "Project title", "purpose": "Native titleLarge/headlineSmall weight600. Working card heading leads with supplied64dpGIF and12dp gap before wrapping name; trailing pin remains native, continuation text full-width below."},
       "reading": {"displayName": "Extended reading", "purpose": "Roboto body roles; authored extended reading line-height 1.5."},
       "editor": {"displayName": "Local editor", "purpose": "System monospace with authored line-height 1.5, native editing and IME."}
     },
@@ -49,9 +49,9 @@
       {"name": "route-reverse", "value": "180ms", "purpose": "Retained reverse route transition; zero under disableAnimations."},
       {"name": "route-easing", "value": "Cubic(0.16, 1, 0.3, 1)", "purpose": "Existing route easing; reduced motion returns child directly."},
       {"name": "route-translation", "value": "Offset(0.025, 0)", "purpose": "Fraction of child width; checkpoint routes use Offset(0.045, 0)."},
-      {"name": "project-layered-stack", "value": "paused entry;6s dwell;280ms layered transition", "purpose": "Restore upright overlapping project neighbors with finite clamp and side N-stop slider; no up/down buttons or presentation selector. Transform/opacity cached real cards; stable exact-ID selection and all-session panel, interaction/lifecycle/input/a11y gates preserved."},
+      {"name": "project-layered-stack", "value": "7s idle;1200ms auto;280ms manual;finite end", "purpose": "Upright layered neighbors; no Play/Pause/Restart. Home-wide held input and visibility/route/lifecycle/IME/reduced-motion gates restart full dwell without catchup. Tümü/Sabitlenen retain selected history; Canlı aggregates actual work across all projects."},
       {"name": "day-night-switch", "value": "240ms", "purpose": "Reference-matched controlled native sun/moon cover, concentric rings, descending clouds and entering four-point stars; reduced/keyboard/assistive immediate."},
-      {"name": "working-avatar", "value": "existing speeder motion only", "purpose": "Live connection plus connected writer plus workState running/background only; never human_wait, settled or disconnected. Reduced motion is static with text; offscreen/inactive ticking stops. No new animation."}
+      {"name": "working-avatar", "value": "supplied GIF;12frames;140ms/frame;1680ms loop", "purpose": "Local shared incremental256px decode. Actual connected writer workState running/background only. Lifecycle, route, TickerMode and reduced-motion/accessibility gates retain still art with truthful semantics."}
     ],
     "breakpoints": [],
     "native": {
@@ -61,28 +61,28 @@
       "sourceOfTruth": ["mobile/lib/neumorphic.dart", "mobile/lib/ui.dart"],
       "acceptanceReport": "Raporlar/2026-11-13-butunsel-neumorphic-ui.md",
       "acceptance": "Source-derived record only; historical captures are not redesign acceptance. No test or native runtime acceptance is asserted here.",
-      "colorGeneration": "ColorScheme.fromSeed #a87920 with authored overrides; remaining roles including errors are SDK-generated. No wallpaper Dynamic Color.",
+      "colorGeneration": "Dark seed#a87920, light seed#292e37 with authored overrides; remaining error roles SDK-generated. No wallpaper Dynamic Color.",
       "surfaceRoles": "surface/scaffold/canvas=base; low/high=raised; lowest/highest/secondaryContainer=inset; onSurface/onSecondaryContainer=text; onSurfaceVariant/secondary=secondary text; onSecondary=base; tertiary=primary; onTertiary=base",
       "radii": {"chipTextButton": "12dp", "fieldButtonRowMenu": "16dp", "defaultSurface": "20dp", "dialogSheet": "24dp"},
       "spacing": ["8dp", "12dp", "16dp", "20dp", "24dp"],
-      "stateDetails": "Fields: resting outlineVariant, focused amber 2dp, disabled outlineVariant alpha .5; error uses native error role. Cursor/handles amber, selection alpha .24. Button border focused primary, disabled outlineVariant alpha .4, otherwise alpha .55. Divider outlineVariant alpha .65. Native state layers and callbacks remain intact.",
+      "stateDetails": "Fields use primary focus2dp and primary cursor/handles, selection alpha.24. Light primary is navy, dark amber. Disabled/error/native state layers, text/icon foreground inheritance and callback semantics are preserved.",
       "previewPolicy": "No HTML/CSS preview included; this sidecar is documentation, not a second implementation or browser acceptance baseline."
     }
   },
   "components": [
-    {"name": "Native affirmative action", "kind": "button", "refersTo": "button", "description": "FilledButton: 48x52dp minimum, radius 16dp, amber/onPrimary while enabled. backgroundBuilder uses compact raised at rest, inset pressed/selected, flat disabled; native semantics, focus and ink response retained."},
+    {"name": "Native affirmative action", "kind": "button", "refersTo": "button", "description": "FilledButton48x52dp minimum, radius16dp; dark amber or light navy against onPrimary. Compact raised resting/inset pressed/flat disabled backgrounds preserve native semantics and foreground inheritance."},
     {"name": "Native secondary action", "kind": "button", "refersTo": "button", "description": "OutlinedButton uses the neutral native neumorphic backgroundBuilder, 48x52dp minimum and radius 16dp. TextButton is 48x48dp minimum, radius 12dp. Compact/icon control minimum is 48x48dp."},
-    {"name": "Inset field", "kind": "input", "refersTo": "input", "description": "NeoInputBorder with native InputDecorator, inset fill, 16dp radius/padding and 2dp amber focus. Preserve floating labels, accessible names, validation, multiline selection and IME. Composer retains persistent OMP’ye mesaj name and anchored input/send row."},
-    {"name": "Native navigation", "kind": "nav", "description": "Projeler/Gelen kutusu/Ayarlar: native NavigationBar or labeled NavigationRail at 720dp. Inset 16dp indicator, amber selected labels/icons, native Back and destination semantics. App-bar elevation and scrolled-under elevation zero."},
-    {"name": "Native selected filter", "kind": "chip", "description": "Raised resting, inset selected, base disabled; radius 12dp, padding 8dp, outlineVariant side and native amber checkmark. Wrapping remains available."},
+    {"name": "Inset field", "kind": "input", "refersTo": "input", "description": "Native InputDecorator/NeoInputBorder,16dp radius/padding and2dp primary focus. Preserve labels, validation, selection, multiline/IME and anchored composer."},
+    {"name": "Native navigation", "kind": "nav", "description": "Phone joined Projects/New session(action)/Inbox. Selected bottom tab opens directly into matching body with no8dp gap/12dp connector band or closing seam; existing shoulders/recessed inactive controls remain. BothProjects/Inbox share this geometry. Top filters keep downward joins. Native Back/action/focus semantics and safe-area handling remain."},
+    {"name": "Native selected filter", "kind": "chip", "description": "Shared raised/inset/disabled roles and primary selected state; native keyboard/semantics and wrapping. Canlı uses actual workState across projects rather than process-open status."},
     {"name": "Native contextual surfaces", "kind": "card", "description": "NeoSurface default radius 20dp; menus raised 16dp; dialogs/sheet top corners raised 24dp with outlineVariant border and native confirmation/dismissal. Keep long transcripts/files/diffs flat. Snackbars use text background/base content."}
   ],
   "narrative": {
     "northStar": "Graphite workbench",
-    "overview": "Explicitly requested whole-app graphite/fog neumorphism replaces the previous visual world. One amber action accent and top-left lighting serve a Turkish-first, local-first native companion for project continuity, conversations and human decisions. Source-derived documentation is not native acceptance; canonical implementation report owns evidence.",
+    "overview": "Graphite/fog neumorphism with dark amber and light navy action roles. Supplied Sisyphus art defines launcher and working GIF; quiet continuity cards and finite idle navigation serve local paired-PC work. Source documentation is not native acceptance.",
     "keyCharacteristics": ["One neutral lighting model with raised, inset and flat depth", "Native Roboto/Material roles and system text scale", "Quiet flat reading planes and true inset inputs", "Actual project/source/paired-PC identity, freshness and connection state"],
     "rules": ["First valid desktop or phone response wins; disconnected decisions are not silently queued.", "Only pending, connected, valid, non-submitting requests are actionable; closed/expired requests stay read-only.", "Keep source-session identity and durable memory distinct from live activity; finished turns are not finished projects.", "Preserve draft ownership, acknowledged-version clearing, multiline growth, safe-area and IME anchoring.", "Keep file/diff inspection read-only, diagnostics redacted, local Markdown free of remote fetches; host enforces project path confinement."],
     "dos": ["Resolve brightness-specific semantic pairs through the theme", "Keep native callbacks, touch targets, labels, focus and pressed/disabled states", "Show status/failure/freshness in words as well as color", "Retain reduced-motion and inactive/offscreen stop rules", "Use canonical report for current acceptance and historical evidence"],
-    "donts": ["Do not imply wallpaper Dynamic Color or invent an authored tonal ramp", "Do not add colored glows, decorative imagery or new looping animation", "Do not wrap every reading paragraph in raised decoration", "Do not substitute previews or historical screenshots for current native acceptance", "Do not change trust, source, permission, privacy or first-response boundaries through styling"]
+    "donts": ["Do not imply wallpaper Dynamic Color or invent authored measurements", "Do not add glows or unrelated imagery/loops beyond the requested working GIF and idle-driven finite cards", "Do not elevate every reading paragraph", "Do not substitute historical screenshots for current native acceptance", "Do not change trust/source/privacy/first-response boundaries through styling"]
   }
 }

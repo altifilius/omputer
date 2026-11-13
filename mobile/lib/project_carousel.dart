@@ -24,7 +24,6 @@ class ProjectCarousel extends StatefulWidget {
     this.autoAdvance = true,
     this.height = 248,
     this.pauseSignal = 0,
-    this.initiallyPaused = true,
   }) : assert(height >= 96 && height < double.infinity);
 
   final OmputerController controller;
@@ -34,8 +33,9 @@ class ProjectCarousel extends StatefulWidget {
   final bool autoAdvance;
   /// Total height of the layered stage and its right-hand controls.
   final double height;
+  /// Increment on parent interaction to stop motion and restart idle dwell.
+  /// Keep [autoAdvance] false while parent-owned input remains held.
   final int pauseSignal;
-  final bool initiallyPaused;
 
   @override
   State<ProjectCarousel> createState() => _ProjectCarouselState();
@@ -43,9 +43,11 @@ class ProjectCarousel extends StatefulWidget {
 
 class _ProjectCarouselState extends State<ProjectCarousel>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
-  static const _dwell = Duration(seconds: 6);
-  static const _transition = Duration(milliseconds: 280);
-  static const _curve = Cubic(.16, 1, .3, 1);
+  static const _dwell = Duration(seconds: 7);
+  static const _manualTransition = Duration(milliseconds: 280);
+  static const _autoTransition = Duration(milliseconds: 1200);
+  static const _manualCurve = Cubic(.16, 1, .3, 1);
+  static const _autoCurve = Cubic(.77, 0, .175, 1);
   static const _layerStep = 24.0;
   final _stage = GlobalKey();
   final _cards = <int, Widget>{};
@@ -57,8 +59,10 @@ class _ProjectCarouselState extends State<ProjectCarousel>
   late int _index;
   Timer? _timer;
   ScrollPosition? _ancestorScroll;
-  bool _paused = false;
+  final _heldPointers = <int>{};
+  final _heldKeys = <LogicalKeyboardKey>{};
   bool _moving = false;
+  bool _automaticMotion = false;
   bool _foreground = true;
   bool _motionAllowed = false;
   bool _staticMode = false;
@@ -71,12 +75,12 @@ class _ProjectCarouselState extends State<ProjectCarousel>
   String? _reportedSelection;
 
   bool get _canAnimate => _foreground && _motionAllowed && _visible && !_staticMode;
-  bool get _canAuto => _canAnimate && widget.autoAdvance && !_paused && _index < _ids.length - 1;
+  bool get _canAuto => _canAnimate && widget.autoAdvance && _heldPointers.isEmpty &&
+      _heldKeys.isEmpty && _phase.value < _ids.length - 1;
 
   @override
   void initState() {
     super.initState();
-    _paused = widget.initiallyPaused;
     _cacheSource();
     _index = _indices[widget.selectedProjectId] ?? 0;
     _phase = AnimationController.unbounded(vsync: this, value: _index.toDouble())
@@ -131,8 +135,7 @@ class _ProjectCarouselState extends State<ProjectCarousel>
       final desired = parentChanged && !acknowledged ? widget.selectedProjectId : selectedId;
       _reconcile(_indices[desired] ?? 0);
     }
-    if (oldWidget.pauseSignal != widget.pauseSignal) {
-      _paused = true;
+    if (oldWidget.pauseSignal != widget.pauseSignal || (oldWidget.autoAdvance && !widget.autoAdvance)) {
       _stopMotion();
     }
     _syncAuto();
@@ -180,40 +183,42 @@ class _ProjectCarouselState extends State<ProjectCarousel>
     _timer = null;
     _motionEpoch++;
     _phase.stop();
-    if (_moving) _phase.value = _index.toDouble();
-    _moving = false;
+    if (_moving) setState(() => _moving = false);
   }
 
   void _syncAuto() {
     if (!_canAuto) {
       _timer?.cancel();
       _timer = null;
-      if (!_canAnimate || !widget.autoAdvance) _stopMotion();
+      if (!_canAnimate || (!widget.autoAdvance && _automaticMotion)) _stopMotion();
       return;
     }
-    if (_timer != null || _moving) return;
+    if (_timer != null || (_moving && _automaticMotion)) return;
     _timer = Timer(_dwell, () {
       _timer = null;
       if (!_canAuto || !_isHalfVisible()) {
         _scheduleVisibility();
         return;
       }
-      _go(_index + 1);
+      _go(math.min(_phase.value.floor() + 1, _ids.length - 1), automatic: true);
     });
   }
 
-  void _pause() {
+  void _pointerDown(PointerDownEvent event) {
+    _heldPointers.add(event.pointer);
     _stopMotion();
-    if (!_paused) setState(() => _paused = true);
   }
 
-  void _toggleAuto() {
-    if (!_paused) {
-      _pause();
-    } else {
-      setState(() => _paused = false);
-      _syncAuto();
-    }
+  void _pointerReleased(PointerEvent event) {
+    _heldPointers.remove(event.pointer);
+    _timer?.cancel();
+    _timer = null;
+    _syncAuto();
+  }
+
+  void _restartIdle() {
+    _stopMotion();
+    _syncAuto();
   }
 
   void _phaseChanged() {
@@ -232,37 +237,48 @@ class _ProjectCarouselState extends State<ProjectCarousel>
   }
 
   void _select(int index, {bool instant = false}) {
-    _pause();
+    _stopMotion();
     if (_ids.isNotEmpty) _go(index.clamp(0, _ids.length - 1), instant: instant);
   }
 
   void _scrub(double phase) {
-    _pause();
+    _stopMotion();
     final value = _staticMode ? phase.roundToDouble() : phase;
     _phase.value = value.clamp(0.0, (_ids.length - 1).toDouble());
+    _syncAuto();
   }
 
-  void _go(int index, {bool instant = false}) {
-    if (_phase.value == index) return;
+  void _go(int index, {bool instant = false, bool automatic = false}) {
+    if (_phase.value == index) {
+      _syncAuto();
+      return;
+    }
     _timer?.cancel();
     _timer = null;
     final epoch = ++_motionEpoch;
+    _phase.stop();
+    _moving = false;
+    _automaticMotion = automatic;
     if (instant || !_canAnimate) {
       _phase.value = index.toDouble();
       _syncAuto();
       return;
     }
     _moving = true;
-    _phase.animateTo(index.toDouble(), duration: _transition, curve: _curve).whenCompleteOrCancel(() {
+    _phase.animateTo(index.toDouble(),
+      duration: automatic ? _autoTransition : _manualTransition,
+      curve: automatic ? _autoCurve : _manualCurve,
+    ).whenCompleteOrCancel(() {
       if (!mounted || epoch != _motionEpoch) return;
       setState(() => _moving = false);
       _syncAuto();
     });
+    if (!automatic) _syncAuto();
   }
 
   void _openProject(String id) {
     if (_moving || _ids[_index] != id) return;
-    _pause();
+    _stopMotion();
     openScreen(context, ProjectScreen(controller: widget.controller, projectId: id));
   }
 
@@ -338,13 +354,24 @@ class _ProjectCarouselState extends State<ProjectCarousel>
   Widget build(BuildContext context) {
     if (_ids.isEmpty) return const SizedBox.shrink();
     _cacheCards();
-    final last = _index == _ids.length - 1;
-    final canPlay = _ids.length > 1 && widget.autoAdvance && _motionAllowed && !_staticMode;
     final cardHeight = math.max(40.0, widget.height - 56);
     return Focus(
       key: const ValueKey('project-carousel-focus'),
+      onFocusChange: (focused) {
+        if (!focused && _heldKeys.isNotEmpty) {
+          _heldKeys.clear();
+          _restartIdle();
+        }
+      },
       onKeyEvent: (_, event) {
+        if (event is KeyUpEvent) {
+          _heldKeys.remove(event.logicalKey);
+          _restartIdle();
+          return KeyEventResult.ignored;
+        }
         if (event is! KeyDownEvent && event is! KeyRepeatEvent) return KeyEventResult.ignored;
+        _heldKeys.add(event.logicalKey);
+        _stopMotion();
         final key = event.logicalKey;
         if (key == LogicalKeyboardKey.arrowDown || key == LogicalKeyboardKey.pageDown) {
           _select(_index + 1, instant: true);
@@ -355,28 +382,34 @@ class _ProjectCarouselState extends State<ProjectCarousel>
         } else if (key == LogicalKeyboardKey.end) {
           _select(_ids.length - 1, instant: true);
         } else {
-          _pause();
+          _syncAuto();
           return KeyEventResult.ignored;
         }
         return KeyEventResult.handled;
       },
-      child: SizedBox(height: widget.height, child: _DeckVisibility(
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: _pointerDown,
+        onPointerMove: (_) => _restartIdle(),
+        onPointerHover: (_) => _restartIdle(),
+        onPointerSignal: (_) => _restartIdle(),
+        onPointerUp: _pointerReleased,
+        onPointerCancel: _pointerReleased,
+        child: SizedBox(height: widget.height, child: _DeckVisibility(
         key: _stage,
         onGeometryChanged: _scheduleVisibility,
         child: Row(children: [
-          Expanded(child: Listener(
+          Expanded(child: SizedBox(
             key: const ValueKey('project-carousel-stage'),
-            behavior: HitTestBehavior.opaque,
-            onPointerDown: (_) => _pause(),
-            onPointerSignal: (_) => _pause(),
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onVerticalDragStart: (_) {
-                _pause();
+                _stopMotion();
                 _dragOrigin = _phase.value;
                 _dragDistance = 0;
               },
               onVerticalDragUpdate: (details) {
+                _stopMotion();
                 _dragDistance += details.delta.dy;
                 if (!_staticMode) {
                   _phase.value = (_dragOrigin + (_dragDistance / cardHeight).clamp(-1.0, 1.0))
@@ -435,16 +468,9 @@ class _ProjectCarouselState extends State<ProjectCarousel>
               )),
             ))),
             Expanded(child: _ProjectRail(count: _ids.length, index: _index, phase: _phase, onSelected: _scrub)),
-            IconButton(
-              key: const ValueKey('project-carousel-auto'),
-              tooltip: last && _ids.length > 1 ? 'Başa dön' : !_paused && canPlay ? 'Duraklat' : 'Oynat',
-              constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
-              onPressed: last && _ids.length > 1 ? () => _select(0, instant: true) : canPlay ? _toggleAuto : null,
-              icon: Icon(last && _ids.length > 1 ? Icons.replay_rounded : !_paused && canPlay ? Icons.pause_rounded : Icons.play_arrow_rounded),
-            ),
           ])),
         ]),
-      )),
+      ))),
     );
   }
 }

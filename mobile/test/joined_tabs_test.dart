@@ -269,41 +269,36 @@ void main() {
   }
 
   for (final brightness in Brightness.values) {
-    testWidgets('upward join has mirrored shoulders and no panel seam, $brightness', (tester) async {
-      final key = GlobalKey();
-      final panel = brightness == Brightness.dark
-        ? const Color(0xff30343a) : const Color(0xfff4f5f6);
-      await tester.pumpWidget(_host(width: 300, brightness: brightness,
-        selectedId: 'live', panelColor: panel, panelAbove: true,
-        tabs: const [
-          JoinedTab(id: 'all', label: 'Tümü'),
-          JoinedTab(id: 'live', label: 'Canlı'),
-          JoinedTab(id: 'pinned', label: 'Sabitlenen'),
-        ], wrap: (tabs) => RepaintBoundary(key: key, child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [SizedBox(height: 32, child: ColoredBox(color: panel,
-            child: const SizedBox.expand())), tabs],
-        ))));
-      await tester.pumpAndSettle();
-      final height = tester.getSize(find.byType(NeoJoinedTabs)).height.round();
-      final pixel = await _pixels(tester, key);
-      expect(pixel(150, 32 + height - 9), panel);
-      expect(pixel(109, 32 + height - 6), isNot(panel)); // Rounded bottom corner.
-      expect(pixel(101, 32 + 13), isNot(panel)); // Outside the upward shoulder.
-      expect(pixel(112, 32 + 13), panel);
-      for (final x in [0, 40, 100, 150, 200, 260, 299]) {
-        expect(pixel(x, 31), panel); // Content immediately above.
-        expect(pixel(x, 32), panel); // No seam at the top edge.
-        expect(pixel(x, 38), panel); // Full-width top strip.
-        expect(pixel(x, 42), panel); // Interior strip, before the exposed edge.
-      }
-      // The concave outline begins at (100, 12). Its 1dp shadow stroke
-      // straddles y=12, so y=11 is an exposed-edge pixel, not the top seam.
-      expect(pixel(100, 43).computeLuminance(), lessThan(panel.computeLuminance()));
-      for (final y in [43, 44, 45]) {
-        expect(pixel(150, y), panel); // Unbroken strip-to-selected-tab surface.
-      }
-    });
+    for (final selectedId in ['all', 'live', 'pinned']) {
+      testWidgets('upward $selectedId opens into content without a full-width band, $brightness', (tester) async {
+        final key = GlobalKey();
+        final panel = brightness == Brightness.dark
+          ? const Color(0xff30343a) : const Color(0xfff4f5f6);
+        await tester.pumpWidget(_host(width: 300, brightness: brightness,
+          selectedId: selectedId, panelColor: panel, panelAbove: true,
+          tabs: const [
+            JoinedTab(id: 'all', label: 'Tümü'),
+            JoinedTab(id: 'live', label: 'Canlı'),
+            JoinedTab(id: 'pinned', label: 'Sabitlenen'),
+          ], wrap: (tabs) => RepaintBoundary(key: key, child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [SizedBox(height: 32, child: ColoredBox(color: panel,
+              child: const SizedBox.expand())), tabs],
+          ))));
+        await tester.pumpAndSettle();
+        final pixel = await _pixels(tester, key);
+        final index = ['all', 'live', 'pinned'].indexOf(selectedId);
+        final selectedX = index * 100 + 50;
+        for (final y in [30, 31, 32, 33, 34, 36]) {
+          expect(pixel(selectedX, y), panel, reason: 'No line or shadow may close the selected tab at the body boundary');
+        }
+        for (var column = 0; column < 3; column++) {
+          if (column == index) continue;
+          expect(pixel(column * 100 + 50, 34), isNot(panel),
+            reason: 'Inactive tabs start recessed immediately, without a raised connector strip');
+        }
+      });
+    }
 
     for (final panelAbove in [false, true]) {
       testWidgets('inset lighting stays top-left for panelAbove=$panelAbove, $brightness', (tester) async {
@@ -315,7 +310,7 @@ void main() {
         final height = tester.getSize(find.byType(NeoJoinedTabs)).height.round();
         final pixel = await _pixels(tester, key);
         final inset = NeoPalette.forBrightness(brightness).inset.computeLuminance();
-        final top = panelAbove ? 14 : 2;
+        const top = 2;
         final bottom = panelAbove ? height - 3 : height - 15;
         expect(pixel(50, top).computeLuminance(), lessThan(inset));
         expect(pixel(50, bottom).computeLuminance(), greaterThan(inset));
@@ -332,7 +327,6 @@ void main() {
     final inbox = tester.getRect(_button('Gelen kutusu'));
     expect(projects.left, lessThan(action.left));
     expect(action.left, lessThan(inbox.left));
-    expect(projects.top, 12);
     expect(action.top, projects.top);
     expect(inbox.top, projects.top);
     expect(find.descendant(of: find.byType(NeoJoinedTabs), matching: find.byType(Transform)), findsNothing);

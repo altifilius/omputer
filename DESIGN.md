@@ -23,10 +23,10 @@ colors:
   light-shadow: "#bdc6d0"
   light-text: "#252c35"
   light-secondary: "#505b68"
-  light-primary: "#775500"
+  light-primary: "#292e37"
   light-on-primary: "#ffffff"
-  light-primary-container: "#f1dfb5"
-  light-on-primary-container: "#4a370d"
+  light-primary-container: "#d5dde8"
+  light-on-primary-container: "#23272f"
   light-outline: "#677482"
   light-outline-variant: "#bdc7d1"
 typography:
@@ -88,19 +88,19 @@ components:
 
 ## Overview
 
-**Creative North Star: Graphite workbench.** The explicitly requested whole-app neumorphic redesign uses graphite in dark mode and fog in light mode, one amber action accent, and consistent top-left lighting. This replaces the previous visual world rather than layering another style onto it. The product remains a Turkish-first, local-first native companion for paired-PC project continuity, conversations and human decisions—not a cloud dashboard or marketing surface.
+**Creative North Star: Graphite workbench.** The explicitly requested neumorphic system uses graphite in dark mode, fog in light mode and consistent top-left lighting. Dark action/focus keeps amber; light action/focus now uses the dark scheme's navy-graphite raised tone. The user-supplied Sisyphus artwork defines the Android launcher and working indicator. The product remains a Turkish-first, local-first native companion for paired-PC work and human decisions, not a marketing surface.
 
 `mobile/lib/neumorphic.dart` owns `NeoPalette`, `NeoSurface`, `NeoInputBorder` and native button backgrounds. `mobile/lib/ui.dart` owns the Material theme, semantic roles and route transitions; screen-specific composition remains in the native screen files. All dimensions here are logical dp; text follows Android system scaling, expressed in sp terms. This is source-derived documentation, not native visual acceptance. Acceptance and historical evidence belong in [the canonical implementation report](Raporlar/2026-11-13-butunsel-neumorphic-ui.md); earlier screenshots do not establish acceptance of this redesign.
 
 ## Colors
 
-The frontmatter records authored constants, not an invented tonal ramp. `ColorScheme.fromSeed` uses `#a87920` at the selected brightness; `ui.dart` overrides the recorded roles. There is no wallpaper-derived Dynamic Color implementation. Resolve every foreground/background through the active theme rather than transplanting a dark pair into light mode.
+The frontmatter records authored constants. `ColorScheme.fromSeed` uses `#a87920` in dark appearance and `#292e37` in light appearance; `ui.dart` overrides the recorded roles. No wallpaper-derived Dynamic Color is implemented. Foregrounds resolve through the active semantic pairs. Primary/primary-container in light appearance use navy and a cool muted container, not the former brown/amber pair. Dark semantic pairs are unchanged.
 
-`surface`, scaffold and canvas use base; low/high surface containers use raised; lowest/highest containers and secondary containers use inset. `onSurface` and `onSecondaryContainer` use text; `onSurfaceVariant` and secondary use secondary text. `onSecondary` uses base. Tertiary shares amber primary with base as its foreground. Primary containers use the authored amber-muted pair; unoverridden roles, including errors, remain generated Material roles. Amber means action, selection or focus—not generic decoration. Error notices use `errorContainer`/`onErrorContainer` and retain explanatory text.
+Base/raised/inset share the existing neutral ramp. Primary means action, selection or focus, never an all-screen wash. Error notices retain generated `errorContainer`/`onErrorContainer` and explanatory words. Card depth uses neutral surface steps and offset shadows, not accent-filled status tiles.
 
 ## Application mark
 
-The phone mark is a split rounded O: two opposing open arcs represent work continuity between PC and phone. Top/left uses existing amber #f3ca68, bottom/right existing fog #f1f3f5, on graphite #23272f. Editable source: `mobile/branding/omputer-mark.svg`. Android uses one foreground geometry, an opaque adaptive background and a monochrome silhouette for themed icons. Mark bounds28–80 on108×108 fit within the centered66dp safe circle; launcher masks belong to Android, not baked shadows or rounded-square foregrounds. Notification uses the same white-alpha mark at24dp. Native launch reuses the launcher resource with existing light/dark surfaces; no startup delay or logo animation is added.
+Android uses the supplied cheerful Sisyphus/person-and-boulder image. Original pixels and transformation provenance live under `mobile/branding/assets`; legacy density icons retain the whole supplied composition. Adaptive foreground and Android13 monochrome derive from the actual isolated art with safe margins and an opaque warm source-matched backdrop. Native splash resolves the same new launcher with no artificial delay. The existing small notification glyph stays unchanged: the detailed illustration is not substituted for a native status-bar alpha glyph.
 
 
 ## Typography
@@ -109,9 +109,13 @@ Use native Roboto and `Typography.material2021(platform: TargetPlatform.android)
 
 ## Layout
 
-Phone Home is a compact operating screen: symmetric app bar with the reference 72×48dp controlled theme switch left, title/connection centered and Settings right; search and joined filters flow directly into upright sliding project cards and a right-hand N-position rail. The redundant Projects heading and list/cards switch are absent. One selected project's entire session history fills the remaining inset panel and scrolls internally. Normal phone needs no outer scroll; tiny-height/IME/large text retains accessible scrolling instead of clipped content. Preserve 8dp gutters/safe areas, no tablet/desktop redesign.
+Phone Home is a compact operating screen: symmetric app bar with reference72×48dp theme switch left, centered title/connection and Settings right; search and joined filters flow into upright layered project cards and an N-position48dp rail. Front cards are lighter raised neutral surfaces; back cards are darker inset tones, combined with restrained translation/scale/opacity. Native titleLarge (22sp) and expanded headlineSmall (24sp), weight600, make project names lead. The body is only a bounded continuation preview from the newest available memory/activity; no project-goal fallback, generated summary, session inventory or status-copy stack. Missing continuity is stated honestly. Pin/open semantics and full project details remain.
 
-Project and session identity lead. The selected project name and all-session count label the history, including archive/closed records; no global live-session section remains. Compact flat rows preserve exact references/status. Bottom Projects/New session(action)/Inbox tabs join their matching surface upward; filter tabs join below. Pending decisions remain only in Inbox. New session is a raised form with consistent 16dp grouping/inset project/name/prompt/model fields; the Omputer connection band and created-session shortcut are removed, while offline recovery and pending-operation feedback remain. No new decorative world or reading-plane elevation.
+Working project cards lead the heading with the supplied64×64dp Sisyphus GIF,12dp before the project name. The trailing pin and wrapping title keep their native roles. Continuation text now occupies a separate full-width row with no duplicate GIF beside it. Session-list rows retain their existing small indicator; working-state, route/lifecycle/TickerMode and reduced-motion gates are unchanged.
+
+Tümü/Sabitlenen keep the selected project's complete session history. Canlı combines all projects' connected writer sessions whose authoritative workState is running/background; card selection does not filter that list. Each live row names its project. Settled/human_wait/queued/closed/disconnected/active-unbridged are excluded; host connection loss empties Canlı rather than presenting cached state as live. Project detail retains history and applies the same actual-work predicate to its Canlı filter. Bottom Projects/New session(action)/Inbox composition and form/Back/draft behavior remain unchanged.
+
+Bottom navigation now joins the active body directly, without an8dp gap or12dp full-width connector band. Upward tabs keep their existing selected rounded form/concave shoulders, open to the body at its center with no closing stroke or shadow. Inactive columns remain recessed. The outer project body no longer closes with rounded bottom corners; its separate inset session-reading panel keeps its shape. Inbox extends the matching neutral carrier to the same boundary. Active filter tints resolve identically in the content and bottom selected tab; top filters' downward joins are unchanged. Navigation stays fixed and owns the Android bottom safe area, while content owns no duplicate bottom inset. New session remains a separate action/route.
 
 The composer input/send row remains anchored above the resized safe-area/IME bottom; ancillary controls and attachments may scroll independently. Short-screen headers/notices must not collapse the editable row. Preserve draft ownership, multiline growth, selection, keyboard submission rules and acknowledged-version clearing.
 
@@ -121,7 +125,7 @@ One lighting model applies across the app. Raised surfaces use a lower-right sha
 
 Existing route motion remains 220ms forward/180ms reverse, Cubic(.16,1,.3,1), fade plus horizontal offset .025 of child width (.045 for checkpoints). `disableAnimations` returns the untransformed child with zero custom duration. No new depth animation is prescribed.
 
-Project motion restores the finite upright layered stack: visible upper/lower neighbor cards slide behind the selected foreground with translation, uniform scale and opacity. No backward tilt or reversed/mirrored face; at most five cached real cards, no per-frame full-project scan. It starts paused; Play uses six-second dwell and 280ms layered steps with existing Cubic(.16,1,.3,1), stops at the last and requires explicit restart. A 48dp side rail draws N positions, displays n/N and supports rapid direct scrub/tap; keyboard/reduced/assistive choices are immediate. Up/down buttons are gone. Card/session interaction and visibility/route/lifecycle/input gates pause without catchup. Shared native switch/checkbox/radio/slider states, menu canvas and focus/disabled roles use the same palette; do not replace native actions with decorative gestures. The supplied native sun/moon/cloud/star switch and immediate joined-selection remain unchanged.
+The finite upright stack caches at most five actual neighboring cards. No Play/Pause/Restart button remains. Seven seconds after the last input/release, a1200ms automatic translation/scale/opacity step uses Cubic(.77,0,.175,1), followed by another7s dwell. The last project stops; the native rail can select an earlier project. Manual steps stay280ms Cubic(.16,1,.3,1); keyboard/assistive/reduced choices are immediate. Held pointer/key, scrolling, text input/IME, covered route, hidden/offscreen/lifecycle and motion preferences suspend auto advance; reopening a gate starts a full fresh dwell, without catchup. The local supplied12-frame/1680ms GIF is decoded incrementally at256px and only moves for actual work under lifecycle/TickerMode/route/reduced-motion gates.
 
 ## Shapes
 
@@ -129,11 +133,11 @@ Use 12dp for chips/text buttons, 16dp for fields/buttons/rows/menus, default 20d
 
 ## Components
 
-Filled and outlined buttons keep native callbacks, semantics, focus and ink response. Minimum size is 48×52dp; compact/icon and text buttons are at least 48×48dp. Filled/outlined/icon button backgrounds use `backgroundBuilder`: resting raised, pressed/selected inset, disabled flat. `NeoSurface` preserves inherited `DefaultTextStyle` across its transparent Material, so button labels retain the same resolved foreground role as their icons. Enabled filled actions use amber/onPrimary in both appearances, with contrast at least 4.5:1. Focus uses the primary border; disabled treatment remains explicit with authored muted foreground and border rather than an invented universal opacity.
+Filled/outlined/icon buttons preserve native callbacks, focus, ink and text/icon foreground inheritance through NeoSurface. Minimum52dp primary and48dp compact targets remain. Resting raised/pressed inset/disabled flat backgrounds use the existing builder. Enabled filled foreground uses onPrimary against dark amber or light navy with at least4.5:1 contrast. Focus and disabled roles stay explicit; no local label-color overrides.
 
-Fields use true `NeoInputBorder` inset painting, 16dp padding/radius, a resting outline-variant border and 2dp amber focus border. Error borders use native error roles; disabled outline alpha is .5. Native floating labels, accessible names, editing, IME, selection and validation remain intact. Cursor/handles use amber; selection uses amber alpha .24. The message editor retains its persistent “OMP’ye mesaj” name and native draft behavior.
+Fields use true NeoInputBorder inset painting,16dp padding/radius, resting outline-variant and2dp primary focus borders. Native labels, accessibility, editing/IME/selection/validation stay unchanged. Cursor/handles use the active primary and selection alpha.24; the persistent message-editor name and draft boundaries remain.
 
-Navigation uses inset indicators and amber selected labels/icons without replacing native destinations or Back. Chips use raised/inset/base for resting/selected/disabled, radius 12 and 8dp padding, with a native selection checkmark. Menus use raised 16dp surfaces; dialogs and sheets use raised 24dp surfaces and native dismissal/confirmation behavior. Snackbars use text-colored backgrounds with base-colored content; dividers use outline-variant alpha .65.
+Navigation uses inset indicators and the current primary selected label/icon. Chips, menus/dialogs/sheets/snackbars retain shared native roles, surfaces and dismissals. The existing native sun/moon control is preserved; light navy is not a replacement visual system.
 
 **First valid response and trust.** The first valid desktop or phone answer wins. Requests are actionable only while pending, connected, valid and not submitting. Closed/expired requests stay read-only; offline answers are not silently queued. Tool decisions retain command/context warnings and separate approve/reject actions; cancellation uses native confirmation. Status, freshness, saved/offline state and failure are conveyed in words, not color alone.
 
@@ -144,6 +148,6 @@ Preserve source-session, project, branch and paired-PC identity. Durable project
 - Do use the active palette and Material semantic pairs, native Roboto roles and system scale.
 - Do keep meaningful touch targets, labels, focus, readable flat content and real source/freshness context.
 - Do retain the existing reduced-motion and inactive/offscreen stop rules.
-- Don't add colored glows, wallpaper claims, decorative imagery, new looping motion or a competing aesthetic.
+- Don't add colored glows, wallpaper claims, unrelated decorative imagery or loops beyond the explicitly supplied working GIF and idle-driven finite project movement.
 - Don't replace native semantics, response gating, draft/IME behavior or privacy boundaries with decorative controls.
 - Don't treat this record, sidecar previews or historical captures as current native acceptance. Physical-device performance, TalkBack, large-font, landscape/tablet and reduced-motion runtime results must be established in the canonical report, not inferred here.

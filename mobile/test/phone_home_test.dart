@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+import 'package:flutter/rendering.dart';
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -22,7 +24,7 @@ class AppearanceNative implements NativeAdapter {
     {'id':'two','name':'İkinci proje','goal':'İkinci gerçek hedef'},
   ],'sessions':[
     {'id':'a','projectId':'one','name':'Açık A','status':'running','transport':'rpc','writerConnected':true,'workState':'running'},
-    {'id':'b','projectId':'two','name':'Açık B','status':'idle','transport':'rpc','writerConnected':true,'workState':'background'},
+    {'id':'b','projectId':'two','name':'Açık B','status':'waiting','transport':'rpc','writerConnected':true,'workState':'background'},
     {'id':'old','projectId':'one','name':'Kapalı kayıt','status':'closed','transport':'archive'},
   ]};
   @override Stream<Object?> get events=>const Stream.empty();
@@ -47,6 +49,107 @@ Widget home(OmputerController c,{double scale=1})=>ListenableBuilder(listenable:
 void main(){
   setUp(()=>TestWidgetsFlutterBinding.instance.platformDispatcher.accessibilityFeaturesTestValue=FakeAccessibilityFeatures(disableAnimations:true));
   tearDown(()=>TestWidgetsFlutterBinding.instance.platformDispatcher.clearAccessibilityFeaturesTestValue());
+  for (final appearance in ['dark', 'light']) {
+    for (final destination in ['all', 'live', 'pinned', 'inbox']) {
+      testWidgets('$appearance $destination body opens into the selected bottom tab without a band', (tester) async {
+        tester.view.physicalSize = const Size(393, 1000); tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize); addTearDown(tester.view.resetDevicePixelRatio);
+        final c = homeController(AppearanceNative())..theme = appearance;
+        final key = GlobalKey();
+        await tester.pumpWidget(RepaintBoundary(key: key, child: home(c)));
+        await tester.pumpAndSettle();
+        final bottom = find.byKey(const ValueKey('home-bottom-tabs'));
+        if (destination == 'inbox') {
+          await tester.tap(find.descendant(of: bottom, matching: find.text('Gelen kutusu')));
+        } else if (destination != 'all') {
+          await tester.tap(find.descendant(of: find.byKey(const ValueKey('home-filter-tabs')),
+            matching: find.byKey(ValueKey('joined-tab:$destination'))));
+        }
+        await tester.pumpAndSettle();
+        final bounds = tester.getRect(bottom);
+        expect(tester.getRect(find.byKey(const ValueKey('home-body'))).bottom, bounds.top);
+        final label = destination == 'inbox' ? 'Gelen kutusu' : 'Projeler';
+        final selected = find.descendant(of: bottom, matching: find.widgetWithText(TextButton, label));
+        final selectedBounds = tester.getRect(selected);
+        final panelColor = tester.widget<NeoJoinedTabs>(bottom).panelColor!;
+        final boundary = key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+        final data = (await tester.runAsync(() async {
+          final image = await boundary.toImage(pixelRatio: 1);
+          try { return (await image.toByteData(format: ui.ImageByteFormat.rawRgba))!; }
+          finally { image.dispose(); }
+        }))!;
+        final bytes = data.buffer.asUint8List();
+        final x = selectedBounds.center.dx.round();
+        for (final dy in [-2, -1, 0, 1, 2, 4]) {
+          final offset = ((bounds.top.round() + dy) * 393 + x) * 4;
+          expect(Color.fromARGB(bytes[offset + 3], bytes[offset], bytes[offset + 1], bytes[offset + 2]).toARGB32(), panelColor.toARGB32(),
+            reason: 'The visible content-to-selected-tab joint must have no gap, outline or shadow');
+        }
+        expect(selectedBounds.height, greaterThanOrEqualTo(48));
+        expect(c.operations, isEmpty);
+        await tester.pumpWidget(const SizedBox.shrink()); c.dispose();
+      });
+    }
+  }
+
+  testWidgets('Home-wide held input prevents idle advance and release starts a fresh seven seconds', (tester) async {
+    tester.binding.platformDispatcher.accessibilityFeaturesTestValue = FakeAccessibilityFeatures(disableAnimations: false);
+    tester.view.physicalSize = const Size(393, 852); tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize); addTearDown(tester.view.resetDevicePixelRatio);
+    final native = AppearanceNative()..data['sessions'] = <Json>[];
+    final c = homeController(native);
+    await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.light), home: HomeScreen(controller: c)));
+    await tester.pump();
+    String selected() => tester.widget<ProjectCarousel>(find.byType(ProjectCarousel)).selectedProjectId;
+    await tester.pump(const Duration(seconds: 6));
+    final hold = await tester.startGesture(tester.getCenter(find.byKey(const ValueKey('home-centered-title'))));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 20));
+    expect(selected(), 'one');
+    await hold.up(); await tester.pump();
+    await tester.pump(const Duration(milliseconds: 6999));
+    expect(selected(), 'one');
+    await tester.pump(const Duration(milliseconds: 1)); await tester.pump();
+    await tester.pump(const Duration(milliseconds: 1201)); await tester.pump();
+    expect(selected(), 'two');
+    await tester.pumpWidget(const SizedBox.shrink()); c.dispose();
+  });
+
+  testWidgets('Live aggregates only working sessions across projects and reconciles state changes', (tester) async {
+    tester.view.physicalSize = const Size(393, 1400); tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize); addTearDown(tester.view.resetDevicePixelRatio);
+    final native = AppearanceNative();
+    final rows = objects(native.data['sessions']);
+    native.data['sessions'] = rows;
+    rows.addAll(<Json>[
+      {'id':'settled','projectId':'one','name':'Tamamlanan','status':'idle','transport':'rpc','writerConnected':true,'workState':'settled'},
+      {'id':'waiting','projectId':'one','name':'İnsan bekleyen','status':'waiting','transport':'rpc','writerConnected':true,'workState':'human_wait'},
+      {'id':'lost','projectId':'two','name':'Bağlantısı kopan','status':'running','transport':'rpc','writerConnected':false,'workState':'running'},
+      {'id':'terminal','projectId':'two','name':'Yalnız terminal','status':'active-unbridged','transport':'archive','writerConnected':false},
+    ]);
+    final c = homeController(native);
+    await tester.pumpWidget(home(c)); await tester.pumpAndSettle();
+    final filters = find.byKey(const ValueKey('home-filter-tabs'));
+    await tester.tap(find.descendant(of: filters, matching: find.text('Canlı')));
+    await tester.pumpAndSettle();
+    List<String> shown() => tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((r) => r.session.id).toList();
+    expect(shown(), ['a', 'b']);
+    expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).every((r) => r.showProject), isTrue);
+    final rail = tester.getRect(find.byKey(const ValueKey('project-carousel-rail')));
+    await tester.tapAt(Offset(rail.center.dx, rail.bottom - 16)); await tester.pumpAndSettle();
+    expect(shown(), ['a', 'b']);
+    rows.first['workState'] = 'settled';
+    c.snapshot = Snapshot.fromJson(native.data); c.notifyListeners(); await tester.pumpAndSettle();
+    expect(shown(), ['b']);
+    c.connection = ConnectionState.fromJson({'paired':true,'connected':false});
+    c.notifyListeners(); await tester.pumpAndSettle();
+    expect(shown(), isEmpty);
+    expect(find.text('Canlı durum için bağlantı gerekiyor'), findsOneWidget);
+    await tester.tap(find.descendant(of: filters, matching: find.text('Tümü'))); await tester.pumpAndSettle();
+    expect(find.byType(LocalSessionRow), findsWidgets);
+    await tester.pumpWidget(const SizedBox.shrink()); c.dispose();
+  });
+
   testWidgets('Home shows selected-project sessions with rail-only navigation', (tester)async{
     tester.view.physicalSize=const Size(393,1000);tester.view.devicePixelRatio=1;
     addTearDown(tester.view.resetPhysicalSize);addTearDown(tester.view.resetDevicePixelRatio);
@@ -195,6 +298,7 @@ void main(){
     }
     expect(await surface({'status':'running','writerConnected':true,'workState':'running'}),isNotNull);
     expect(await surface({'status':'idle','writerConnected':true,'workState':'background'}),isNotNull);
+    expect(await surface({'status':'waiting','writerConnected':true,'workState':'background'}),isNotNull);
     expect(await surface({'status':'waiting','writerConnected':true,'workState':'human_wait'}),isNull);
     expect(await surface({'status':'idle','writerConnected':false,'workState':'running'}),isNull);
     expect(await surface({'status':'running','writerConnected':true,'workState':'running'},connected:false),isNull);

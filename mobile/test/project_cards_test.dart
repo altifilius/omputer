@@ -2,7 +2,6 @@ import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:omputer/controller.dart';
 import 'package:omputer/models.dart';
-import 'package:omputer/neumorphic.dart';
 import 'package:omputer/project_cards.dart';
 import 'package:omputer/ui.dart';
 import 'package:omputer/working_avatar.dart';
@@ -114,7 +113,7 @@ void main() {
 
   for (final (session, expected) in <(Json, String)>[
     ({'writerConnected': true, 'status': 'idle', 'workState': 'background'}, 'Arka plan işi sürüyor'),
-    ({'writerConnected': true, 'status': 'waiting', 'workState': 'background'}, 'Yanıt bekliyor'),
+    ({'writerConnected': true, 'status': 'waiting', 'workState': 'background'}, 'Arka plan işi sürüyor'),
     ({'writerConnected': true, 'status': 'idle', 'workState': 'human_wait'}, 'Yanıt bekliyor'),
     ({'writerConnected': true, 'status': 'idle', 'workState': 'settled'}, 'Tur tamamlandı'),
     ({'writerConnected': false, 'status': 'running', 'workState': 'running'}, 'Oturum bağlantısı kesik'),
@@ -142,46 +141,53 @@ void main() {
   });
 
   for (final brightness in Brightness.values) {
-    testWidgets('$brightness working surface stays quiet with explicit status in both layouts', (tester) async {
-      final controller = _controller(sessions: [
+    testWidgets('$brightness card shows continuity instead of goal or session inventory', (tester) async {
+      final controller = _controller(projects: [
+        {..._project, 'summary': 'Klavye düzeltmesi tamamlandı; emülatör kontrolü kaldı'},
+      ], sessions: [
         {'id': 'session', 'projectId': 'phone', 'name': 'Must not become a session row', 'transport': 'rpc', 'status': 'running', 'writerConnected': true, 'workState': 'running'},
       ]);
-      for (final expanded in [false, true]) {
-        await _mount(tester, controller, brightness: brightness, expanded: expanded);
-        final context = tester.element(find.byType(ProjectOverviewCard));
-        final colors = Theme.of(context).colorScheme;
-        final surface = tester.widget<NeoSurface>(find.descendant(of: find.byType(ProjectOverviewCard), matching: find.byType(NeoSurface)).first);
-        expect(surface.color, isNot(colors.primaryContainer));
-        expect(tester.widget<Text>(find.text('Çalışıyor')).style!.color, colors.primary);
-        expect(find.byType(WorkingAvatar), findsOneWidget);
-        expect(find.text('Must not become a session row'), findsNothing);
-        expect(find.text('1 açık oturum'), findsOneWidget);
-        expect(find.text('Projeyi aç'), findsOneWidget);
-        expect(tester.takeException(), isNull);
-      }
+      await _mount(tester, controller, brightness: brightness, selected: true);
+      expect(find.text('Klavye düzeltmesi tamamlandı; emülatör kontrolü kaldı'), findsOneWidget);
+      expect(find.text(_project['goal']! as String), findsNothing);
+      expect(find.text('1 açık oturum'), findsNothing);
+      expect(find.text('Projeyi aç'), findsNothing);
+      expect(find.byType(WorkingAvatar), findsOneWidget);
+      final avatar = tester.getRect(find.byType(WorkingAvatar));
+      final title = tester.getRect(find.text('Telefon uygulaması'));
+      final preview = tester.getRect(find.text('Klavye düzeltmesi tamamlandı; emülatör kontrolü kaldı'));
+      expect(avatar.width, greaterThan(40));
+      expect(avatar.right, lessThan(title.left));
+      expect(avatar.bottom, lessThanOrEqualTo(preview.top));
+      expect(preview.left, lessThan(title.left));
       await _dispose(tester, controller);
     });
   }
 
-  testWidgets('selected settled card stays neutral while preserving a check and border', (tester) async {
-    final controller = _controller();
-    await _mount(tester, controller, selected: true);
-    final context = tester.element(find.byType(ProjectOverviewCard));
-    final surface = tester.widget<NeoSurface>(find.descendant(of: find.byType(ProjectOverviewCard), matching: find.byType(NeoSurface)).first);
-    expect(surface.color, isNull);
-    expect(surface.borderColor, Theme.of(context).colorScheme.primary);
-    expect(find.byIcon(Icons.check_rounded), findsOneWidget);
-    expect(find.byType(WorkingAvatar), findsNothing);
+  testWidgets('newer activity supplies continuation while fresh durable memory stays authoritative', (tester) async {
+    final controller = _controller(projects: [
+      {..._project, 'summary': 'Eski özet', 'memoryUpdatedAt': '2026-11-12T12:00:00Z',
+        'activity': {'updatedAt': '2026-11-13T12:00:00Z', 'nextStep': 'Son test hatasını düzelt', 'lastAssistantText': 'Gereksiz uzun cevap'}},
+    ]);
+    await _mount(tester, controller);
+    expect(find.text('Son test hatasını düzelt'), findsOneWidget);
+    expect(find.text('Eski özet'), findsNothing);
+    controller.snapshot = Snapshot.fromJson({'projects': [
+      {..._project, 'summary': 'Son hata giderildi; paket hazır', 'memoryUpdatedAt': '2026-11-13T13:00:00Z',
+        'activity': {'updatedAt': '2026-11-13T12:00:00Z', 'nextStep': 'Son test hatasını düzelt'}},
+    ]});
+    controller.notifyListeners();
+    await tester.pump();
+    expect(find.text('Son hata giderildi; paket hazır'), findsOneWidget);
+    expect(find.text('Son test hatasını düzelt'), findsNothing);
     await _dispose(tester, controller);
   });
 
-  testWidgets('quiet neighbor can retain working tint without allocating a moving avatar', (tester) async {
-    final controller = _controller(sessions: [
-      {'id': 'session', 'projectId': 'phone', 'transport': 'rpc', 'status': 'idle', 'writerConnected': true, 'workState': 'background'},
-    ]);
-    await _mount(tester, controller, animateAvatar: false);
-    expect(find.byType(WorkingAvatar), findsNothing);
-    expect(find.text('Arka plan işi sürüyor'), findsOneWidget);
+  testWidgets('missing continuity is honest rather than substituting the project goal', (tester) async {
+    final controller = _controller();
+    await _mount(tester, controller);
+    expect(find.text('Son durum henüz kaydedilmedi'), findsOneWidget);
+    expect(find.text(_project['goal']! as String), findsNothing);
     await _dispose(tester, controller);
   });
 
@@ -228,12 +234,11 @@ void main() {
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
       final controller = _controller(projects: [
-        {..._project, 'name': 'Uzun proje adı ve kaynak oturumları', 'goal': 'Uzun hedef açıklaması bütün sistem metin ölçeklerinde okunabilir kalır', 'pendingCount': 12},
+        {..._project, 'name': 'Uzun proje adı ve kaynak oturumları', 'summary': 'Son düzenleme tamamlandı; açık kalan doğrulamalar var'},
       ]);
       await _mount(tester, controller, selected: true, scale: 2);
       expect(tester.takeException(), isNull);
       expect(find.text('Uzun proje adı ve kaynak oturumları'), findsOneWidget);
-      expect(find.text('12 karar bekliyor'), findsOneWidget);
       final card = tester.getRect(find.byType(ProjectOverviewCard));
       final pin = tester.getRect(find.byKey(const ValueKey('project-pin:phone')));
       expect(card.contains(pin.center), isTrue);
@@ -244,28 +249,35 @@ void main() {
   }
   for (final width in [280.0, 360.0]) {
     for (final scale in [1.0, 2.0]) {
-      testWidgets('dense $width dp card scrolls within 160dp at ${scale * 100} percent', (tester) async {
+      testWidgets('dense $width dp card keeps continuity and pin reachable at ${scale * 100} percent', (tester) async {
         tester.view.physicalSize = Size(width, 800);
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.resetPhysicalSize);
         addTearDown(tester.view.resetDevicePixelRatio);
         final controller = _controller(projects: [
-          {..._project, 'name': 'Uzun proje adı ve kaynak oturumları', 'goal': 'Uzun hedef açıklaması bütün sistem metin ölçeklerinde okunabilir kalır', 'pendingCount': 12},
+          {..._project, 'name': 'Uzun proje adı ve kaynak oturumları', 'summary': 'Son düzenleme tamamlandı; açık kalan doğrulamalar var'},
         ], sessions: [
-          {'id': 'real-session', 'projectId': 'phone', 'transport': 'rpc', 'status': 'waiting', 'workState': 'human_wait', 'writerConnected': true},
+          {'id': 'real-session', 'projectId': 'phone', 'transport': 'rpc', 'status': 'running', 'workState': 'running', 'writerConnected': true},
         ]);
         var taps = 0;
         await _mount(tester, controller, selected: true, dense: true, denseHeight: 160, scale: scale, onTap: () => taps++);
         expect(tester.getSize(find.byType(ProjectOverviewCard)).height, 160);
         expect(find.text('Uzun proje adı ve kaynak oturumları'), findsOneWidget);
-        expect(find.text('Yanıt bekliyor'), findsOneWidget);
-        expect(find.text('1 açık oturum'), findsOneWidget);
-        expect(find.text('12 karar bekliyor'), findsOneWidget);
+        final avatar = tester.getRect(find.byType(WorkingAvatar));
+        final title = tester.getRect(find.text('Uzun proje adı ve kaynak oturumları'));
+        expect(avatar.right, lessThan(title.left));
+        expect(title.right, lessThanOrEqualTo(tester.getRect(find.byKey(const ValueKey('project-pin:phone'))).left));
         expect(tester.takeException(), isNull);
+        final preview = find.text('Son düzenleme tamamlandı; açık kalan doğrulamalar var');
+        await Scrollable.ensureVisible(tester.element(preview), alignment: 1);
+        await tester.pumpAndSettle();
+        expect(tester.getRect(find.byType(ProjectOverviewCard)).contains(tester.getCenter(preview)), isTrue);
         final scroll = find.byKey(const ValueKey('project-card-scroll:phone'));
         await tester.drag(scroll, const Offset(0, -500));
         await tester.pump(const Duration(milliseconds: 500));
         final pin = find.byKey(const ValueKey('project-pin:phone'));
+        await Scrollable.ensureVisible(tester.element(pin), alignment: 0);
+        await tester.pumpAndSettle();
         expect(tester.getRect(find.byType(ProjectOverviewCard)).contains(tester.getCenter(pin)), isTrue);
         await tester.tap(pin);
         await tester.pump();

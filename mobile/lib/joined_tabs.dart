@@ -25,8 +25,8 @@ class JoinedTab {
   final bool enabled;
 }
 
-/// A local panel's tabs and a matching full-width panel strip.
-/// Place matching [panelColor] content below, or above with [panelAbove].
+/// Native tabs joined to matching [panelColor] content.
+/// Upward navigation opens directly into content without a connector band.
 class NeoJoinedTabs extends StatelessWidget {
   const NeoJoinedTabs({
     super.key,
@@ -163,7 +163,7 @@ class _JoinedTabsBodyState extends State<_JoinedTabsBody> {
             ),
             child: Padding(
               padding: EdgeInsets.only(
-                top: widget.panelAbove ? _JoinedTabsPainter.stripHeight : 0,
+                top: 0,
                 bottom: widget.panelAbove ? 0 : _JoinedTabsPainter.stripHeight,
               ),
               child: Material(
@@ -279,11 +279,11 @@ class _JoinedTabsPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final panelY = size.height - stripHeight;
+    final panelY = size.height - (panelAbove ? 0 : stripHeight);
     final bounds = Offset.zero & size;
     double y(double value) => panelAbove ? size.height - value : value;
     final rail = RRect.fromRectAndRadius(
-      Rect.fromLTWH(0, panelAbove ? stripHeight : 0, size.width, panelY),
+      Rect.fromLTWH(0, 0, size.width, panelY),
       const Radius.circular(16));
     final paint = Paint()..color = palette.inset;
     canvas.drawRRect(rail, paint);

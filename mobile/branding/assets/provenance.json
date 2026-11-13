@@ -1,0 +1,29 @@
+{
+  "scope": "Android phone launcher, native splash, and local working-session avatar only",
+  "icon": {
+    "userSource": "Cheerful Sisyphus Boulder App Icon.png",
+    "sha256": "ce7a3e1690a68031460f01a1edca824ec6647cf181f04e961d051695632c38ba",
+    "sourceDimensions": [1254, 1254],
+    "normalizedSource": "sisyphus-icon-source.png",
+    "normalization": "Original RGB pixels retained; PNG metadata omitted; source file unchanged",
+    "legacyLauncher": "Original complete composition, Lanczos resized to 48/72/96/144/192 px",
+    "adaptiveForeground": "Actual art isolated from perimeter-connected light backdrop, cropped to the illustration region, largest connected opaque subject retained, and Lanczos fitted to 240x240 within a transparent 432x432 canvas",
+    "adaptiveBackground": "#E9DFD6",
+    "monochrome": "White alpha silhouette of the same isolated supplied art, not a substitute symbol",
+    "densitySizes": [108, 162, 216, 324, 432],
+    "splash": "Existing native splash directly references the new launcher; no startup delay added"
+  },
+  "workingAvatar": {
+    "userSource": "Animated Sisyphus Boulder Push.gif",
+    "sha256": "4be180bd4307f0aa03ec8a999c220a90fbaa94c2ff28017afbe8b72d905c072d",
+    "asset": "../../assets/sisyphus-working.gif",
+    "normalization": "Byte-for-byte copy; all frames, palette transparency, disposal, cadence and looping retained",
+    "dimensions": [357, 350],
+    "frameCount": 12,
+    "frameDurationMilliseconds": 140,
+    "loopDurationMilliseconds": 1680,
+    "transparencyIndex": 255,
+    "requestedRuntimeDecodeWidth": 256,
+    "runtime": "Flutter Image.asset incremental shared image stream; requested cacheWidth256 is codec/backend dependent. TickerMode gates running, accessibility, lifecycle and covered-route motion"
+  }
+}

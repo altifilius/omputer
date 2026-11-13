@@ -38,8 +38,7 @@ Map<String, ProjectSummary> projectSummaries(
     summary._writer |= session.writerConnected;
     final state = session.workState;
     summary._waiting |= state == 'human_wait' || session.status == 'waiting';
-    final working = session.writerConnected && session.status != 'waiting' &&
-        (state == 'running' || state == 'background');
+    final working = session.isWorking;
     summary._working |= working;
     summary._foregroundWork |= working && state == 'running';
   }
@@ -62,6 +61,23 @@ Map<String, ProjectSummary> projectSummaries(
         : 'Tur tamamlandı';
   }
   return summaries;
+}
+
+String _continuationPreview(Project project) {
+  final activity = project.activity;
+  final activityIsNewer = activity != null && activity.updatedAt != null &&
+      (project.memoryUpdatedAt == null || activity.updatedAt!.isAfter(project.memoryUpdatedAt!));
+  final candidates = activityIsNewer
+      ? [activity.nextStep, activity.lastAssistantText, project.summary, project.nextStep]
+      : [project.summary, project.nextStep, activity?.nextStep ?? '', activity?.lastAssistantText ?? ''];
+  final source = candidates.where((value) => value.trim().isNotEmpty).firstOrNull;
+  if (source == null) return 'Son durum henüz kaydedilmedi';
+  return source
+      .replaceAllMapped(RegExp(r'\[([^\]]+)\]\([^\)]+\)'), (match) => match[1]!)
+      .replaceAll(RegExp(r'^\s{0,3}(?:#{1,6}\s+|[-*+]\s+|>\s*)', multiLine: true), '')
+      .replaceAll(RegExp(r'[`*_]'), '')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
 }
 
 class ProjectOverviewCard extends StatelessWidget {
@@ -91,145 +107,69 @@ class ProjectOverviewCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
-    final foreground = colors.onSurface;
-    final secondary = colors.onSurfaceVariant;
+    final palette = NeoPalette.of(context);
     final pinned = object(object(controller.localState['sections'])['pins'])['project:${project.id}'] == true;
-    final goal = project.goal.trim().isNotEmpty ? project.goal : project.activity?.goal ?? '';
-    return Semantics(
-      container: true,
-      button: true,
-      selected: selected,
-      hint: 'Projeyi aç',
-      child: NeoSurface(
-        radius: 20,
-        compact: !expanded,
-        color: summary.working ? Color.alphaBlend(colors.primary.withValues(alpha: .06), NeoPalette.of(context).raised) : null,
-        borderColor: selected ? colors.primary : summary.working ? colors.primary.withValues(alpha: .45) : colors.outlineVariant,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(20),
-          onTap: onTap,
-          child: Padding(
-            padding: EdgeInsets.all(dense ? 8 : 20),
-            child: dense ? _denseContent(context, goal, pinned) : Column(
-              mainAxisSize: expanded ? MainAxisSize.max : MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Expanded(child: Text(
-                    project.name,
-                    style: (expanded ? theme.textTheme.titleLarge : theme.textTheme.titleMedium)
-                        ?.copyWith(fontWeight: FontWeight.w600, color: foreground),
-                  )),
-                  if (selected) ...[
-                    const SizedBox(width: 8),
-                    ExcludeSemantics(child: Icon(Icons.check_rounded, size: 20, color: foreground)),
-                  ],
-                ]),
-                const SizedBox(height: 8),
-                Text(
-                  goal.isEmpty ? 'Henüz hedef kaydedilmedi' : goal,
-                  maxLines: expanded ? 4 : 3,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodyMedium?.copyWith(color: secondary),
-                ),
-                if (expanded) const Spacer(),
-                const SizedBox(height: 12),
-                Row(children: [
-                  ExcludeSemantics(child: summary.working && animateAvatar
-                      ? const WorkingAvatar(size: 32)
-                      : SizedBox.square(dimension: 32, child: Icon(
-                          summary.working ? Icons.sync_rounded
-                              : summary.pending > 0 || summary.status == 'Yanıt bekliyor'
-                                  ? Icons.hourglass_empty_rounded : Icons.folder_outlined,
-                          size: 20,
-                          color: secondary,
-                        ))),
-                  const SizedBox(width: 8),
-                  Expanded(child: Text(
-                    summary.status,
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.labelLarge?.copyWith(color: summary.working ? colors.primary : foreground),
-                  )),
-                ]),
-                const SizedBox(height: 8),
-                Row(children: [
-                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('${summary.open} açık oturum', style: theme.textTheme.labelMedium?.copyWith(color: secondary)),
-                    if (summary.pending > 0)
-                      Text('${summary.pending} karar bekliyor', style: theme.textTheme.labelMedium?.copyWith(color: foreground)),
-                    Text('Projeyi aç', style: theme.textTheme.labelMedium?.copyWith(color: foreground)),
-                  ])),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    key: ValueKey('project-pin:${project.id}'),
-                    tooltip: pinned ? 'Proje sabitlemesini kaldır' : 'Projeyi sabitle',
-                    constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
-                    color: foreground,
-                    onPressed: () => perform(context, () => controller.updateLocalState('pins', 'project:${project.id}', !pinned)),
-                    icon: Icon(pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined),
-                  ),
-                ]),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _denseContent(BuildContext context, String goal, bool pinned) {
-    final theme = Theme.of(context);
-    final colors = theme.colorScheme;
-    return SingleChildScrollView(
-      key: ValueKey('project-card-scroll:${project.id}'),
-      primary: false,
-      // Do not claim vertical gestures when this bounded preview fits. Large
-      // type still gets a real internal scroll extent and native scrolling.
-      physics: const ClampingScrollPhysics(),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+    final fill = selected
+        ? Color.lerp(palette.raised, palette.light, theme.brightness == Brightness.dark ? .16 : .3)!
+        : palette.inset;
+    final content = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
         Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Expanded(child: Text(project.name, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600))),
-          if (selected) ...[
-            const SizedBox(width: 8),
-            const ExcludeSemantics(child: Icon(Icons.check_rounded, size: 20)),
+          if (summary.working && animateAvatar) ...[
+            const ExcludeSemantics(child: WorkingAvatar(size: 64)),
+            const SizedBox(width: 12),
           ],
-        ]),
-        const SizedBox(height: 4),
-        Text(
-          goal.isEmpty ? 'Henüz hedef kaydedilmedi' : goal,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: theme.textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
-        ),
-        const SizedBox(height: 8),
-        Row(children: [
-          ExcludeSemantics(child: summary.working && animateAvatar
-              ? const WorkingAvatar(size: 24)
-              : Icon(summary.working ? Icons.sync_rounded
-                  : summary.pending > 0 || summary.status == 'Yanıt bekliyor'
-                      ? Icons.hourglass_empty_rounded : Icons.folder_outlined,
-                  size: 20, color: colors.onSurfaceVariant)),
-          const SizedBox(width: 8),
-          Expanded(child: Text(summary.status, style: theme.textTheme.labelLarge?.copyWith(
-            color: summary.working ? colors.primary : colors.onSurface,
+          Expanded(child: Padding(padding: const EdgeInsets.only(top: 8), child: Text(
+            project.name,
+            style: (expanded ? theme.textTheme.headlineSmall : theme.textTheme.titleLarge)
+                ?.copyWith(fontWeight: FontWeight.w600, color: colors.onSurface),
           ))),
-        ]),
-        Row(children: [
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('${summary.open} açık oturum', style: theme.textTheme.labelMedium?.copyWith(color: colors.onSurfaceVariant)),
-            if (summary.pending > 0)
-              Text('${summary.pending} karar bekliyor', style: theme.textTheme.labelMedium),
-          ])),
+          const SizedBox(width: 8),
           IconButton(
             key: ValueKey('project-pin:${project.id}'),
             tooltip: pinned ? 'Proje sabitlemesini kaldır' : 'Projeyi sabitle',
             constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+            color: colors.onSurfaceVariant,
             onPressed: () => perform(context, () => controller.updateLocalState('pins', 'project:${project.id}', !pinned)),
-            icon: Icon(pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined),
+            icon: Icon(pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined, size: 20),
           ),
         ]),
-      ]),
+        const SizedBox(height: 8),
+        Text(
+          _continuationPreview(project),
+          maxLines: expanded ? 5 : 3,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.bodyMedium?.copyWith(color: colors.onSurfaceVariant, height: 1.4),
+        ),
+      ],
+    );
+    return Semantics(
+      container: true,
+      button: true,
+      selected: selected,
+      value: summary.status,
+      hint: 'Projeyi aç',
+      child: NeoSurface(
+        radius: 20,
+        compact: !selected,
+        color: fill,
+        borderColor: selected ? colors.outline : colors.outlineVariant,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap: onTap,
+          child: Padding(
+            padding: EdgeInsets.all(dense ? 12 : 20),
+            child: dense ? SingleChildScrollView(
+              key: ValueKey('project-card-scroll:${project.id}'),
+              primary: false,
+              physics: const ClampingScrollPhysics(),
+              child: content,
+            ) : content,
+          ),
+        ),
+      ),
     );
   }
 }

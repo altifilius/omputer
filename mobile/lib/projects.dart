@@ -32,7 +32,7 @@ class LocalSessionRow extends StatelessWidget {
         break;
       }
     }
-    final working = controller.connection.connected && session.writerConnected && session.status != 'waiting' && (session.workState == 'running' || session.workState == 'background');
+    final working = controller.connection.connected && session.isWorking;
     final scheme = Theme.of(context).colorScheme;
     final foreground = scheme.onSurface;
     final project = controller.snapshot.project(session.projectId);
@@ -70,9 +70,9 @@ class _ProjectScreenState extends State<ProjectScreen> {
     final ordered = c.snapshot.sessions.where((s) => s.projectId == p.id).toList();
     _sessionOrder.apply(ordered, (s) => s.id, (s) => s.updatedAt);
     final pins = object(object(c.localState['sections'])['pins']);
-    final sessions = ordered.where((s) => s.name.toLowerCase().contains(query.toLowerCase()) && (filter == 'all' || (filter == 'pinned' ? pins['session:${s.id}'] == true : filter == 'archive' ? s.archived && !s.activeUnbridged : !s.archived || s.activeUnbridged))).toList();
+    final sessions = ordered.where((s) => s.name.toLowerCase().contains(query.toLowerCase()) && (filter == 'all' || (filter == 'pinned' ? pins['session:${s.id}'] == true : filter == 'archive' ? s.archived && !s.activeUnbridged : c.connection.connected && s.isWorking))).toList();
     final pending = c.snapshot.pending.where((i) => i.projectId == p.id).toList();
-    final working = c.connection.connected && ordered.any((s) => s.writerConnected && (s.workState == 'running' || s.workState == 'background'));
+    final working = c.connection.connected && ordered.any((s) => s.isWorking);
     return Scaffold(appBar: AppBar(title: Text(p.name), actions: [IconButton(tooltip: 'Yeni oturum', onPressed: c.connection.connected ? () => openScreen(context, NewSessionScreen(controller: c, projectId: p.id)) : null, icon: const Icon(Icons.add_rounded)), IconButton(tooltip: 'Proje dosyalarını incele', onPressed: () => openScreen(context, ProjectFilesScreen(controller: c, project: p)), icon: const Icon(Icons.folder_copy_outlined))]), body: SafeArea(top: false, child: CustomScrollView(key: PageStorageKey('project:${p.id}'), slivers: [
       SliverToBoxAdapter(child: ConnectionBanner(c)),
       if (working) SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 8, 24, 8), child: Row(children: [const WorkingAvatar(size: 56), const SizedBox(width: 12), Expanded(child: Text('Bu projede çalışma sürüyor', style: Theme.of(context).textTheme.bodyMedium))]))),

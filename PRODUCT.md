@@ -24,7 +24,7 @@ OMP v18.10.2 is installed. The PC app starts and supervises its service automati
 
 ## Capabilities and Constraints
 
-- Phone project navigation through upright layered sliding cards and a finite project-count rail; all open and closed sessions of the selected project remain directly accessible with exact references. Goals, decisions, source sessions and freshness stay real. Compact header includes actual connection state and the supplied native day/night switch sharing Settings' theme preference.
+- Phone navigation through upright layered project cards and a finite rail, automatically stepping only after7seconds idle and stopping at the last. Larger titles and recorded continuation previews lead. Tümü/Sabitlenen retain complete selected-project histories; Canlı aggregates only actual running/background sessions across projects, with project identity. Supplied Sisyphus launcher/work GIF, cool navy light actions and the established native theme switch share the existing graphite/fog material system.
 - Unified inbox for pending questions, selections, confirmations, and tool permissions.
 - Live conversations with readable answers/questions and a compact ordered operation flow; raw transcript/export remains available separately. Todos, subagents, prompt/steer/follow-up/interrupt, model selection, new sessions, and resume.
 - All application data, pairing, notifications, and history stay on the PC and phone.
