@@ -9,54 +9,13 @@ import 'memory_history.dart';
 import 'working_avatar.dart';
 import 'neumorphic.dart';
 
-class SelectedProjectDetails extends StatefulWidget {
-  const SelectedProjectDetails({super.key, required this.controller, required this.project});
-  final OmputerController controller;
-  final Project project;
-  @override
-  State<SelectedProjectDetails> createState() => _SelectedProjectDetailsState();
-}
-
-class _SelectedProjectDetailsState extends State<SelectedProjectDetails> {
-  bool expanded = false;
-  final order = StableActivityOrder();
-  @override
-  Widget build(BuildContext context) {
-    final c = widget.controller, p = widget.project;
-    final goal = p.goal.isNotEmpty ? p.goal : p.activity?.goal ?? '';
-    final next = p.nextStep.isNotEmpty ? p.nextStep : p.activity?.nextStep ?? '';
-    final sessions = c.snapshot.sessions.where((s) => s.projectId == p.id).toList();
-    order.apply(sessions, (s) => s.id, (s) => s.updatedAt);
-    final liveSessions = sessions.where((s) => !s.archived || s.activeUnbridged).toList();
-    final recentArchive = liveSessions.isEmpty ? sessions.firstOrNull : null;
-    final pinned = object(object(c.localState['sections'])['pins'])['project:${p.id}'] == true;
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Padding(padding: const EdgeInsets.fromLTRB(24, 16, 16, 8), child: Row(children: [
-        Expanded(child: InkWell(onTap: () => openScreen(context, ProjectScreen(controller: c, projectId: p.id)), child: Padding(padding: const EdgeInsets.symmetric(vertical: 12), child: Text(p.name, style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w600))))),
-        IconButton(tooltip: pinned ? 'Proje sabitlemesini kaldır' : 'Projeyi sabitle', onPressed: () => perform(context, () => c.updateLocalState('pins', 'project:${p.id}', !pinned)), icon: Icon(pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined)),
-      ])),
-      Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        if (goal.isNotEmpty) Text(goal, key: ValueKey('overview-goal:${p.id}'), maxLines: expanded ? null : 2, overflow: expanded ? null : TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodyLarge),
-        if (next.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text('Sıradaki: $next', maxLines: expanded ? null : 2, overflow: expanded ? null : TextOverflow.ellipsis)),
-        if (expanded && p.summary.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 12), child: LocalMarkdown(data: p.summary)),
-        if (expanded && p.activity?.lastAssistantText.isNotEmpty == true) Padding(padding: const EdgeInsets.only(top: 12), child: LocalMarkdown(data: p.activity!.lastAssistantText)),
-        Text('${sessions.length} oturum · ${dateLabel(p.activity?.updatedAt ?? p.updatedAt)}', style: Theme.of(context).textTheme.labelMedium),
-        Wrap(spacing: 8, children: [
-          if (recentArchive != null) TextButton.icon(key: ValueKey('recent:${p.id}'), onPressed: () => openScreen(context, SessionScreen(controller: c, sessionId: recentArchive.id)), icon: const Icon(Icons.history_rounded), label: const Text('Son konuşma')),
-          TextButton.icon(onPressed: () => openScreen(context, ProjectScreen(controller: c, projectId: p.id)), icon: const Icon(Icons.arrow_forward_rounded), label: const Text('Projeyi aç')),
-          TextButton(onPressed: () => setState(() => expanded = !expanded), child: Text(expanded ? 'Özeti daralt' : 'Özeti genişlet')),
-        ]),
-      ])),
-      for (final session in liveSessions) LocalSessionRow(key: ValueKey(session.id), controller: c, session: session),
-      const Padding(padding: EdgeInsets.symmetric(horizontal: 24), child: Divider()),
-    ]);
-  }
-}
 
 class LocalSessionRow extends StatelessWidget {
-  const LocalSessionRow({super.key, required this.controller, required this.session});
+  const LocalSessionRow({super.key, required this.controller, required this.session, this.showProject = false, this.compact = false});
   final OmputerController controller;
   final Session session;
+  final bool showProject;
+  final bool compact;
   @override
   Widget build(BuildContext context) {
     final sections = object(controller.localState['sections']);
@@ -73,10 +32,23 @@ class LocalSessionRow extends StatelessWidget {
         break;
       }
     }
-    return Padding(padding: const EdgeInsets.fromLTRB(16, 6, 16, 6), child: NeoSurface(radius: 18, compact: true, child: ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), leading: Icon(pinned ? Icons.push_pin_rounded : session.archived && !session.activeUnbridged ? Icons.history_rounded : Icons.chat_bubble_outline_rounded), title: Text(session.name.isEmpty ? 'Adsız oturum' : session.name, maxLines: 2, overflow: TextOverflow.ellipsis), subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('${session.statusLabel}${unread ? ' · Okunmadı' : marker.isNotEmpty ? ' · Okundu' : ''}\n${dateLabel(session.updatedAt)}'),
-      Text('Oturum $reference', style: Theme.of(context).textTheme.bodySmall),
-    ]), onTap: () => openScreen(context, SessionScreen(controller: controller, sessionId: session.id)), trailing: IconButton(tooltip: pinned ? 'Oturum sabitlemesini kaldır' : 'Oturumu sabitle', icon: Icon(pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined), onPressed: () => perform(context, () => controller.updateLocalState('pins', 'session:${session.id}', !pinned))))));
+    final working = controller.connection.connected && session.writerConnected && session.status != 'waiting' && (session.workState == 'running' || session.workState == 'background');
+    final scheme = Theme.of(context).colorScheme;
+    final foreground = scheme.onSurface;
+    final project = controller.snapshot.project(session.projectId);
+    final tile = ListTile(
+      contentPadding: compact ? const EdgeInsets.symmetric(horizontal: 12, vertical: 4) : const EdgeInsets.all(16),
+      textColor: foreground, iconColor: foreground,
+      leading: working ? TickerMode(enabled: ModalRoute.isCurrentOf(context) ?? true, child: WorkingAvatar(size: compact ? 24 : 36)) : Icon(pinned ? Icons.push_pin_rounded : session.archived && !session.activeUnbridged ? Icons.history_rounded : Icons.chat_bubble_outline_rounded, size: compact ? 20 : 24),
+      title: Text(session.name.isEmpty ? 'Adsız oturum' : session.name, maxLines: 2, overflow: TextOverflow.ellipsis), subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (showProject) Padding(padding: const EdgeInsets.only(bottom: 4), child: Text(project?.name ?? 'Proje bilgisi yok', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: foreground))),
+        Text('${session.statusLabel}${unread ? ' · Okunmadı' : marker.isNotEmpty ? ' · Okundu' : ''}${compact ? '' : '\n${dateLabel(session.updatedAt)}'}', maxLines: compact ? 1 : null, overflow: compact ? TextOverflow.ellipsis : null, style: TextStyle(color: foreground)),
+        Text('Oturum $reference', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: foreground)),
+      ]), onTap: () => openScreen(context, SessionScreen(controller: controller, sessionId: session.id)), trailing: IconButton(tooltip: pinned ? 'Oturum sabitlemesini kaldır' : 'Oturumu sabitle', icon: Icon(pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined), onPressed: () => perform(context, () => controller.updateLocalState('pins', 'session:${session.id}', !pinned))));
+    if (compact) return Column(mainAxisSize: MainAxisSize.min, children: [tile,
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Divider(height: 1, color: scheme.outlineVariant.withValues(alpha: .5))),
+    ]);
+    return Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: NeoSurface(radius: 20, compact: true, color: working ? Color.alphaBlend(scheme.primary.withValues(alpha: .06), NeoPalette.of(context).raised) : null, borderColor: working ? scheme.primary.withValues(alpha: .45) : scheme.outlineVariant, child: tile));
   }
 }
 

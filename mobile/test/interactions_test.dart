@@ -56,6 +56,39 @@ Json submittedResult(InteractionNative native) => objects(object(object(native.c
 
 void main() {
   restoredDecisionDraftTests();
+  testWidgets('Inbox history remains a named toggle and filters closed decisions without changing them', (tester) async {
+    final native = InteractionNative();
+    final controller = OmputerController(adapter: native)
+      ..connection = ConnectionState.fromJson({'paired': true, 'connected': true})
+      ..snapshot = Snapshot.fromJson({'projects': [{'id': 'project', 'name': 'Yerel proje'}], 'interactions': [
+        {...question('pending'), 'id': 'pending', 'title': 'Bekleyen seçim'},
+        {...question('resolved'), 'id': 'resolved', 'title': 'Yanıtlanmış seçim'},
+      ]});
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.dark), home: Scaffold(body: InboxScreen(controller: controller))));
+    final toggle = find.widgetWithText(SwitchListTile, 'Yanıtlanan ve kapananları göster');
+    expect(tester.getSize(toggle).height, greaterThanOrEqualTo(48));
+    expect(tester.getSemantics(toggle).getSemanticsData().flagsCollection.isToggled.toBoolOrNull(), isFalse);
+    expect(find.text('Karar bekleyen · 1'), findsOneWidget);
+    expect(find.text('Bekleyen seçim'), findsOneWidget);
+    expect(find.text('Yanıtlanmış seçim'), findsNothing);
+    tester.semantics.tap(find.semantics.byLabel('Yanıtlanan ve kapananları göster'));
+    await tester.pumpAndSettle();
+    expect(tester.getSemantics(toggle).getSemanticsData().flagsCollection.isToggled.toBoolOrNull(), isTrue);
+    expect(find.text('Yanıtlanmış seçim'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'Yanıtlanmış');
+    await tester.pumpAndSettle();
+    expect(find.text('Bekleyen seçim'), findsNothing);
+    expect(find.text('Yanıtlanmış seçim'), findsOneWidget);
+    await tester.tap(find.text('Yanıtlanan ve kapananları göster'));
+    await tester.pumpAndSettle();
+    expect(find.text('Yanıtlanmış seçim'), findsNothing);
+    expect(find.text('Eşleşen karar yok.'), findsOneWidget);
+    expect(controller.snapshot.interaction('resolved')!.status, 'resolved');
+    expect(native.commands, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+    semantics.dispose(); controller.dispose();
+  });
   testWidgets('multi-answer UI sends selected labels, not indexes', (tester) async {
     final native = InteractionNative();
     final controller = OmputerController(adapter: native)

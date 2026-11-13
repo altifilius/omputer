@@ -51,8 +51,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         for (final project in c.snapshot.projects) CheckboxListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8), title: Text(project.name), subtitle: const Text('Bu projenin karar bildirimleri'), value: object(object(c.localState['sections'])['notificationPreferences'])['project:${project.id}'] != false, onChanged: busy ? null : (value) => run(() => c.updateLocalState('notificationPreferences', 'project:${project.id}', value == true))),
       ]),
       const SectionHeading('Görünüm'),
-      Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: DropdownButtonFormField<String>(key: ValueKey(c.theme), initialValue: c.theme, isExpanded: true, itemHeight: null, decoration: const InputDecoration(labelText: 'Tema'), items: const [DropdownMenuItem(value: 'system', child: Text('Sistemle aynı')), DropdownMenuItem(value: 'light', child: Text('Açık · sis grisi')), DropdownMenuItem(value: 'dark', child: Text('Koyu · grafit'))], onChanged: busy ? null : (value) { if (value != null) run(() => c.setTheme(value)); })),
-      const Padding(padding: EdgeInsets.fromLTRB(24, 16, 24, 0), child: Text('Yazı boyutu ve Animasyonları kaldır tercihi Android erişilebilirlik ayarlarından izlenir.')),
+      _SettingsPanel(children: [
+        Padding(padding: const EdgeInsets.all(8), child: DropdownButtonFormField<String>(key: ValueKey(c.theme), initialValue: c.theme, isExpanded: true, itemHeight: null, borderRadius: BorderRadius.circular(16), decoration: const InputDecoration(labelText: 'Tema'), items: const [DropdownMenuItem(value: 'system', child: Text('Sistemle aynı')), DropdownMenuItem(value: 'light', child: Text('Açık · sis grisi')), DropdownMenuItem(value: 'dark', child: Text('Koyu · grafit'))], onChanged: busy ? null : (value) { if (value != null) run(() => c.setTheme(value)); })),
+        const Padding(padding: EdgeInsets.all(8), child: Text('Yazı boyutu ve Animasyonları kaldır tercihi Android erişilebilirlik ayarlarından izlenir.')),
+      ]),
       const SectionHeading('Yetkili cihazlar'),
       if (c.snapshot.devices.isEmpty) const Padding(padding: EdgeInsets.symmetric(horizontal: 24), child: Text('Cihaz listesi henüz alınmadı. Bağlantıyı yenile.')),
       for (final device in c.snapshot.devices) Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: _SettingsPanel(children: [ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8), leading: Icon(device.revokedAt == null ? Icons.smartphone_rounded : Icons.phonelink_erase_rounded), title: Text(device.name), subtitle: Text(device.revokedAt == null ? 'Son bağlantı: ${dateLabel(device.lastSeenAt)}' : 'Erişimi kaldırıldı · ${dateLabel(device.revokedAt)}'), trailing: device.revokedAt == null ? IconButton(tooltip: '${device.name} erişimini kaldır', onPressed: busy || !connection.connected ? null : () async {
@@ -75,6 +77,8 @@ class _SettingsPanel extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.symmetric(horizontal: 16),
     child: NeoSurface(
+      compact: true,
+      borderColor: Theme.of(context).colorScheme.outlineVariant.withValues(alpha: .55),
       padding: const EdgeInsets.all(8),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children),
     ),

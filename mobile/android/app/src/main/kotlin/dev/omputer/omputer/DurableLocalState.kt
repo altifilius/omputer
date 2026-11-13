@@ -5,6 +5,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.time.Instant
 import java.util.UUID
 
 /** Authoritative user state: never shares the disposable HTTP cache's failure policy. */
@@ -19,11 +20,37 @@ internal class DurableLocalState(private val directory: File) {
         if (!file.exists()) return JSONObject().put("identity", identity).put("sections", JSONObject())
             .put("drafts", JSONObject()).put("operations", JSONObject())
         check(file.length() <= MAX_TOTAL_BYTES) { "Yerel durum boyutu geçersiz." }
-        return JSONObject(file.readText()).also { check(it.getString("identity") == identity) { "Yerel durum kimliği uyuşmuyor." } }
+        return JSONObject(file.readText()).also { state ->
+            check(state.getString("identity") == identity) { "Yerel durum kimliği uyuşmuyor." }
+            val operations = state.getJSONObject("operations")
+            operations.keys().forEach { normalizeOutcomeUnknown(operations.getJSONObject(it)) }
+        }
     }
-    private fun save(identity: String, state: JSONObject) {
-        val bytes = state.toString().toByteArray(Charsets.UTF_8)
-        require(bytes.size <= MAX_TOTAL_BYTES) { "Yerel depolama dolu; eski taslak veya işlem kayıtlarını kaldır." }
+    private fun save(identity: String, state: JSONObject, preservedOperationId: String? = null) {
+        val operations = state.getJSONObject("operations")
+        var bytes = state.toString().toByteArray(Charsets.UTF_8)
+        var totalBytes = bytes.size.toLong()
+        if (operations.length() > MAX_OPERATIONS || totalBytes > MAX_TOTAL_BYTES) {
+            val candidates = operations.keys().asSequence()
+                .filter { it != preservedOperationId && canRetire(operations.getJSONObject(it)) }
+                .map { id -> id to runCatching { Instant.parse(operations.getJSONObject(id).optString("createdAt")) }.getOrDefault(Instant.EPOCH) }
+                .sortedWith(compareBy<Pair<String, Instant>> { it.second }.thenBy { it.first })
+                .toList()
+            for ((id, _) in candidates) {
+                if (operations.length() <= MAX_OPERATIONS && totalBytes <= MAX_TOTAL_BYTES) break
+                // Each removed object entry contributes its key, colon, value, and (unless
+                // it was the only entry) one comma. Do not reserialize the whole state per victim.
+                totalBytes -= JSONObject.quote(id).toByteArray(Charsets.UTF_8).size.toLong() + 1 +
+                    operations.getJSONObject(id).toString().toByteArray(Charsets.UTF_8).size +
+                    if (operations.length() > 1) 1 else 0
+                operations.remove(id)
+            }
+            require(operations.length() <= MAX_OPERATIONS && totalBytes <= MAX_TOTAL_BYTES) {
+                "Yerel depolama dolu; bekleyen işlemler ve kaydedilmemiş taslaklar korunuyor."
+            }
+            bytes = state.toString().toByteArray(Charsets.UTF_8)
+        }
+        require(bytes.size <= MAX_TOTAL_BYTES) { "Yerel depolama dolu; bekleyen işlemler ve kaydedilmemiş taslaklar korunuyor." }
         atomicWrite(file(identity), bytes)
     }
     @Synchronized fun state(identity: String): JSONObject {
@@ -57,26 +84,38 @@ internal class DurableLocalState(private val directory: File) {
         val claimed = value.optString("identity")
         require(claimed.isBlank() || claimed == identity) { "İşlem farklı bilgisayara ait." }
         val state = read(identity); val operations = state.getJSONObject("operations")
-        require(operations.has(id) || operations.length() < 1000) { "İşlem kayıtları dolu; sonuçlanan eski kayıtları kaldır." }
         val old = operations.optJSONObject(id)
         val request = value.optJSONObject("request")
         if (old?.optJSONObject("request") != null && request != null) {
             require(equivalent(old.getJSONObject("request"), request)) { "Aynı işlem kimliği farklı istekle kullanılamaz." }
         }
-        if (old?.optString("status") in setOf("succeeded", "failed") && value.optString("status") !in setOf("succeeded", "failed")) return
+        val uncertainFailure = isOutcomeUnknownFailure(value)
+        val incomingStatus = if (uncertainFailure) "unknown" else value.optString("status")
+        if (old?.optString("status") in FINAL_STATUSES && incomingStatus !in FINAL_STATUSES) return
         val copy = JSONObject()
         if (old != null) old.keys().forEach { copy.put(it, old.opt(it)) }
         value.keys().forEach { copy.put(it, value.opt(it)) }
+        if (uncertainFailure) {
+            copy.put("result", JSONObject(value.getJSONObject("result").toString()))
+            normalizeOutcomeUnknown(copy)
+        }
         copy.put("identity", identity)
         if (request == null && old?.optJSONObject("request") != null) copy.put("request", old.getJSONObject("request"))
-        operations.put(id, copy); save(identity, state)
+        validateSize(copy, MAX_OPERATION_BYTES)
+        operations.put(id, copy); save(identity, state, preservedOperationId = id)
     }
     @Synchronized fun operations(identity: String): JSONArray {
         val rows = read(identity).getJSONObject("operations")
         return JSONArray(rows.keys().asSequence().map { rows.getJSONObject(it) }.toList())
     }
     @Synchronized fun removeOperation(identity: String, id: String) {
-        UUID.fromString(id); val state = read(identity); state.getJSONObject("operations").remove(id); save(identity, state)
+        UUID.fromString(id)
+        val state = read(identity)
+        val operations = state.getJSONObject("operations")
+        val record = operations.optJSONObject(id) ?: return
+        require(canRetire(record)) { "Bekleyen veya taslak etkisi uygulanmamış işlem kaldırılamaz." }
+        operations.remove(id)
+        save(identity, state)
     }
     @Synchronized fun clear() {
         if (!directory.exists()) return
@@ -86,6 +125,22 @@ internal class DurableLocalState(private val directory: File) {
         const val MAX_DRAFT_BYTES = 6 * 1024 * 1024
         const val MAX_OPERATION_BYTES = 6 * 1024 * 1024
         const val MAX_TOTAL_BYTES = 10 * 1024 * 1024
+        private const val MAX_OPERATIONS = 1000
+        private val FINAL_STATUSES = setOf("succeeded", "failed")
+        private fun isOutcomeUnknownFailure(record: JSONObject): Boolean = record.optString("status") == "failed" &&
+            record.optJSONObject("result")?.optJSONObject("error")?.optString("code") == "outcome_unknown"
+        private fun normalizeOutcomeUnknown(record: JSONObject) {
+            if (isOutcomeUnknownFailure(record)) {
+                record.put("status", "unknown")
+                record.getJSONObject("result").put("status", "unknown")
+            }
+        }
+        private fun canRetire(record: JSONObject): Boolean {
+            if (record.optString("status") !in FINAL_STATUSES || record.optString("draftEffect") == "review") return false
+            val unappliedDraft = record.optString("draftEffect").isBlank() || record.isNull("draftEffect")
+            return record.optString("status") != "succeeded" || !unappliedDraft ||
+                (record.isNull("draftSubmission") && record.isNull("branchRestore"))
+        }
         private val SECTIONS = setOf("pins", "read", "lastMode", "notificationPreferences")
         private fun validateKey(key: String) { require(key.isNotBlank() && key.length <= 512) { "Yerel kayıt anahtarı geçersiz." } }
         private fun validateSize(value: Any?, maximum: Int) { require((value?.toString() ?: "null").toByteArray().size <= maximum) { "Yerel kayıt çok büyük." } }

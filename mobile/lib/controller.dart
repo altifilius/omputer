@@ -6,6 +6,8 @@ import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 import 'models.dart';
 
+typedef HistoryFence = ({int revision, String? epoch});
+
 abstract interface class NativeAdapter {
   Future<Object?> invoke(String method, [Json? arguments]);
   Stream<Object?> get events;
@@ -120,6 +122,10 @@ class OmputerController extends ChangeNotifier {
   Future<void> _draftWrites = Future.value();
   final ValueNotifier<DraftChange?> draftChanges = ValueNotifier(null);
   Future<void>? _reconciliation;
+  bool _reconcileAgain = false;
+  int _historyRevision = 0;
+  final Set<String> _retiredEpochs = {};
+  final Set<String> _startingDrafts = {};
   final Map<String, Json> _catalogs = {};
   List<Json> get operations => _operations.values.toList()..sort((a, b) => '${b['createdAt'] ?? ''}'.compareTo('${a['createdAt'] ?? ''}'));
   List<Json> operationsFor(String sessionId) => operations.where((entry) => entry['sessionId'] == sessionId).toList();
@@ -139,7 +145,23 @@ class OmputerController extends ChangeNotifier {
   final Set<String> _responding = {};
 
   void _acceptSnapshot(Snapshot incoming) {
-    if (incoming.sequence < snapshot.sequence) return;
+    final epoch = incoming.journalEpoch;
+    if (epoch != null && _retiredEpochs.contains(epoch)) return;
+    if (snapshot.journalEpoch != null && epoch == null) return;
+    final changedEpoch = epoch != null && epoch != snapshot.journalEpoch;
+    if (!changedEpoch && incoming.sequence < snapshot.sequence) return;
+    if (changedEpoch) {
+      final previous = snapshot.journalEpoch;
+      if (previous != null) _retiredEpochs.add(previous);
+      _historyRevision++;
+      _acceptedResponses.clear(); _acceptedAnswers.clear(); _acceptedAt.clear();
+      _catalogs.clear();
+      for (final entry in _transcripts.entries.toList()) {
+        entry.value.reset();
+        if (entry.value.loading) entry.value.refreshAfterLoad = true;
+        else unawaited(loadMessages(entry.key));
+      }
+    }
     for (final interaction in incoming.interactions) {
       final accepted = _acceptedResponses[interaction.id];
       if (accepted == null) continue;
@@ -221,10 +243,8 @@ class OmputerController extends ChangeNotifier {
         case 'snapshot':
           if (_switchingPair) return;
           final incoming = Snapshot.fromJson(data);
-          if (incoming.sequence >= snapshot.sequence) {
-            _acceptSnapshot(incoming);
-            notifyListeners();
-          }
+          _acceptSnapshot(incoming);
+          notifyListeners();
         case 'history_reset':
           if (_switchingPair) return;
           for (final entry in _transcripts.entries.toList()) {
@@ -246,6 +266,7 @@ class OmputerController extends ChangeNotifier {
   }
 
   void _journal(Json event) {
+    if (snapshot.journalEpoch != null && event['journalEpoch'] != null && event['journalEpoch'] != snapshot.journalEpoch) return;
     final data = object(event['data']);
     switch (event['type']) {
       case 'session.event':
@@ -272,7 +293,7 @@ class OmputerController extends ChangeNotifier {
       case 'snapshot':
         if (data.containsKey('projects')) {
           final incoming = Snapshot.fromJson(data);
-          if (incoming.sequence >= snapshot.sequence) { _acceptSnapshot(incoming); notifyListeners(); }
+          _acceptSnapshot(incoming); notifyListeners();
         }
     }
   }
@@ -308,8 +329,10 @@ class OmputerController extends ChangeNotifier {
   }
   Future<Json> request(String method, String path, [Json? body]) => _guard(() async {
     final identity = _identityRevision;
+    final history = _historyRevision;
     final result = await native.invoke('request', {'method': method, 'path': path, if (body != null) 'body': body});
     if (identity != _identityRevision || _switchingPair) throw ControllerFailure('Bilgisayar değişti; eski yanıt kullanılmadı.', 'connection_changed');
+    if (history != _historyRevision && path != '/v1/snapshot') throw ControllerFailure('Bilgisayar geçmişi geri yüklendi; eski yanıt kullanılmadı.', 'history_changed');
     return object(result);
   });
 
@@ -367,6 +390,10 @@ class OmputerController extends ChangeNotifier {
     _draftWrites = Future.value();
     draftChanges.value = null;
     _reconciliation = null;
+    _reconcileAgain = false;
+    _historyRevision++;
+    _retiredEpochs.clear();
+    _startingDrafts.clear();
     localState = {'sections': <String, dynamic>{}};
     snapshot = Snapshot.empty();
     for (final entry in _transcripts.entries.toList()) {
@@ -452,8 +479,16 @@ class OmputerController extends ChangeNotifier {
 
   bool _finalOperation(Json value) => value['status'] == 'succeeded' || value['status'] == 'failed';
 
+  Json _normalizeOperation(Json value) {
+    final result = object(value['result']);
+    if (value['status'] != 'failed' || object(result['error'])['code'] != 'outcome_unknown') return value;
+    return {...value, 'status': 'unknown', 'result': {...result, 'status': 'unknown'}};
+  }
+
   Json _mergeOperation(Json incoming) {
-    final current = _operations['${incoming['id']}'];
+    incoming = _normalizeOperation(incoming);
+    final saved = _operations['${incoming['id']}'];
+    final current = saved == null ? null : _normalizeOperation(saved);
     if (current == null) return {...incoming};
     if (_finalOperation(current)) return {...incoming, ...current};
     if (_finalOperation(incoming)) return {...current, ...incoming};
@@ -489,6 +524,7 @@ class OmputerController extends ChangeNotifier {
 
   void _applyOperationDecision(Json operation) {
     if (operation['status'] != 'succeeded' || operation['action'] != 'interaction.respond') return;
+    if (operation['journalEpoch'] != snapshot.journalEpoch) return;
     final payload = object(object(operation['request'])['payload']);
     final interactionId = payload['interactionId'] as String?;
     if (interactionId == null) return;
@@ -517,106 +553,148 @@ class OmputerController extends ChangeNotifier {
 
   static Json composerDraft(Json? draft) => {'text': draft?['text'] ?? '', 'attachments': objects(draft?['attachments']), 'files': objects(draft?['files'])};
   static bool hasDraft(Json? draft) => '${draft?['text'] ?? ''}'.isNotEmpty || objects(draft?['attachments']).isNotEmpty || objects(draft?['files']).isNotEmpty;
+  static Json newSessionDraft(Json? value) => {
+    'name': value?['name'] ?? '', 'prompt': value?['prompt'] ?? '',
+    if (value?['model'] is Map) 'model': _newSessionModel(object(value?['model'])),
+  };
+  static Json _newSessionModel(Json model) => {'provider': model['provider'], 'id': model['id'], if (model['name'] != null) 'name': model['name']};
+
+  Json _newSessionPayload(String projectId, Json value) => {
+    'projectId': projectId,
+    if ('${value['name'] ?? ''}'.trim().isNotEmpty) 'name': '${value['name']}'.trim(),
+    if ('${value['prompt'] ?? ''}'.trim().isNotEmpty) 'prompt': '${value['prompt']}'.trim(),
+    if (value['model'] is Map) 'model': {'provider': object(value['model'])['provider'], 'id': object(value['model'])['id']},
+  };
+
+  Json? newSessionOperation(String projectId) => operations.where((entry) => entry['action'] == 'session.start' && object(object(entry['request'])['payload'])['projectId'] == projectId).firstOrNull;
+
+  bool hasPendingNewSession(String projectId, Json value) => _startingDrafts.contains('new:$projectId') || operations.any((entry) =>
+    !_finalOperation(entry) && entry['action'] == 'session.start' && sameDraft(object(object(entry['request'])['payload']), _newSessionPayload(projectId, value)));
+
+  static String? createdSessionId(Json operation) {
+    if (operation['status'] != 'succeeded') return null;
+    final data = object(object(operation['result'])['data']);
+    final id = data['sessionId'] ?? data['id'] ?? object(data['session'])['id'];
+    return id is String && id.isNotEmpty ? id : null;
+  }
   Json _copy(Json value) => object(jsonDecode(jsonEncode(value)));
 
-  Future<T> _withDrafts<T>(Future<T> Function() work) {
+  Future<T> _withDrafts<T>(Future<T> Function() work, {HistoryFence? fence}) {
     final identity = _identityRevision;
     final next = _draftWrites.catchError((Object _) {}).then((_) {
       if (_disposed || identity != _identityRevision || _switchingPair) throw ControllerFailure('Bilgisayar değişti; eski taslak kullanılmadı.', 'connection_changed');
+      _checkHistory(fence);
       return work();
     });
     _draftWrites = next.then<void>((_) {}, onError: (Object _, StackTrace __) {});
     return next;
   }
 
-  Future<Json?> _readDraft(String key) async {
-    final value = await _localCall('draftLoad', {'key': key});
+  void _checkHistory(HistoryFence? fence) {
+    if (fence != null && (fence.revision != _historyRevision || fence.epoch != snapshot.journalEpoch)) throw ControllerFailure('Bilgisayar geçmişi geri yüklendi; eski taslak etkisi uygulanmadı.', 'history_changed');
+  }
+
+  Future<Object?> _draftCall(String method, Json arguments, HistoryFence? fence) async {
+    _checkHistory(fence);
+    final value = await _localCall(method, {...arguments, if (fence != null) 'expectedJournalEpoch': fence.epoch});
+    _checkHistory(fence);
+    return value;
+  }
+
+  Future<Json?> _readDraft(String key, {HistoryFence? fence}) async {
+    final value = await _draftCall('draftLoad', {'key': key}, fence);
     return value == null ? null : object(value);
   }
 
-  Future<void> _releaseUnusedAttachments(List<Json> images) async {
+  Future<void> _releaseUnusedAttachments(List<Json> images, {HistoryFence? fence}) async {
     final ids = images.map((image) => image['id']).whereType<String>().where((id) => RegExp(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$').hasMatch(id)).toSet();
     if (ids.isEmpty) return;
-    final drafts = object(await _localCall('draftList'));
+    final drafts = object(await _draftCall('draftList', {}, fence));
     for (final value in drafts.values) {
       for (final image in objects(object(value)['attachments'])) { ids.remove(image['id']); }
     }
-    for (final id in ids) { await _localCall('removeAttachment', {'id': id}); }
+    for (final id in ids) { await _draftCall('removeAttachment', {'id': id}, fence); }
   }
 
   void _draftChanged(String key, Json? before, Json? after) {
     draftChanges.value = DraftChange(key, '${localState['identity'] ?? ''}', before, after);
   }
 
-  Future<void> _writeDraft(String key, Json? value) async {
-    final before = await _readDraft(key);
-    if (value == null) { await _localCall('draftDelete', {'key': key}); }
-    else { await _localCall('draftSave', {'key': key, 'value': value}); }
+  Future<void> _writeDraft(String key, Json? value, {HistoryFence? fence}) async {
+    final before = await _readDraft(key, fence: fence);
+    if (value == null) { await _draftCall('draftDelete', {'key': key}, fence); }
+    else { await _draftCall('draftSave', {'key': key, 'value': value}, fence); }
     _draftChanged(key, before, value);
     final retained = objects(value?['attachments']).map((image) => image['id']).toSet();
-    await _releaseUnusedAttachments(objects(before?['attachments']).where((image) => !retained.contains(image['id'])).toList());
+    await _releaseUnusedAttachments(objects(before?['attachments']).where((image) => !retained.contains(image['id'])).toList(), fence: fence);
   }
 
-  Future<void> _markDraftEffect(Json operation, String effect, {String? branchKey}) async {
+  Future<void> _markDraftEffect(Json operation, String effect, {String? branchKey, HistoryFence? fence}) async {
     final updated = {...operation, 'draftEffect': effect, if (branchKey != null) 'branchDraftKey': branchKey};
-    await _localCall('operationSave', {'operation': updated});
+    await _draftCall('operationSave', {'operation': updated}, fence);
     _operations['${operation['id']}'] = updated;
   }
 
   Future<void> _applyOperationDraft(Json operation, {bool applyBranch = false}) async {
     if (operation['status'] != 'succeeded' || operation['draftEffect'] != null) return;
     if (operation['identity'] != null && operation['identity'] != localState['identity']) return;
+    if (operation['journalEpoch'] != snapshot.journalEpoch) return;
     final identity = _identityRevision;
+    final fence = (revision: _historyRevision, epoch: snapshot.journalEpoch);
     final submission = object(operation['draftSubmission']);
     final branch = object(operation['branchRestore']);
     if (submission.isEmpty && branch.isEmpty) return;
     await _withDrafts(() async {
+      _checkHistory(fence);
       if (submission.isNotEmpty) {
         final key = submission['key'] as String;
         final submitted = object(submission['value']);
-        final current = await _readDraft(key);
-        if (sameDraft(current, submitted)) { await _writeDraft(key, null); }
-        else { await _releaseUnusedAttachments(objects(submitted['attachments'])); }
-        await _markDraftEffect(operation, current == null || sameDraft(current, submitted) ? 'cleared' : 'retained');
+        final current = await _readDraft(key, fence: fence);
+        if (sameDraft(current, submitted)) { await _writeDraft(key, null, fence: fence); }
+        else { await _releaseUnusedAttachments(objects(submitted['attachments']), fence: fence); }
+        await _markDraftEffect(operation, current == null || sameDraft(current, submitted) ? 'cleared' : 'retained', fence: fence);
         return;
       }
       final body = object(object(operation['result'])['data']);
-      if (body['cancelled'] == true) { await _markDraftEffect(operation, 'cancelled'); return; }
+      if (body['cancelled'] == true) { await _markDraftEffect(operation, 'cancelled', fence: fence); return; }
       if (body['selectedText'] is! String || body['journalId'] is! String || body['bindingRevision'] is! String || (body['selectedImages'] != null && (body['selectedImages'] is! List || (body['selectedImages'] as List).any((image) => image is! Map)))) throw ControllerFailure('Dal tamamlandı fakat geri yüklenecek istem verisi alınamadı. İşlem sonucunu yeniden sorgula.', 'branch_result');
       final session = snapshot.session('${operation['sessionId']}');
       final payload = object(object(operation['request'])['payload']);
       final original = session?.journalId == payload['expectedJournalId'] && session?.bindingRevision == payload['expectedBindingRevision'];
       final returned = session?.journalId == body['journalId'] && session?.bindingRevision == body['bindingRevision'];
-      if (session == null || (!original && !returned)) { await _markDraftEffect(operation, 'stale'); return; }
+      if (session == null || (!original && !returned)) { await _markDraftEffect(operation, 'stale', fence: fence); return; }
       final key = branch['key'] as String;
       final branchKey = 'session:${operation['sessionId']}:branch:${operation['id']}';
-      var recovered = await _readDraft(branchKey);
+      var recovered = await _readDraft(branchKey, fence: fence);
       if (recovered == null) {
         final images = await prepareImages(objects(body['selectedImages']));
+        _checkHistory(fence);
         if (_disposed || identity != _identityRevision || _switchingPair) throw ControllerFailure('Bilgisayar değişti; eski dal taslağı geri yüklenmedi.', 'connection_changed');
         final latest = snapshot.session('${operation['sessionId']}');
         final stillOriginal = latest?.journalId == payload['expectedJournalId'] && latest?.bindingRevision == payload['expectedBindingRevision'];
         final stillReturned = latest?.journalId == body['journalId'] && latest?.bindingRevision == body['bindingRevision'];
-        if (latest == null || (!stillOriginal && !stillReturned)) { await _markDraftEffect(operation, 'stale'); return; }
+        if (latest == null || (!stillOriginal && !stillReturned)) { await _markDraftEffect(operation, 'stale', fence: fence); return; }
         recovered = {'text': body['selectedText'], 'attachments': images, 'files': <Json>[], '_revision': _uuid.v4(), '_branchOperation': operation['id']};
-        await _writeDraft(branchKey, recovered);
+        await _writeDraft(branchKey, recovered, fence: fence);
       }
-      final current = await _readDraft(key);
-      if (current?['_branchOperation'] == operation['id']) { await _markDraftEffect(operation, 'restored'); await _writeDraft(branchKey, null); return; }
+      final current = await _readDraft(key, fence: fence);
+      if (current?['_branchOperation'] == operation['id']) { await _markDraftEffect(operation, 'restored', fence: fence); await _writeDraft(branchKey, null, fence: fence); return; }
       if (applyBranch && !hasDraft(current) && sameDraft(current?['_revision'], branch['expectedRevision'])) {
-        await _writeDraft(key, recovered);
-        await _markDraftEffect(operation, 'restored');
-        await _writeDraft(branchKey, null);
-      } else { await _markDraftEffect(operation, 'review', branchKey: branchKey); }
-    });
+        await _writeDraft(key, recovered, fence: fence);
+        await _markDraftEffect(operation, 'restored', fence: fence);
+        await _writeDraft(branchKey, null, fence: fence);
+      } else { await _markDraftEffect(operation, 'review', branchKey: branchKey, fence: fence); }
+    }, fence: fence);
   }
 
   List<Json> pendingBranchDrafts(String sessionId) => operationsFor(sessionId).where((entry) => entry['draftEffect'] == 'review').toList();
 
   Future<void> restoreBranchDraft(String id, {required Json? expected}) async {
+    final fence = (revision: _historyRevision, epoch: snapshot.journalEpoch);
     await _withDrafts(() async {
       final operation = _operations[id];
       if (operation == null || operation['draftEffect'] != 'review') throw ControllerFailure('Dal taslağı artık beklemiyor.', 'stale_draft');
+      if (operation['journalEpoch'] != fence.epoch) throw ControllerFailure('Bilgisayar geçmişi değişti; eski dal taslağı uygulanmadı.', 'history_changed');
       final session = snapshot.session('${operation['sessionId']}');
       final body = object(object(operation['result'])['data']);
       final payload = object(object(operation['request'])['payload']);
@@ -624,13 +702,13 @@ class OmputerController extends ChangeNotifier {
       final returned = session?.journalId == body['journalId'] && session?.bindingRevision == body['bindingRevision'];
       if (session == null || (!original && !returned)) throw ControllerFailure('Oturum dal geri yüklemesinden sonra değişti. Eski istem otomatik geri yüklenmedi.', 'stale_draft');
       final key = '${object(operation['branchRestore'])['key']}';
-      final recovered = await _readDraft('${operation['branchDraftKey']}');
+      final recovered = await _readDraft('${operation['branchDraftKey']}', fence: fence);
       if (recovered == null) throw ControllerFailure('Dal taslağı depolamadan açılamadı. İşlem sonucunu kontrol et.', 'missing_draft');
-      if (!sameDraft(await _readDraft(key), expected)) throw ControllerFailure('İnceleme sırasında taslak değişti; yeni taslağı silmemek için geri yüklenmedi.', 'draft_changed');
-      await _writeDraft(key, recovered);
-      await _markDraftEffect(operation, 'restored');
-      await _writeDraft('${operation['branchDraftKey']}', null);
-    });
+      if (!sameDraft(await _readDraft(key, fence: fence), expected)) throw ControllerFailure('İnceleme sırasında taslak değişti; yeni taslağı silmemek için geri yüklenmedi.', 'draft_changed');
+      await _writeDraft(key, recovered, fence: fence);
+      await _markDraftEffect(operation, 'restored', fence: fence);
+      await _writeDraft('${operation['branchDraftKey']}', null, fence: fence);
+    }, fence: fence);
     notifyListeners();
   }
 
@@ -677,9 +755,12 @@ class OmputerController extends ChangeNotifier {
   }
 
   Future<Json> operation(String id) async {
+    final fence = (revision: _historyRevision, epoch: snapshot.journalEpoch);
     final result = await request('GET', '/v1/commands/${Uri.encodeComponent(id)}');
     if (result['id'] != id) throw ControllerFailure('İşlem kimliği uyuşmuyor.', 'operation_identity');
-    await _saveOperation(result);
+    _checkHistory(fence);
+    final current = _operations[id];
+    await _saveOperation({...result, if (current?['journalEpoch'] == null && fence.epoch != null) 'journalEpoch': fence.epoch});
     return _operations[id]!;
   }
 
@@ -694,20 +775,23 @@ class OmputerController extends ChangeNotifier {
   }
 
   Future<void> reconcileOperations() {
+    _reconcileAgain = true;
     if (_reconciliation != null) return _reconciliation!;
     final identity = _identityRevision;
     final work = () async {
       if (!connection.connected) return;
       ControllerFailure? failure;
-      for (final record in operations.where((entry) => !_finalOperation(entry))) {
-        if (_disposed || identity != _identityRevision) return;
-        try { await operation('${record['id']}'); }
-        on ControllerFailure catch (e) {
-          // A request may have been lost before the server persisted it. Keep
-          // the original UUID unknown; a 404 never authorizes destructive replay.
-          if (e.code != 'not_found' && e.code != 'operation_not_found') failure ??= e;
+      do {
+        _reconcileAgain = false;
+        for (final record in operations.where((entry) => !_finalOperation(entry) || (snapshot.journalEpoch != null && entry['journalEpoch'] == null && entry['status'] == 'succeeded' && entry['draftEffect'] == null && (entry['draftSubmission'] != null || entry['branchRestore'] != null)))) {
+          if (_disposed || identity != _identityRevision) return;
+          try { await operation('${record['id']}'); }
+          on ControllerFailure catch (e) {
+            // Missing UUIDs remain unknown; never resubmit an uncertain command.
+            if (e.code != 'not_found' && e.code != 'operation_not_found') failure ??= e;
+          }
         }
-      }
+      } while (_reconcileAgain && connection.connected && !_disposed && identity == _identityRevision);
       if (failure != null) throw failure;
     }();
     _reconciliation = work;
@@ -798,7 +882,7 @@ class OmputerController extends ChangeNotifier {
   Future<void> deleteDraft(String key) => _withDrafts(() => _writeDraft(key, null));
   Future<void> releaseAttachments(List<Json> images) => _withDrafts(() => _releaseUnusedAttachments(images));
 
-  bool hasPendingSubmission(String sessionId, String mode, Json value) => operationsFor(sessionId).any((operation) => !_finalOperation(operation) && operation['action'] == mode && operation['draftSubmission'] is Map && sameDraft(composerDraft(object(object(operation['draftSubmission'])['value'])), composerDraft(value)));
+  bool hasPendingSubmission(String sessionId, String mode, Json value) => _startingDrafts.contains('session:$sessionId:$mode') || operationsFor(sessionId).any((operation) => !_finalOperation(operation) && operation['action'] == mode && operation['draftSubmission'] is Map && sameDraft(composerDraft(object(object(operation['draftSubmission'])['value'])), composerDraft(value)));
 
   Future<Json> submitDraft(String sessionId, String mode, Json value, Json payload) async {
     final identity = _identityRevision;
@@ -807,11 +891,34 @@ class OmputerController extends ChangeNotifier {
     if (hasPendingSubmission(sessionId, mode, value)) throw ControllerFailure('Bu taslağın gönderimi henüz sonuçlanmadı. Aynı mesajı yeniden gönderme; işlem geçmişinden sonucunu sorgula.', 'submission_pending');
     final key = 'session:$sessionId:$mode';
     final submitted = {..._copy(composerDraft(value)), '_revision': _uuid.v4()};
-    await _withDrafts(() => _writeDraft(key, submitted));
-    if (identity != _identityRevision || _switchingPair) throw ControllerFailure('Bilgisayar değişti; taslak gönderilmedi.', 'connection_changed');
-    final current = snapshot.session(sessionId);
-    if (current == null || !current.canSendMessages || !current.supports(mode) || current.journalId != session.journalId || current.bindingRevision != session.bindingRevision) throw ControllerFailure('Taslak hazırlanırken oturum değişti; mesaj gönderilmedi.', 'session_changed');
-    return command(mode, sessionId: sessionId, payload: payload, draftSubmission: {'key': key, 'value': submitted});
+    _startingDrafts.add(key);
+    try {
+      await _withDrafts(() => _writeDraft(key, submitted));
+      if (_disposed || identity != _identityRevision || _switchingPair) throw ControllerFailure('Bilgisayar değişti; taslak gönderilmedi.', 'connection_changed');
+      final current = snapshot.session(sessionId);
+      if (current == null || !current.canSendMessages || !current.supports(mode) || current.journalId != session.journalId || current.bindingRevision != session.bindingRevision) throw ControllerFailure('Taslak hazırlanırken oturum değişti; mesaj gönderilmedi.', 'session_changed');
+      return await command(mode, sessionId: sessionId, payload: payload, draftSubmission: {'key': key, 'value': submitted});
+    } finally {
+      if (identity == _identityRevision) _startingDrafts.remove(key);
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  Future<Json> startSession(String projectId, Json value) async {
+    if (!connection.connected || snapshot.project(projectId) == null) throw ControllerFailure('Proje bağlantısı kullanılamıyor; yeni oturum gönderilmedi.', 'project_unavailable');
+    if (hasPendingNewSession(projectId, value)) throw ControllerFailure('Bu yeni oturum isteğinin sonucu henüz bilinmiyor. Aynı isteği yeniden gönderme; işlem sonucunu kontrol et.', 'submission_pending');
+    final identity = _identityRevision;
+    final key = 'new:$projectId';
+    final submitted = {..._copy(newSessionDraft(value)), '_revision': _uuid.v4()};
+    _startingDrafts.add(key);
+    try {
+      await _withDrafts(() => _writeDraft(key, submitted));
+      if (_disposed || identity != _identityRevision || _switchingPair) throw ControllerFailure('Bilgisayar değişti; yeni oturum gönderilmedi.', 'connection_changed');
+      return await command('session.start', payload: _newSessionPayload(projectId, submitted), draftSubmission: {'key': key, 'value': submitted});
+    } finally {
+      if (identity == _identityRevision) _startingDrafts.remove(key);
+      if (!_disposed) notifyListeners();
+    }
   }
   Future<void> updateLocalState(String section, String key, Object? value) async {
     localState = object(await _localCall('localStateSet', {'section': section, 'key': key, 'value': value}));
@@ -834,7 +941,7 @@ class OmputerController extends ChangeNotifier {
     final id = _uuid.v4();
     final requestBody = object(jsonDecode(jsonEncode({'id': id, if (sessionId != null) 'sessionId': sessionId, 'action': action, 'payload': payload})));
     final now = DateTime.now().toUtc().toIso8601String();
-    await _saveOperation({'id': id, 'action': action, if (sessionId != null) 'sessionId': sessionId, 'request': requestBody, 'status': 'unknown', 'createdAt': now, 'updatedAt': now, if (localState['identity'] != null) 'identity': localState['identity'], if (draftSubmission != null) 'draftSubmission': draftSubmission, if (branchRestore != null) 'branchRestore': branchRestore});
+    await _saveOperation({'id': id, 'action': action, if (sessionId != null) 'sessionId': sessionId, 'request': requestBody, 'status': 'unknown', 'createdAt': now, 'updatedAt': now, if (snapshot.journalEpoch != null) 'journalEpoch': snapshot.journalEpoch, if (localState['identity'] != null) 'identity': localState['identity'], if (draftSubmission != null) 'draftSubmission': draftSubmission, if (branchRestore != null) 'branchRestore': branchRestore});
     if (identity != _identityRevision || _switchingPair) throw ControllerFailure('Bilgisayar değişti; işlem gönderilmedi.', 'connection_changed');
     late final Json result;
     try {
@@ -851,7 +958,7 @@ class OmputerController extends ChangeNotifier {
       }
       throw CommandUncertain(_operations[id]!, failure);
     }
-    final status = result['status'] == 'unknown' ? 'unknown' :
+    final status = result['status'] == 'unknown' || object(result['error'])['code'] == 'outcome_unknown' ? 'unknown' :
         result['status'] == 'running' ? 'running' :
         result['success'] == false || result['accepted'] == false || result['error'] != null || result['status'] == 'failed' ? 'failed' :
         result['accepted'] == true ? 'running' : result['success'] != true ? 'unknown' : 'succeeded';

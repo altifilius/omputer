@@ -4,6 +4,7 @@ import 'package:omputer/controller.dart';
 import 'package:omputer/main.dart';
 import 'package:omputer/models.dart';
 import 'package:omputer/projects.dart';
+import 'package:omputer/project_carousel.dart';
 
 class OrderNative implements NativeAdapter {
   @override
@@ -21,7 +22,7 @@ void main() {
   setUp(() => TestWidgetsFlutterBinding.instance.platformDispatcher.accessibilityFeaturesTestValue = FakeAccessibilityFeatures(disableAnimations: true));
   tearDown(() => TestWidgetsFlutterBinding.instance.platformDispatcher.clearAccessibilityFeaturesTestValue());
   testWidgets('open session list retains row positions while incoming activity and payload order change', (tester) async {
-    tester.view.physicalSize = const Size(900, 2400);
+    tester.view.physicalSize = const Size(393, 2400);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
@@ -50,8 +51,8 @@ void main() {
     controller.dispose();
   });
 
-  testWidgets('project ring retains selection and next identity while streaming payload order changes', (tester) async {
-    tester.view.physicalSize = const Size(900, 1800);
+  testWidgets('project cards retain selection and next identity while streaming payload order changes', (tester) async {
+    tester.view.physicalSize = const Size(393, 1600);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
@@ -60,20 +61,20 @@ void main() {
       ..snapshot = Snapshot.fromJson({'projects': [project('a', 3), project('b', 2), project('c', 1)]});
     await tester.pumpWidget(MaterialApp(home: HomeScreen(controller: controller)));
     await tester.pump();
-    await tester.ensureVisible(find.byTooltip('Sonraki proje'));
-    await tester.tap(find.byTooltip('Sonraki proje'));
-    await tester.pumpAndSettle();
-    expect(tester.widget<SelectedProjectDetails>(find.byType(SelectedProjectDetails)).project.id, 'b');
+    final rail=find.byKey(const ValueKey('project-carousel-rail'));
+    var bounds=tester.getRect(rail);
+    await tester.tapAt(bounds.center);await tester.pumpAndSettle();
+    expect(tester.widget<ProjectCarousel>(find.byType(ProjectCarousel)).selectedProjectId, 'b');
     controller.snapshot = Snapshot.fromJson({'projects': [project('c', 5), project('b', 4), project('a', 3)]});
     controller.notifyListeners();
     await tester.pump();
-    expect(tester.widget<SelectedProjectDetails>(find.byType(SelectedProjectDetails)).project.id, 'b');
-    await tester.tap(find.byTooltip('Sonraki proje'));
-    await tester.pumpAndSettle();
-    expect(tester.widget<SelectedProjectDetails>(find.byType(SelectedProjectDetails)).project.id, 'c');
-    await tester.tap(find.byTooltip('Sonraki proje'));
-    await tester.pumpAndSettle();
-    expect(tester.widget<SelectedProjectDetails>(find.byType(SelectedProjectDetails)).project.id, 'a');
+    expect(tester.widget<ProjectCarousel>(find.byType(ProjectCarousel)).selectedProjectId, 'b');
+    bounds=tester.getRect(rail);
+    await tester.tapAt(Offset(bounds.center.dx,bounds.bottom-16));await tester.pumpAndSettle();
+    expect(tester.widget<ProjectCarousel>(find.byType(ProjectCarousel)).selectedProjectId, 'c');
+    expect(find.byKey(const ValueKey('project-carousel-next')),findsNothing);
+    await tester.pump(const Duration(seconds:30));
+    expect(tester.widget<ProjectCarousel>(find.byType(ProjectCarousel)).selectedProjectId,'c');
     await tester.pumpWidget(const SizedBox.shrink());
     controller.dispose();
   });

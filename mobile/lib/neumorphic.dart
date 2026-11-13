@@ -45,7 +45,7 @@ class NeoSurface extends StatelessWidget {
       ),
       child: CustomPaint(
         painter: depth == NeoDepth.inset ? _InsetPainter(palette: palette, radius: radius) : null,
-        child: Material(type: MaterialType.transparency, borderRadius: border, child: Padding(padding: padding, child: child)),
+        child: Material(type: MaterialType.transparency, borderRadius: border, textStyle: DefaultTextStyle.of(context).style, child: Padding(padding: padding, child: child)),
       ),
     );
   }

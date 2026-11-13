@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
 import 'controller.dart';
 import 'models.dart';
 import 'ui.dart';
@@ -11,6 +10,7 @@ import 'session_file_context.dart';
 import 'message_input.dart';
 import 'projects.dart' show FilePreviewScreen;
 import 'neumorphic.dart';
+import 'compact_turn.dart';
 
 class SessionScreen extends StatefulWidget {
   const SessionScreen({super.key, required this.controller, required this.sessionId, this.initialMessageId});
@@ -315,14 +315,34 @@ class _SessionScreenState extends State<SessionScreen> {
         if (transcript.ids.isEmpty && transcript.loading) return const Center(child: CircularProgressIndicator());
         if (transcript.ids.isEmpty && transcript.error != null) return SingleChildScrollView(child: ErrorNotice(transcript.error!, onRetry: () => c.loadMessages(widget.sessionId)));
         if (transcript.ids.isEmpty) return SingleChildScrollView(child: EmptyState(icon: Icons.forum_outlined, title: live ? 'Konuşma burada başlar.' : 'Henüz mesaj görüntülenemiyor.', message: live ? 'İlk istemi gönder. Canlı mesajlar ve araç sonuçları bilgisayardan geldikçe bu konuşmada görünür. Çevrimdışıysa daha önce açılmamış konuşma geçmişi alınamaz.' : 'Bu konuşma salt okunur. Çevrimdışıysa daha önce açılmamış konuşma geçmişi alınamaz.'));
-        final ids = focusedMessage == null ? transcript.ids : transcript.ids.take(transcript.ids.indexOf(focusedMessage!) + 1).toList();
-        return ListView.builder(key: PageStorageKey('transcript:${widget.sessionId}:${focusedMessage ?? 'live'}'), controller: scroll, reverse: true, padding: const EdgeInsets.only(bottom: 24), itemCount: ids.length + 1, itemBuilder: (context, index) {
-          if (index == ids.length) return Column(children: [if (transcript.hasMore) TextButton.icon(onPressed: transcript.loading ? null : () => c.loadMessages(widget.sessionId, older: true), icon: transcript.loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.history_rounded), label: const Text('Önceki mesajları yükle')), if (transcript.error != null) ErrorNotice(transcript.error!, onRetry: () => c.loadMessages(widget.sessionId, older: true))]);
-          final id = ids[ids.length - index - 1];
-          return RepaintBoundary(key: ValueKey(id), child: ValueListenableBuilder<ChatMessage>(valueListenable: transcript.messages[id]!, builder: (context, msg, _) => MessageView(message: msg, onOpenFile: (path, line) { final project = c.snapshot.project(session?.projectId ?? ''); if (project != null) openScreen(context, FilePreviewScreen(controller: c, project: project, initialPath: path, initialLine: line)); })));
+        final focusedIndex = focusedMessage == null ? -1 : transcript.ids.indexOf(focusedMessage!);
+        var visibleEnd = transcript.ids.length;
+        if (focusedIndex >= 0) {
+          visibleEnd = focusedIndex + 1;
+          while (visibleEnd < transcript.ids.length && transcript.messages[transcript.ids[visibleEnd]]!.value.role != 'user') {
+            visibleEnd++;
+          }
+        }
+        final ids = visibleEnd == transcript.ids.length ? transcript.ids : transcript.ids.take(visibleEnd).toList();
+        final entries = compactConversationEntries(ids, transcript.messages);
+        return ListView.builder(key: PageStorageKey('transcript:${widget.sessionId}:${focusedMessage ?? 'live'}'), controller: scroll, reverse: true, padding: const EdgeInsets.only(bottom: 24), itemCount: entries.length + 1, itemBuilder: (context, index) {
+          if (index == entries.length) return Column(children: [if (transcript.hasMore) TextButton.icon(onPressed: transcript.loading ? null : () => c.loadMessages(widget.sessionId, older: true), icon: transcript.loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.history_rounded), label: const Text('Önceki mesajları yükle')), if (transcript.error != null) ErrorNotice(transcript.error!, onRetry: () => c.loadMessages(widget.sessionId, older: true))]);
+          final entry = entries[entries.length - index - 1];
+          final notifiers = entry.messageIds.map((id) => transcript.messages[id]!).toList();
+          void openFile(String path, int? line) {
+            final project = c.snapshot.project(session?.projectId ?? '');
+            if (project != null) openScreen(context, FilePreviewScreen(controller: c, project: project, initialPath: path, initialLine: line));
+          }
+          final active = index == 0 && visibleEnd == transcript.ids.length && c.connection.connected && session?.writerConnected == true && ['running', 'background', 'human_wait', 'queued'].contains(session?.workState);
+          return RepaintBoundary(key: ValueKey(entry.id), child: ListenableBuilder(listenable: Listenable.merge(notifiers), builder: (context, _) {
+            final messages = notifiers.map((value) => value.value).toList();
+            return entry.isUser
+              ? UserMessageView(message: messages.single, onOpenFile: openFile)
+              : CompactTurnView(messages: messages, active: active, focusedMessageId: focusedMessage, onOpenFile: openFile);
+          }));
         });
       })),
-      if (showLatest) Align(alignment: Alignment.centerRight, child: TextButton.icon(onPressed: () { scroll.jumpTo(0); final id = transcript.ids.lastOrNull; if (id != null) widget.controller.updateLocalState('read', 'session:${widget.sessionId}', {'messageId': id, 'revision': transcript.messages[id]!.value.revision}); }, icon: const Icon(Icons.arrow_downward_rounded), label: const Text('Son mesaja git'))),
+      if (showLatest && focusedMessage == null) Align(alignment: Alignment.centerRight, child: TextButton.icon(onPressed: () { scroll.jumpTo(0); final id = transcript.ids.lastOrNull; if (id != null) widget.controller.updateLocalState('read', 'session:${widget.sessionId}', {'messageId': id, 'revision': transcript.messages[id]!.value.revision}); }, icon: const Icon(Icons.arrow_downward_rounded), label: const Text('Son mesaja git'))),
       if (session != null && !live) ConstrainedBox(constraints: BoxConstraints(maxHeight: constraints.maxHeight * .75), child: SingleChildScrollView(padding: const EdgeInsets.all(16), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(session.activeUnbridged
           ? 'Bu oturum terminalde açık, ancak telefon bağlantısı etkin değil. Konuşmayı burada okuyabilirsin; açık oturum telefondan yeniden başlatılmaz.'
@@ -368,30 +388,32 @@ Widget boundedImage(String data) {
   catch (_) { return const Text('Görsel verisi geçerli değil.'); }
 }
 
-class MessageView extends StatelessWidget {
-  const MessageView({super.key, required this.message, this.onOpenFile});
+class UserMessageView extends StatelessWidget {
+  const UserMessageView({super.key, required this.message, this.onOpenFile});
   final ChatMessage message;
   final void Function(String, int?)? onOpenFile;
   @override
-  Widget build(BuildContext context) {
-    final user = message.role == 'user';
-    final scheme = Theme.of(context).colorScheme;
-    return Padding(padding: EdgeInsets.fromLTRB(user ? 40 : 24, 18, 24, 8), child: NeoSurface(depth: user ? NeoDepth.raised : NeoDepth.flat, radius: 20, padding: EdgeInsets.all(user ? 16 : 0), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [Expanded(child: Text(switch (message.role) { 'user' => 'Sen', 'assistant' => 'OMP', 'toolResult' => 'Araç sonucu', _ => message.role }, style: Theme.of(context).textTheme.labelLarge?.copyWith(color: scheme.primary))), IconButton(tooltip: 'Mesajı kopyala', onPressed: () => copyText(context, message.content.map((b) => b['text'] ?? b['thinking'] ?? controlText(b)).join('\n')), icon: const Icon(Icons.copy_rounded)), IconButton(tooltip: 'Mesaj bağlantısını kopyala', onPressed: () => copyText(context, 'omputer://message/${Uri.encodeComponent(message.id)}'), icon: const Icon(Icons.link_rounded))]), const SizedBox(height: 12), for (var i = 0; i < message.content.length; i++) _block(context, message.content[i], '${message.id}:$i'), if (message.timestamp != null) Padding(padding: const EdgeInsets.only(top: 12), child: Text(dateLabel(message.timestamp), style: Theme.of(context).textTheme.labelSmall))])));
-  }
-  Widget _block(BuildContext context, Json block, String key) {
-    final type = '${block['type'] ?? 'text'}';
-    if (type == 'text') return Padding(padding: const EdgeInsets.only(bottom: 8), child: LocalMarkdown(data: '${block['text'] ?? ''}', onOpenFile: onOpenFile, styleSheet: MarkdownStyleSheet(p: Theme.of(context).textTheme.bodyLarge?.copyWith(height: 1.55))));
-    if (type == 'thinking' || type == 'reasoning') return ExpansionTile(key: PageStorageKey(key), tilePadding: EdgeInsets.zero, title: const Text('Düşünme'), leading: const Icon(Icons.psychology_outlined), initiallyExpanded: false, children: [Padding(padding: const EdgeInsets.only(bottom: 16), child: Align(alignment: Alignment.centerLeft, child: SelectableText('${block['thinking'] ?? block['text'] ?? ''}', key: PageStorageKey('$key:thinking'), style: Theme.of(context).textTheme.bodyMedium)))]);
-    if (type == 'image') {
-      final source = object(block['source']);
-      final data = block['data'] ?? source['data'];
-      if (data is String) return Padding(padding: const EdgeInsets.symmetric(vertical: 12), child: boundedImage(data));
-      final url = block['url'] ?? source['url'];
-      return Padding(padding: const EdgeInsets.symmetric(vertical: 12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('Görsel referansı'), if (url != null) SelectableText('$url') else const Text('Görsel baytları bu kayıtta bulunmuyor; bilgisayardaki konuşmayı incele.')]));
-    }
-    final title = type == 'toolCall' ? '${block['name'] ?? 'Araç çağrısı'}' : type == 'toolResult' ? '${block['toolName'] ?? block['name'] ?? 'Araç sonucu'}' : type;
-    final content = block['arguments'] ?? block['content'] ?? block['result'] ?? block;
-    return ExpansionTile(key: PageStorageKey(key), tilePadding: const EdgeInsets.symmetric(horizontal: 12), leading: Icon(block['isError'] == true ? Icons.error_outline_rounded : Icons.build_outlined), title: Text(title), subtitle: type == 'toolCall' ? const Text('Çağrı parametreleri') : null, children: [NeoSurface(depth: NeoDepth.inset, radius: 12, padding: const EdgeInsets.all(16), child: SizedBox(width: double.infinity, child: SelectableText(content is String ? content : const JsonEncoder.withIndent('  ').convert(content), key: PageStorageKey('$key:tool-content'), style: const TextStyle(fontFamily: 'monospace', height: 1.5)))), Wrap(spacing: 8, children: [TextButton.icon(onPressed: () => copyText(context, content is String ? content : controlText(content)), icon: const Icon(Icons.copy_rounded), label: const Text('Araç sonucunu kopyala')), TextButton.icon(onPressed: () => copyText(context, 'omputer://tool/${Uri.encodeComponent('${block['id'] ?? block['toolCallId'] ?? key}')}'), icon: const Icon(Icons.link_rounded), label: const Text('Araç bağlantısını kopyala'))])]);
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(40, 16, 24, 8),
+    child: NeoSurface(radius: 20, padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Expanded(child: Text('Sen', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: Theme.of(context).colorScheme.primary))),
+        IconButton(tooltip: 'Mesajı kopyala', onPressed: () => copyText(context, message.content.where((block) => block['type'] == 'text').map((block) => block['text'] ?? '').join('\n')), icon: const Icon(Icons.copy_rounded)),
+        IconButton(tooltip: 'Mesaj bağlantısını kopyala', onPressed: () => copyText(context, 'omputer://message/${Uri.encodeComponent(message.id)}'), icon: const Icon(Icons.link_rounded)),
+      ]),
+      const SizedBox(height: 12),
+      for (final block in message.content)
+        if (block['type'] == 'text') Padding(padding: const EdgeInsets.only(bottom: 8), child: LocalMarkdown(data: '${block['text'] ?? ''}', onOpenFile: onOpenFile))
+        else if (block['type'] == 'image') _image(block),
+      if (message.timestamp != null) Padding(padding: const EdgeInsets.only(top: 12), child: Text(dateLabel(message.timestamp), style: Theme.of(context).textTheme.labelSmall)),
+    ])),
+  );
+  Widget _image(Json block) {
+    final source = object(block['source']);
+    final data = block['data'] ?? source['data'];
+    if (data is String) return Padding(padding: const EdgeInsets.symmetric(vertical: 12), child: boundedImage(data));
+    final url = block['url'] ?? source['url'];
+    return Padding(padding: const EdgeInsets.symmetric(vertical: 12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('Görsel referansı'), if (url != null) SelectableText('$url') else const Text('Görsel baytları bu kayıtta bulunmuyor; bilgisayardaki konuşmayı incele.')]));
   }
 }
 
@@ -439,40 +461,89 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
   late String? projectId = widget.projectId;
   final name = TextEditingController(), prompt = TextEditingController();
   ModelInfo? model;
-  bool busy = false;
-  bool restoring = false;
+  bool busy = false, restoring = false, draftLoading = true;
+  int editRevision = 0, restoreRevision = 0;
   String? draftError;
+  String? savedDraft;
   Future<void> writes = Future.value();
   String get draftKey => 'new:${projectId ?? 'unselected'}';
+  String get identity => '${widget.controller.localState['identity'] ?? ''}';
+  late String attachedIdentity;
+  Json get draft => {'name': name.text, 'prompt': prompt.text, if (model != null) 'model': {'id': model!.id, 'name': model!.name, 'provider': model!.provider}};
+
+  void applyDraft(Json? value) {
+    restoring = true;
+    name.text = '${value?['name'] ?? ''}'; prompt.text = '${value?['prompt'] ?? ''}';
+    model = value?['model'] is Map ? ModelInfo.fromJson(object(value?['model'])) : null;
+    restoring = false;
+    savedDraft = jsonEncode(draft);
+  }
+
+  void controllerDraftChanged() {
+    final change = widget.controller.draftChanges.value;
+    if (!mounted || draftLoading || change == null || change.key != draftKey || change.identity != attachedIdentity || identity != attachedIdentity) return;
+    if (!OmputerController.sameDraft(draft, OmputerController.newSessionDraft(change.before))) return;
+    if (OmputerController.sameDraft(draft, OmputerController.newSessionDraft(change.after))) return;
+    editRevision++;
+    setState(() { applyDraft(change.after); draftError = null; });
+  }
+
   @override
-  void initState() { super.initState(); restore(); name.addListener(save); prompt.addListener(save); }
+  void initState() {
+    super.initState();
+    attachedIdentity = identity;
+    savedDraft = jsonEncode(draft);
+    name.addListener(save); prompt.addListener(save);
+    widget.controller.draftChanges.addListener(controllerDraftChanged);
+    restore();
+  }
+
   Future<void> restore() async {
+    final key = draftKey, scope = attachedIdentity;
+    final revision = editRevision, ticket = ++restoreRevision;
     try {
-      final key = draftKey;
       final value = await widget.controller.loadDraft(key);
-      if (!mounted || key != draftKey) return;
-      restoring = true;
-      name.text = '${value?['name'] ?? ''}'; prompt.text = '${value?['prompt'] ?? ''}';
-      model = value?['model'] is Map ? ModelInfo.fromJson(object(value?['model'])) : null;
-      restoring = false;
-      setState(() {});
-    } catch (e) { if (mounted) setState(() => draftError = 'Taslak açılamadı: $e'); }
+      if (!mounted || key != draftKey || scope != identity || ticket != restoreRevision) return;
+      setState(() {
+        if (editRevision == revision) applyDraft(value);
+        draftLoading = false; draftError = null;
+      });
+    } catch (e) {
+      if (mounted && key == draftKey && scope == identity && ticket == restoreRevision) setState(() { draftLoading = false; draftError = 'Taslak açılamadı: $e'; });
+    }
   }
+
   void save() {
-    if (restoring) return;
-    final key = draftKey;
-    final value = <String, dynamic>{'name': name.text, 'prompt': prompt.text, if (model != null) 'model': {'id': model!.id, 'name': model!.name, 'provider': model!.provider}};
-    writes = writes.catchError((Object _) {}).then((_) => widget.controller.saveDraft(key, value)).catchError((Object e) { if (mounted) setState(() => draftError = 'Taslak kaydedilemedi: $e'); });
+    if (restoring || identity != attachedIdentity) return;
+    final encoded = jsonEncode(draft);
+    if (encoded == savedDraft) return;
+    savedDraft = encoded;
+    editRevision++;
+    final key = draftKey, scope = attachedIdentity;
+    final value = draft;
+    writes = writes.catchError((Object _) {}).then((_) {
+      if (scope != identity) throw ControllerFailure('Bilgisayar değişti; eski taslak kaydedilmedi.', 'connection_changed');
+      return widget.controller.saveDraft(key, value);
+    }).catchError((Object e) { if (mounted) setState(() => draftError = 'Taslak kaydedilemedi: $e'); throw e; });
+    writes.catchError((Object _) {});
+    if (mounted) setState(() {});
   }
+
   @override
-  void dispose() { name.removeListener(save); prompt.removeListener(save); name.dispose(); prompt.dispose(); super.dispose(); }
+  void dispose() {
+    widget.controller.draftChanges.removeListener(controllerDraftChanged);
+    name.removeListener(save); prompt.removeListener(save); name.dispose(); prompt.dispose();
+    super.dispose();
+  }
+
   Future<void> start() async {
-    if (projectId == null || busy || !widget.controller.connection.connected) return;
+    final target = projectId;
+    if (target == null || busy || draftLoading || attachedIdentity != identity || !widget.controller.connection.connected || widget.controller.hasPendingNewSession(target, draft)) return;
+    final submitted = draft;
     setState(() => busy = true);
     try {
       await writes;
-      final result = await widget.controller.command('session.start', payload: {'projectId': projectId, if (name.text.trim().isNotEmpty) 'name': name.text.trim(), if (prompt.text.trim().isNotEmpty) 'prompt': prompt.text.trim(), if (model != null) 'model': {'provider': model!.provider, 'id': model!.id}});
-      await widget.controller.deleteDraft(draftKey);
+      final result = await widget.controller.startSession(target, submitted);
       widget.controller.refreshInBackground();
       final data = object(result['data']);
       final id = data['sessionId'] ?? data['id'] ?? object(data['session'])['id'];
@@ -485,29 +556,75 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
     catch (e) { if (mounted) await perform(context, () async { throw e; }); }
     finally { if (mounted) setState(() => busy = false); }
   }
+
   @override
-  Widget build(BuildContext context) => ListenableBuilder(listenable: widget.controller, builder: (context, _) => Scaffold(
-    appBar: AppBar(title: const Text('Yeni oturum')),
-    body: SafeArea(top: false, child: ListView(padding: const EdgeInsets.all(24), children: [
-      ConnectionBanner(widget.controller),
-      if (draftError != null) ErrorNotice(draftError!),
-      Text('Bir sonraki adımı başlat.', style: Theme.of(context).textTheme.headlineSmall),
-      const SizedBox(height: 12),
-      const Text('Yalnızca bilgisayarda kayıtlı proje köklerinde yeni bir OMP oturumu açılır. Çalışma bilgisayarında yürür.'),
-      const SizedBox(height: 24),
-      DropdownButtonFormField<String>(initialValue: projectId, isExpanded: true, decoration: const InputDecoration(labelText: 'Proje'), items: widget.controller.snapshot.projects.map((p) => DropdownMenuItem(value: p.id, child: Text(p.name, overflow: TextOverflow.ellipsis))).toList(), onChanged: busy ? null : (value) async { await writes; if (mounted) setState(() => projectId = value); await restore(); }),
-      const SizedBox(height: 20),
-      TextField(controller: name, enabled: !busy, decoration: const InputDecoration(labelText: 'Oturum adı (isteğe bağlı)')),
-      const SizedBox(height: 20),
-      TextField(controller: prompt, enabled: !busy, minLines: 4, maxLines: 12, decoration: const InputDecoration(labelText: 'İlk istem (isteğe bağlı)', alignLabelWithHint: true)),
-      const SizedBox(height: 20),
-      ListTile(contentPadding: EdgeInsets.zero, title: const Text('Model'), subtitle: Text(model == null ? 'Bilgisayardaki OMP varsayılanı' : '${model!.provider} · ${model!.name}'), trailing: const Icon(Icons.expand_more_rounded), onTap: busy || !widget.controller.connection.connected ? null : () => chooseModel(context, widget.controller, (choice) async { if (mounted) setState(() => model = choice); save(); })),
-      if (model != null) TextButton(onPressed: busy ? null : () { setState(() => model = null); save(); }, child: const Text('Varsayılan modeli kullan')),
-      TextButton.icon(onPressed: busy ? null : () async { if (!await confirm(context, 'Yeni oturum taslağını sil?', 'Oturum oluşturulmaz; yalnızca kaydedilen taslak silinir.', action: 'Sil')) return; await writes; await widget.controller.deleteDraft(draftKey); if (mounted) setState(() { restoring = true; name.clear(); prompt.clear(); model = null; restoring = false; }); }, icon: const Icon(Icons.delete_outline_rounded), label: const Text('Taslağı sil')),
-      const SizedBox(height: 24),
-      FilledButton.icon(onPressed: busy || projectId == null || !widget.controller.connection.connected ? null : start, icon: const Icon(Icons.play_arrow_rounded), label: Text(busy ? 'Başlatılıyor…' : 'Oturumu başlat')),
-    ])),
-  ));
+  Widget build(BuildContext context) => ListenableBuilder(listenable: widget.controller, builder: (context, _) {
+    if (identity != attachedIdentity) {
+      attachedIdentity = identity; editRevision++; applyDraft(null); draftLoading = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) restore(); });
+    }
+    final pending = projectId != null && widget.controller.hasPendingNewSession(projectId!, draft);
+    final operation = projectId == null ? null : widget.controller.newSessionOperation(projectId!);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Yeni oturum')),
+      body: SafeArea(top: false, child: ListView(padding: const EdgeInsets.all(8), children: [
+        if (draftLoading || busy) ...[
+          Semantics(label: draftLoading ? 'Taslak açılıyor' : 'Oturum başlatılıyor', child: const LinearProgressIndicator()),
+          const SizedBox(height: 16),
+        ],
+        if (draftError != null) ErrorNotice(draftError!),
+        if (!widget.controller.connection.connected) ...[
+          NeoSurface(depth: NeoDepth.inset, radius: 16, padding: const EdgeInsets.all(16), child: Semantics(liveRegion: true, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Çevrimdışı. Taslağını düzenleyebilirsin; oturum başlatmak için yeniden bağlan.'),
+            const SizedBox(height: 8),
+            TextButton.icon(onPressed: () => perform(context, widget.controller.reconnect), icon: const Icon(Icons.refresh_rounded), label: const Text('Yeniden bağlan')),
+          ]))),
+          const SizedBox(height: 16),
+        ],
+        if (pending) ...[
+          NeoSurface(depth: NeoDepth.inset, radius: 16, padding: const EdgeInsets.all(16), child: Semantics(liveRegion: true, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Yeni oturum isteğinin sonucu bekleniyor. Aynı istek yeniden gönderilmez.'),
+            if (operation != null) ...[
+              const SizedBox(height: 8),
+              TextButton.icon(onPressed: () => openScreen(context, OperationsScreen(controller: widget.controller, sessionId: '', operationId: '${operation['id']}')), icon: const Icon(Icons.receipt_long_outlined), label: const Text('İşlem sonucunu kontrol et')),
+            ],
+          ]))),
+          const SizedBox(height: 16),
+        ],
+        NeoSurface(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          DropdownButtonFormField<String>(initialValue: projectId, isExpanded: true, decoration: const InputDecoration(labelText: 'Proje'), items: widget.controller.snapshot.projects.map((p) => DropdownMenuItem(value: p.id, child: Text(p.name, overflow: TextOverflow.ellipsis))).toList(), onChanged: busy || draftLoading ? null : (value) async {
+            try {
+              await writes;
+              if (!mounted) return;
+              setState(() { projectId = value; editRevision++; draftLoading = true; applyDraft(null); });
+              await restore();
+            } catch (e) { if (mounted) setState(() => draftError = '$e'); }
+          }),
+          const SizedBox(height: 16),
+          TextField(key: const ValueKey('new-session-name'), controller: name, enabled: !busy, textInputAction: TextInputAction.next, scrollPadding: const EdgeInsets.all(16), decoration: const InputDecoration(labelText: 'Oturum adı (isteğe bağlı)')),
+          const SizedBox(height: 16),
+          TextField(key: const ValueKey('new-session-prompt'), controller: prompt, enabled: !busy, minLines: 4, maxLines: 12, keyboardType: TextInputType.multiline, textInputAction: TextInputAction.newline, scrollPadding: const EdgeInsets.all(16), decoration: const InputDecoration(labelText: 'İlk istem (isteğe bağlı)', alignLabelWithHint: true)),
+          const SizedBox(height: 16),
+          NeoSurface(depth: NeoDepth.inset, radius: 16, child: ListTile(contentPadding: const EdgeInsets.all(16), enabled: !busy && widget.controller.connection.connected, title: const Text('Model'), subtitle: Text(model == null ? 'Bilgisayardaki OMP varsayılanı' : '${model!.provider} · ${model!.name}'), trailing: const Icon(Icons.expand_more_rounded), onTap: busy || !widget.controller.connection.connected ? null : () => chooseModel(context, widget.controller, (choice) async { if (mounted) setState(() => model = choice); save(); }))),
+          if (model != null) ...[
+            const SizedBox(height: 8),
+            Align(alignment: Alignment.centerLeft, child: TextButton(onPressed: busy ? null : () { setState(() => model = null); save(); }, child: const Text('Varsayılan modeli kullan'))),
+          ],
+        ])),
+        const SizedBox(height: 16),
+        Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Text('Yalnızca bilgisayarda kayıtlı proje köklerinde yeni bir OMP oturumu açılır. Çalışma bilgisayarında yürür.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant))),
+        const SizedBox(height: 16),
+        FilledButton.icon(onPressed: busy || draftLoading || pending || projectId == null || !widget.controller.connection.connected ? null : start, icon: const Icon(Icons.play_arrow_rounded), label: Text(busy ? 'Başlatılıyor…' : 'Oturumu başlat')),
+        const SizedBox(height: 8),
+        Align(alignment: Alignment.centerLeft, child: TextButton.icon(onPressed: busy || draftLoading ? null : () async {
+          if (!await confirm(context, 'Yeni oturum taslağını sil?', 'Oturum oluşturulmaz; yalnızca kaydedilen taslak silinir.', action: 'Sil')) return;
+          try { await writes; await widget.controller.deleteDraft(draftKey); if (mounted) setState(() { editRevision++; applyDraft(null); }); }
+          catch (e) { if (mounted) setState(() => draftError = 'Taslak silinemedi: $e'); }
+        }, icon: const Icon(Icons.delete_outline_rounded), label: const Text('Taslağı sil'))),
+        const SizedBox(height: 8),
+      ])),
+    );
+  });
 }
 
 class TodosScreen extends StatefulWidget {

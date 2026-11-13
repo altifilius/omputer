@@ -139,6 +139,18 @@ internal class LocalVault(context: Context) {
         } catch (_: Exception) { emptySnapshot() }
     }
     fun saveSnapshot(value: JSONObject) = synchronized(pendingLock) { lastSyncAt = java.time.Instant.now().toString(); pendingSnapshot = value; scheduleCache() }
+    fun resetJournal(value: JSONObject) = synchronized(cacheLock) {
+        val stored = JSONObject(value.toString())
+        val synced = java.time.Instant.now().toString()
+        preferences.getString("cacheIdentity", null)?.let { stored.put("_deviceId", it) }
+        stored.put("_lastSyncAt", synced)
+        val bytes = stored.toString().toByteArray(Charsets.UTF_8)
+        require(bytes.size <= MAX_SNAPSHOT_BYTES) { "Bilgisayar görünümü önbellek sınırını aşıyor." }
+        clearCache()
+        DurableLocalState.atomicWrite(cache, bytes)
+        lastSyncAt = synced
+        check(preferences.edit().putString("lastSyncAt", lastSyncAt).commit())
+    }
     fun cachedResponse(path: String): JSONObject? {
         synchronized(pendingLock) {
             if (pendingResets.any { ResponseCache.isMessages(path, it) }) return null

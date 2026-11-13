@@ -4,7 +4,8 @@ import 'controller.dart';
 import 'models.dart';
 import 'neumorphic.dart';
 import 'ui.dart';
-import 'session.dart' show textDialog, boundedImage;
+import 'session.dart' show textDialog, boundedImage, UserMessageView;
+import 'compact_turn.dart';
 
 String controlText(Object? value) => value is String ? value : const JsonEncoder.withIndent('  ').convert(value);
 
@@ -320,20 +321,19 @@ class _SessionControlScreenState extends State<SessionControlScreen> {
     for (final group in ['running', 'recent']) ...[const SizedBox(height: 24), Text(group == 'running' ? 'Çalışan işler' : 'Son işler', style: Theme.of(context).textTheme.titleMedium), for (final row in objects(object(data?['snapshot'])[group])) Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [detail(row), if (group == 'running') button('İşi iptal et', 'jobs.cancel', {'id': row['id']}, consent: true)])],
   ]);
   Widget _agents() => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [for (final row in rows('agents')) Padding(padding: const EdgeInsets.only(bottom: 16), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [detail(row), TextButton.icon(onPressed: () => openScreen(context, SessionControlScreen(controller: widget.controller, sessionId: widget.sessionId, view: 'agentMessages', title: 'Ajan mesaj geçmişi', arguments: {'agentId': row['id'] ?? row['agentId']})), icon: const Icon(Icons.forum_outlined), label: const Text('Mesaj geçmişini aç'))]))]);
-  Widget _agentMessage(Json row) {
-    final message = row['message'] is Map ? object(row['message']) : row;
-    final content = message['content'];
-    final blocks = content is String ? <Json>[{'type': 'text', 'text': content}] : objects(content);
-    return Padding(key: ValueKey('agent-message:${row['_pageKey']}'), padding: const EdgeInsets.symmetric(vertical: 12), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      NeoSurface(radius: 16, compact: true, padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [Text('${message['role'] ?? 'Kayıt'} · ${row['id'] ?? row['_pageKey']}', style: Theme.of(context).textTheme.titleSmall), const SizedBox(height: 8), Text('Ajan: ${widget.arguments['agentId']} · ${row['timestamp'] ?? message['timestamp'] ?? ''}', style: Theme.of(context).textTheme.bodySmall)])),
-      const SizedBox(height: 12),
-      for (final block in blocks) switch (block['type']) {
-        'text' => LocalMarkdown(data: '${block['text'] ?? ''}'),
-        'thinking' || 'reasoning' => ExpansionTile(title: const Text('Düşünme'), children: [NeoSurface(depth: NeoDepth.inset, radius: 16, padding: const EdgeInsets.all(16), child: SelectableText('${block['thinking'] ?? block['text'] ?? ''}'))]),
-        'image' => const Text('Görsel kaydı · Asıl görseli bilgisayardaki ajan günlüğünde incele.'),
-        _ => ExpansionTile(title: Text('${block['name'] ?? block['toolName'] ?? block['type'] ?? 'Kayıt'}'), children: [CopyableCode(text: controlText(block['arguments'] ?? block['result'] ?? block['content'] ?? block))]),
-      },
-    ]));
+  List<Widget> _agentConversation() {
+    final messages = <ChatMessage>[
+      for (var index = 0; index < pageRows.length; index++) ChatMessage.fromJson({
+        ...object(pageRows[index]['message'] ?? pageRows[index]),
+        'id': '${pageRows[index]['_pageKey']}', 'sequence': index,
+      }),
+    ];
+    final byId = {for (final message in messages) message.id: message};
+    return [for (final entry in compactMessageEntries(messages))
+      entry.isUser
+        ? UserMessageView(key: ValueKey('agent-message:${entry.id}'), message: byId[entry.messageIds.single]!)
+        : CompactTurnView(key: ValueKey('agent-turn:${entry.id}'), messages: entry.messageIds.map((id) => byId[id]!).toList()),
+    ];
   }
   @override
   Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: Text(widget.title), actions: [IconButton(tooltip: 'Görünümü yenile', onPressed: busy || loading ? null : load, icon: const Icon(Icons.refresh_rounded))]), body: SafeArea(top: false, child: ListView(padding: const EdgeInsets.all(24), children: [
@@ -341,7 +341,7 @@ class _SessionControlScreenState extends State<SessionControlScreen> {
     if (data != null && widget.view == 'agentMessages') ...[
       NeoSurface(depth: NeoDepth.inset, radius: 16, padding: const EdgeInsets.all(16), child: SelectableText('Kaynak: ${data?['sessionFile'] ?? ''}', style: Theme.of(context).textTheme.bodySmall)),
       if (pageRows.isEmpty) const Text('Bu ajan günlüğünde mesaj yok.'),
-      for (final row in pageRows) _agentMessage(row),
+      ..._agentConversation(),
       if (hasMore) TextButton.icon(onPressed: loading ? null : () => load(more: true), icon: const Icon(Icons.forum_outlined), label: const Text('Sonraki ajan mesajlarını yükle')),
     ] else if (data != null) switch (widget.view) { 'queue' => _queue(), 'tree' || 'entries' => _tree(), 'btw' => _btw(), 'plan' => _plan(), 'goal' => _goal(), 'jobs' => _jobs(), 'agents' => _agents(), _ => detail(data) },
     if (busy || loading) const LinearProgressIndicator(),

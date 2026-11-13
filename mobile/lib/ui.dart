@@ -35,9 +35,23 @@ ThemeData omputerTheme(Brightness brightness) {
     foregroundColor: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.disabled) ? secondary.withValues(alpha: .7) : foreground),
   );
   final text = Typography.material2021(platform: TargetPlatform.android).black.apply(bodyColor: foreground, displayColor: foreground);
+  final controlOverlay = WidgetStateProperty.resolveWith<Color?>((states) {
+    if (states.contains(WidgetState.disabled)) return Colors.transparent;
+    if (states.contains(WidgetState.focused)) return accent.withValues(alpha: .18);
+    if (states.contains(WidgetState.pressed)) return accent.withValues(alpha: .12);
+    if (states.contains(WidgetState.hovered)) return accent.withValues(alpha: .08);
+    return Colors.transparent;
+  });
+  Color choiceColor(Set<WidgetState> states) {
+    if (states.contains(WidgetState.disabled)) return secondary.withValues(alpha: .45);
+    if (states.contains(WidgetState.error)) return scheme.error;
+    return states.contains(WidgetState.selected) ? accent : scheme.outline;
+  }
   return ThemeData(
     useMaterial3: true, colorScheme: scheme, extensions: [neo],
-    scaffoldBackgroundColor: neo.base, canvasColor: neo.base,
+    scaffoldBackgroundColor: neo.base, canvasColor: neo.raised,
+    materialTapTargetSize: MaterialTapTargetSize.padded,
+    focusColor: accent.withValues(alpha: .18), hoverColor: accent.withValues(alpha: .08),
     appBarTheme: AppBarTheme(backgroundColor: neo.base, foregroundColor: foreground, centerTitle: false, elevation: 0, scrolledUnderElevation: 0, surfaceTintColor: Colors.transparent, titleTextStyle: text.titleLarge?.copyWith(fontWeight: FontWeight.w600)),
     navigationBarTheme: NavigationBarThemeData(backgroundColor: Colors.transparent, surfaceTintColor: Colors.transparent, elevation: 0, indicatorColor: neo.inset, indicatorShape: NeoInputBorder(palette: neo, borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: scheme.outlineVariant)), labelTextStyle: WidgetStateProperty.resolveWith((states) => text.labelMedium?.copyWith(color: states.contains(WidgetState.selected) ? accent : secondary, fontWeight: states.contains(WidgetState.selected) ? FontWeight.w600 : FontWeight.w400)), iconTheme: WidgetStateProperty.resolveWith((states) => IconThemeData(color: states.contains(WidgetState.selected) ? accent : secondary))),
     navigationRailTheme: NavigationRailThemeData(backgroundColor: Colors.transparent, indicatorColor: neo.inset, indicatorShape: NeoInputBorder(palette: neo, borderRadius: BorderRadius.circular(16)), selectedIconTheme: IconThemeData(color: accent), unselectedIconTheme: IconThemeData(color: secondary), selectedLabelTextStyle: TextStyle(color: accent)),
@@ -47,11 +61,39 @@ ThemeData omputerTheme(Brightness brightness) {
     textButtonTheme: TextButtonThemeData(style: TextButton.styleFrom(minimumSize: const Size(48, 48), foregroundColor: accent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))),
     iconButtonTheme: IconButtonThemeData(style: neoButtonStyle(compact: true).copyWith(foregroundColor: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.disabled) ? secondary.withValues(alpha: .5) : foreground))),
     chipTheme: ChipThemeData(backgroundColor: neo.raised, selectedColor: neo.inset, disabledColor: neo.base, labelStyle: TextStyle(color: foreground), secondaryLabelStyle: TextStyle(color: accent), checkmarkColor: accent, side: BorderSide(color: scheme.outlineVariant), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8), elevation: 0, pressElevation: 0, showCheckmark: true),
+    switchTheme: SwitchThemeData(
+      materialTapTargetSize: MaterialTapTargetSize.padded,
+      overlayColor: controlOverlay,
+      thumbColor: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.disabled) ? secondary.withValues(alpha: .45) : states.contains(WidgetState.selected) ? accent : secondary),
+      trackColor: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.disabled) ? neo.base : states.contains(WidgetState.selected) ? scheme.primaryContainer : neo.inset),
+      trackOutlineColor: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.disabled) ? scheme.outlineVariant.withValues(alpha: .5) : states.contains(WidgetState.focused) || states.contains(WidgetState.selected) ? accent : scheme.outline),
+      trackOutlineWidth: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.focused) ? 2 : 1),
+    ),
+    checkboxTheme: CheckboxThemeData(
+      materialTapTargetSize: MaterialTapTargetSize.padded, overlayColor: controlOverlay,
+      fillColor: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.selected) ? choiceColor(states) : neo.inset),
+      checkColor: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.disabled) ? neo.base : states.contains(WidgetState.error) ? scheme.onError : scheme.onPrimary),
+      side: WidgetStateBorderSide.resolveWith((states) => BorderSide(color: choiceColor(states), width: states.contains(WidgetState.focused) ? 2 : 1.5)),
+    ),
+    radioTheme: RadioThemeData(
+      materialTapTargetSize: MaterialTapTargetSize.padded, overlayColor: controlOverlay,
+      fillColor: WidgetStateProperty.resolveWith(choiceColor),
+      backgroundColor: WidgetStatePropertyAll(neo.inset),
+    ),
+    sliderTheme: SliderThemeData(
+      activeTrackColor: accent, inactiveTrackColor: neo.inset,
+      secondaryActiveTrackColor: scheme.primaryContainer,
+      thumbColor: accent, overlayColor: accent.withValues(alpha: .18),
+      activeTickMarkColor: scheme.onPrimary, inactiveTickMarkColor: scheme.outline,
+      disabledActiveTrackColor: scheme.outlineVariant, disabledInactiveTrackColor: neo.inset,
+      disabledThumbColor: secondary.withValues(alpha: .45),
+      valueIndicatorColor: foreground, valueIndicatorTextStyle: text.labelLarge?.copyWith(color: neo.base),
+    ),
     listTileTheme: ListTileThemeData(iconColor: secondary, textColor: foreground, selectedColor: accent, selectedTileColor: neo.inset, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), minVerticalPadding: 12),
     expansionTileTheme: ExpansionTileThemeData(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), collapsedShape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), backgroundColor: neo.inset, collapsedBackgroundColor: neo.raised, iconColor: accent, collapsedIconColor: secondary, textColor: foreground, collapsedTextColor: foreground),
     dialogTheme: DialogThemeData(backgroundColor: neo.raised, surfaceTintColor: Colors.transparent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24), side: BorderSide(color: scheme.outlineVariant))),
     bottomSheetTheme: BottomSheetThemeData(backgroundColor: neo.raised, surfaceTintColor: Colors.transparent, shape: RoundedRectangleBorder(borderRadius: const BorderRadius.vertical(top: Radius.circular(24)), side: BorderSide(color: scheme.outlineVariant))),
-    popupMenuTheme: PopupMenuThemeData(color: neo.raised, surfaceTintColor: Colors.transparent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: scheme.outlineVariant))),
+    popupMenuTheme: PopupMenuThemeData(color: neo.raised, surfaceTintColor: Colors.transparent, shadowColor: neo.shadow, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: scheme.outlineVariant)), labelTextStyle: WidgetStateProperty.resolveWith((states) => text.labelLarge?.copyWith(color: states.contains(WidgetState.disabled) ? secondary.withValues(alpha: .5) : foreground))),
     snackBarTheme: SnackBarThemeData(backgroundColor: foreground, contentTextStyle: TextStyle(color: neo.base), behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
     textSelectionTheme: TextSelectionThemeData(cursorColor: accent, selectionColor: accent.withValues(alpha: .24), selectionHandleColor: accent),
     dividerTheme: DividerThemeData(color: scheme.outlineVariant.withValues(alpha: .65), space: 1),

@@ -5,6 +5,7 @@ import 'package:omputer/controller.dart';
 import 'package:omputer/models.dart';
 import 'package:omputer/session.dart';
 import 'package:omputer/ui.dart';
+import 'package:omputer/compact_turn.dart';
 
 Json sessionData(String status, List<String> capabilities, {String transport = 'archive'}) => {
   'id': 'session', 'projectId': 'project', 'name': 'Existing conversation',
@@ -65,7 +66,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.light), home: SessionScreen(controller: controller, sessionId: 'session')));
       await tester.pumpAndSettle();
 
-      expect(find.byType(MessageView), findsOneWidget);
+      expect(find.byType(CompactTurnView), findsOneWidget);
       expect(find.byType(TextField), findsNothing);
       expect(find.byKey(const ValueKey('session-resume')), findsNothing);
       final alternative = find.byKey(const ValueKey('session-new-project'));

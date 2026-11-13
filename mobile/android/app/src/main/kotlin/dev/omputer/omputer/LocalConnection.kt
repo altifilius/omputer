@@ -64,14 +64,19 @@ internal object LocalConnection {
     private val uiEvents = NativeEventBuffer()
     private val uiScheduled = AtomicBoolean(false)
     private val uiDrain = Runnable {
-        uiScheduled.set(false)
-        uiEvents.drain(generation).forEach { queued ->
-            if (queued.type != "connection" && listeners.isEmpty()) return@forEach
-            val data = if (queued.data is JSONObject) queued.data.asMap() else queued.data
-            val event = mapOf("type" to queued.type, "data" to data)
-            listeners.forEach { it(event) }
-            if (queued.type == "connection") onConnectionChanged?.invoke()
+        val connectionChanged = synchronized(this) {
+            uiScheduled.set(false)
+            var changed = false
+            uiEvents.drain(generation).forEach { queued ->
+                if (queued.type != "connection" && listeners.isEmpty()) return@forEach
+                val data = if (queued.data is JSONObject) queued.data.asMap() else queued.data
+                val event = mapOf("type" to queued.type, "data" to data)
+                listeners.forEach { it(event) }
+                if (queued.type == "connection") changed = true
+            }
+            changed
         }
+        if (connectionChanged) onConnectionChanged?.invoke()
     }
     private var openingCall: Call? = null
     private var retry: Runnable? = null
@@ -100,6 +105,8 @@ internal object LocalConnection {
     private var retrySeconds = 1L
     private var pendingNavigation: Map<String, Any?>? = null
     private val acceptedInteractions = linkedMapOf<String, String>()
+    private val retiredJournalEpochs = linkedSetOf<String>()
+    private var journalRevision = 0
     var onConnectionChanged: (() -> Unit)? = null
 
     @Synchronized fun initialize(application: Context) {
@@ -144,9 +151,9 @@ internal object LocalConnection {
         uiEvents.offer(NativeEventBuffer.Event(type, data, generation, if (type == "event") data.toString().length else 0), key)
         if (uiScheduled.compareAndSet(false, true)) main.post(uiDrain)
     }
-    fun navigate(data: Map<String, Any?>) {
+    @Synchronized fun navigate(data: Map<String, Any?>) {
         val event = mapOf("type" to "navigate", "data" to data)
-        synchronized(this) { if (listeners.isEmpty()) pendingNavigation = event }
+        if (listeners.isEmpty()) pendingNavigation = event
         emit("navigate", data)
     }
     fun snapshot(): Map<String, Any?> = currentSnapshot.asMap()
@@ -157,6 +164,10 @@ internal object LocalConnection {
     @Synchronized fun withIdentity(identity: String, operation: () -> Any?): Any? {
         if (identity != localIdentity()) throw ApiFailure("connection_changed", "Eşleştirme değişti; önceki bilgisayarın yerel işlemi uygulanmadı.")
         return operation()
+    }
+    @Synchronized fun withJournal(identity: String, epoch: String?, operation: () -> Any?): Any? = withIdentity(identity) {
+        if (epoch != JournalEpoch.value(currentSnapshot)) throw ApiFailure("history_changed", "Bilgisayar geçmişi değişti; eski taslak etkisi uygulanmadı.")
+        operation()
     }
     @Synchronized fun localState() = vault.durable.state(localIdentity()).asMap()
     @Synchronized fun localStateSet(section: String, key: String, value: Any?): Map<String, Any?> {
@@ -192,6 +203,7 @@ internal object LocalConnection {
                 .put("createdAt", java.time.Instant.now().toString())
             val ticket = synchronized(this) {
                 if (scope != localIdentity()) throw ApiFailure("connection_changed", "Eşleştirme değişti.")
+                if (old == null) JournalEpoch.value(currentSnapshot)?.let { record.put("journalEpoch", it) }
                 vault.durable.saveOperation(scope, record)
                 generation
             }
@@ -225,7 +237,9 @@ internal object LocalConnection {
         val record = (0 until rows.length()).map { rows.getJSONObject(it) }
             .firstOrNull { it.optString("id") == operation.optString("id") && it.optBoolean("nativeReply") } ?: return
         operation.keys().forEach { record.put(it, operation.opt(it)) }
+        if (record.isNull("journalEpoch")) JournalEpoch.value(currentSnapshot)?.let { record.put("journalEpoch", it) }
         vault.durable.saveOperation(scope, record)
+        if (record.optString("journalEpoch") != currentSnapshot.optString("journalEpoch")) return
         val result = operation.optJSONObject("result") ?: return
         val interaction = record.optJSONObject("request")?.optJSONObject("payload")?.optString("interactionId") ?: return
         if (DecisionPolicy.finalSuccess(result)) {
@@ -245,15 +259,15 @@ internal object LocalConnection {
     }
     private fun reconcileNativeReplies() {
         val scope = localIdentity()
-        val (identity, pending) = synchronized(this) {
+        val (identity, epoch, pending) = synchronized(this) {
             val rows = vault.durable.operations(scope)
-            notificationDeviceId to (0 until rows.length()).map { rows.getJSONObject(it) }.filter {
+            Triple(notificationDeviceId, JournalEpoch.value(currentSnapshot), (0 until rows.length()).map { rows.getJSONObject(it) }.filter {
                 it.optBoolean("nativeReply") && it.optString("status") !in setOf("succeeded", "failed")
-            }.take(8).map { it.getString("id") }
+            }.take(8).map { it.getString("id") })
         }
         pending.forEach { id -> requestAsync("GET", "/v1/commands/$id", expectedIdentity = identity) { value, error ->
             if (error == null && value is Map<*, *>) submit(replies, { _, _ -> }) {
-                withIdentity(scope) { reconcileNativeReply(JSONObject(value)); null }
+                withJournal(scope, epoch) { reconcileNativeReply(JSONObject(value)); null }
             }
         } }
     }
@@ -507,11 +521,13 @@ internal object LocalConnection {
         disconnect(); context.stopService(android.content.Intent(context, ConnectionService::class.java))
         client?.dispatcher?.cancelAll(); LocalNotifications.cancelAll(context)
         vault.installCredentials(saved)
+        uiEvents.resetIdentity(); pendingNavigation = null
         notificationDeviceId = saved.getString("deviceId")
         notificationScopedIdentity = DurableLocalState.identity(saved)
         notificationPreferences = JSONObject()
         currentSnapshot = LocalVault.emptySnapshot()
         acceptedInteractions.clear()
+        retiredJournalEpochs.clear(); journalRevision++
         emit("snapshot", currentSnapshot); client = http; lastError = null; connect()
     }
 
@@ -624,15 +640,16 @@ internal object LocalConnection {
     fun request(method: String, path: String, body: Map<*, *>? = null, expectedGeneration: Int? = null, retainCommandError: Boolean = false): Map<String, Any?> {
         require(method in setOf("GET", "POST", "PATCH")) { "Desteklenmeyen istek." }
         require(path.startsWith("/v1/") && !path.contains('\\') && !path.contains('#') && !path.contains('\n')) { "Geçersiz yerel API yolu." }
-        val (ticket, saved, http) = synchronized(this) {
+        val (connection, revision) = synchronized(this) {
             if (expectedGeneration != null && expectedGeneration != generation) throw ApiFailure("connection_changed", "Bağlantı değişti; eski işlem yeni bilgisayara gönderilmedi.")
             if (vault.revoked) throw ApiFailure("device_revoked", "Bu cihazın yetkisi kaldırıldı; yeniden eşleştir.")
             if (path == "/v1/commands" && body?.get("action") == "interaction.respond") {
                 val payload = body?.get("payload") as? Map<*, *>
                 requirePendingInteraction(payload?.get("interactionId") as? String ?: throw ApiFailure("interaction_missing", "Karar kimliği eksik."))
             }
-            Triple(generation, credentials(), authenticatedClient())
+            Triple(generation, credentials(), authenticatedClient()) to journalRevision
         }
+        val (ticket, saved, http) = connection
         val base = validateOrigin(saved.getString("url"))
         val historyRevision = vault.messagesRevision
         val request = Request.Builder().url(base + path).header("Authorization", "Bearer ${saved.getString("token")}")
@@ -655,6 +672,7 @@ internal object LocalConnection {
         if (path == "/v1/commands" && !retainCommandError) DecisionPolicy.commandError(result)?.let { throw ApiFailure(it.first, it.second) }
         return synchronized(this) {
             if (ticket != generation || vault.revoked) throw ApiFailure("connection_changed", "Bağlantı değişti; eski bilgisayarın yanıtı uygulanmadı.")
+            if (revision != journalRevision) throw ApiFailure("history_changed", "Bilgisayar geçmişi geri yüklendi; eski yanıt kullanılmadı.")
             if (ResponseCache.isMessages(path) && historyRevision != vault.messagesRevision) throw ApiFailure("history_changed", "Konuşma dalı değişti; güncel mesajları yeniden aç.")
             if (path == "/v1/commands" && body?.get("action") == "interaction.respond" && DecisionPolicy.finalSuccess(result)) {
                 val payload = body?.get("payload") as? Map<*, *>
@@ -669,16 +687,29 @@ internal object LocalConnection {
                 }
                 if (id != null) LocalNotifications.cancelInteraction(context, id)
             }
-            if (path == "/v1/snapshot") saveSnapshot(result)
+            if (path == "/v1/snapshot") {
+                if (JournalEpoch.value(result) !in retiredJournalEpochs && JournalEpoch.changes(currentSnapshot, result)) {
+                    reconnect()
+                    throw ApiFailure("history_changed", "Bilgisayar geçmişi değişti; doğrulanmış bağlantı yenileniyor.")
+                }
+                saveSnapshot(result)
+            }
             else if (cacheable && !result.optBoolean("cached")) vault.cacheResponse(path, result)
             result.asMap()
         }
     }
-    @Synchronized private fun saveSnapshot(snapshot: JSONObject) {
+    @Synchronized private fun saveSnapshot(snapshot: JSONObject, authenticatedBootstrap: Boolean = false): Boolean {
         val expected = credentials().optString("serverId")
         val actual = snapshot.optString("serverId")
         if (expected.isNotBlank() && actual.isNotBlank() && expected != actual) throw ApiFailure("identity_changed", "Bilgisayar kimliği değişti; eski eşleştirmeyle veri uygulanmadı.")
-        if (snapshot.optLong("sequence") < currentSnapshot.optLong("sequence")) return
+        if (!JournalEpoch.accepts(currentSnapshot, snapshot, authenticatedBootstrap, retiredJournalEpochs)) return false
+        if (JournalEpoch.changes(currentSnapshot, snapshot)) {
+            vault.resetJournal(snapshot)
+            JournalEpoch.value(currentSnapshot)?.let { retiredJournalEpochs.add(it) }
+            journalRevision++
+            acceptedInteractions.clear()
+            uiEvents.resetJournal()
+        }
         val interactions = snapshot.optJSONArray("interactions")
         if (interactions != null && acceptedInteractions.isNotEmpty()) {
             val next = JSONArray()
@@ -694,6 +725,7 @@ internal object LocalConnection {
         vault.saveSnapshot(snapshot)
         LocalNotifications.reconcile(context, snapshot)
         emit("snapshot", snapshot)
+        return true
     }
     fun pendingInteraction(id: String): JSONObject? {
         val rows = currentSnapshot.optJSONArray("interactions") ?: return null
@@ -747,7 +779,7 @@ internal object LocalConnection {
                 finally { synchronized(this) { if (openingCall === bootstrap) openingCall = null } }
                 synchronized(this) {
                     if (!active || ticket != generation || vault.revoked) return@submit null
-                    saveSnapshot(latest)
+                    if (!saveSnapshot(latest, authenticatedBootstrap = true)) throw ApiFailure("history_changed", "Bilgisayar geçmişi güncel değil; bağlantı yeniden kurulacak.")
                     vault.resetMessages()
                     vault.sequence = latest.getLong("sequence")
                     emit("history_reset", emptyMap<String, Any?>())
@@ -824,11 +856,13 @@ internal object LocalConnection {
         pairCancel()
         disconnect(); client?.dispatcher?.cancelAll(); client = null
         vault.forget(); lastError = null; LocalNotifications.cancelAll(context)
+        uiEvents.resetIdentity(); pendingNavigation = null
         notificationDeviceId = null
         notificationScopedIdentity = null
         notificationPreferences = JSONObject().put("global", false)
         currentSnapshot = LocalVault.emptySnapshot()
         acceptedInteractions.clear()
+        retiredJournalEpochs.clear(); journalRevision++
         nearby.setEnabled(activityVisible)
         emit("snapshot", currentSnapshot); publishConnection()
     }
@@ -850,6 +884,10 @@ internal object LocalConnection {
         val seq = event.optLong("sequence", 0)
         val type = event.getString("type")
         val data = event.optJSONObject("data") ?: JSONObject()
+        val epoch = JournalEpoch.value(currentSnapshot)
+        if (epoch != null && event.optString("journalEpoch") != epoch) {
+            throw ApiFailure("history_changed", "Olay farklı bilgisayar geçmişine ait; bağlantı yenileniyor.")
+        }
         if (type == "snapshot") {
             if (seq >= currentSnapshot.optLong("sequence")) saveSnapshot(data)
             if (seq > vault.sequence) vault.sequence = seq

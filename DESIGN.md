@@ -98,15 +98,20 @@ The frontmatter records authored constants, not an invented tonal ramp. `ColorSc
 
 `surface`, scaffold and canvas use base; low/high surface containers use raised; lowest/highest containers and secondary containers use inset. `onSurface` and `onSecondaryContainer` use text; `onSurfaceVariant` and secondary use secondary text. `onSecondary` uses base. Tertiary shares amber primary with base as its foreground. Primary containers use the authored amber-muted pair; unoverridden roles, including errors, remain generated Material roles. Amber means action, selection or focus—not generic decoration. Error notices use `errorContainer`/`onErrorContainer` and retain explanatory text.
 
+## Application mark
+
+The phone mark is a split rounded O: two opposing open arcs represent work continuity between PC and phone. Top/left uses existing amber #f3ca68, bottom/right existing fog #f1f3f5, on graphite #23272f. Editable source: `mobile/branding/omputer-mark.svg`. Android uses one foreground geometry, an opaque adaptive background and a monochrome silhouette for themed icons. Mark bounds28–80 on108×108 fit within the centered66dp safe circle; launcher masks belong to Android, not baked shadows or rounded-square foregrounds. Notification uses the same white-alpha mark at24dp. Native launch reuses the launcher resource with existing light/dark surfaces; no startup delay or logo animation is added.
+
+
 ## Typography
 
 Use native Roboto and `Typography.material2021(platform: TargetPlatform.android)`, with no remote font dependency or parallel fixed-size type scale. Screen headings use headline roles, sections/project names use title roles, reading uses body roles and provenance/status use label roles. App-bar titles and project titles use weight 600. Extended reading and system-monospace editor content use line-height 1.5 where authored. Preserve wrapping, selectable reading content and system text scale; do not shrink text to maintain a composition.
 
 ## Layout
 
-Compact navigation has Projeler, Gelen kutusu and Ayarlar; at available width 720dp it becomes a labeled native NavigationRail. This width rule is not proof of tablet acceptance. Common gutters are 24dp, with 8/12/16/20/24dp spacing for increasingly separated groups. Section-heading padding remains left 24, top 28, right 16, bottom 12dp.
+Phone Home is a compact operating screen: symmetric app bar with the reference 72×48dp controlled theme switch left, title/connection centered and Settings right; search and joined filters flow directly into upright sliding project cards and a right-hand N-position rail. The redundant Projects heading and list/cards switch are absent. One selected project's entire session history fills the remaining inset panel and scrolls internally. Normal phone needs no outer scroll; tiny-height/IME/large text retains accessible scrolling instead of clipped content. Preserve 8dp gutters/safe areas, no tablet/desktop redesign.
 
-Keep long transcripts, files, diffs and memory on quiet flat reading planes. Use raised surfaces for actionable groups and inset surfaces for entry/selection, not a shadow around every paragraph. The project ring keeps real project-ID ordering; selected-project text and session actions remain outside the transform. Search, empty/loading/error states and offline saved-view labels represent actual data, never demonstration content.
+Project and session identity lead. The selected project name and all-session count label the history, including archive/closed records; no global live-session section remains. Compact flat rows preserve exact references/status. Bottom Projects/New session(action)/Inbox tabs join their matching surface upward; filter tabs join below. Pending decisions remain only in Inbox. New session is a raised form with consistent 16dp grouping/inset project/name/prompt/model fields; the Omputer connection band and created-session shortcut are removed, while offline recovery and pending-operation feedback remain. No new decorative world or reading-plane elevation.
 
 The composer input/send row remains anchored above the resized safe-area/IME bottom; ancillary controls and attachments may scroll independently. Short-screen headers/notices must not collapse the editable row. Preserve draft ownership, multiline growth, selection, keyboard submission rules and acknowledged-version clearing.
 
@@ -116,7 +121,7 @@ One lighting model applies across the app. Raised surfaces use a lower-right sha
 
 Existing route motion remains 220ms forward/180ms reverse, Cubic(.16,1,.3,1), fade plus horizontal offset .025 of child width (.045 for checkpoints). `disableAnimations` returns the untransformed child with zero custom duration. No new depth animation is prescribed.
 
-The existing perspective project ring retains its 20-second revolution, play/pause, drag interruption and previous/next controls. Text entry pauses rotation; keyboard selection is immediate. Reduced motion/accessibility navigation use static selection; route inactivity and app inactivity suspend ticking. The speeder avatar only indicates a live connection with a connected writer and `workState` running/background. Human-wait, settled and disconnected states never animate merely because a process exists. Reduced motion uses a static silhouette with text; offscreen/inactive ticking stops. These are retained user-requested exceptions, not permission to add decorative loops.
+Project motion restores the finite upright layered stack: visible upper/lower neighbor cards slide behind the selected foreground with translation, uniform scale and opacity. No backward tilt or reversed/mirrored face; at most five cached real cards, no per-frame full-project scan. It starts paused; Play uses six-second dwell and 280ms layered steps with existing Cubic(.16,1,.3,1), stops at the last and requires explicit restart. A 48dp side rail draws N positions, displays n/N and supports rapid direct scrub/tap; keyboard/reduced/assistive choices are immediate. Up/down buttons are gone. Card/session interaction and visibility/route/lifecycle/input gates pause without catchup. Shared native switch/checkbox/radio/slider states, menu canvas and focus/disabled roles use the same palette; do not replace native actions with decorative gestures. The supplied native sun/moon/cloud/star switch and immediate joined-selection remain unchanged.
 
 ## Shapes
 
@@ -124,7 +129,7 @@ Use 12dp for chips/text buttons, 16dp for fields/buttons/rows/menus, default 20d
 
 ## Components
 
-Filled and outlined buttons keep native callbacks, semantics, focus and ink response. Minimum size is 48×52dp; compact/icon and text buttons are at least 48×48dp. Filled/outlined/icon button backgrounds use `backgroundBuilder`: resting raised, pressed/selected inset, disabled flat. Enabled filled actions use amber and its on-primary pair. Focus uses the primary border; disabled treatment remains explicit, with the authored muted foreground and border rather than an invented universal opacity.
+Filled and outlined buttons keep native callbacks, semantics, focus and ink response. Minimum size is 48×52dp; compact/icon and text buttons are at least 48×48dp. Filled/outlined/icon button backgrounds use `backgroundBuilder`: resting raised, pressed/selected inset, disabled flat. `NeoSurface` preserves inherited `DefaultTextStyle` across its transparent Material, so button labels retain the same resolved foreground role as their icons. Enabled filled actions use amber/onPrimary in both appearances, with contrast at least 4.5:1. Focus uses the primary border; disabled treatment remains explicit with authored muted foreground and border rather than an invented universal opacity.
 
 Fields use true `NeoInputBorder` inset painting, 16dp padding/radius, a resting outline-variant border and 2dp amber focus border. Error borders use native error roles; disabled outline alpha is .5. Native floating labels, accessible names, editing, IME, selection and validation remain intact. Cursor/handles use amber; selection uses amber alpha .24. The message editor retains its persistent “OMP’ye mesaj” name and native draft behavior.
 

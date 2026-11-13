@@ -8,6 +8,7 @@ import 'package:omputer/project_files.dart';
 import 'package:omputer/session.dart';
 import 'package:omputer/ui.dart';
 import 'package:omputer/working_avatar.dart';
+import 'package:omputer/project_carousel.dart';
 
 class NavigationNative implements NativeAdapter {
   final calls = <Json>[];
@@ -67,6 +68,17 @@ Snapshot parallelSnapshot({bool terminal = false, bool updated = false}) {
   });
 }
 
+Future<void> selectHomeProject(WidgetTester tester,String id) async {
+  final deck=tester.widget<ProjectCarousel>(find.byType(ProjectCarousel));
+  final index=deck.projects.indexWhere((p)=>p.id==id);
+  expect(index,greaterThanOrEqualTo(0));
+  final rail=tester.getRect(find.byKey(const ValueKey('project-carousel-rail')));
+  final fraction=deck.projects.length==1?0.0:index/(deck.projects.length-1);
+  await tester.tapAt(Offset(rail.center.dx,rail.top+16+fraction*(rail.height-32)));
+  await tester.pumpAndSettle();
+  expect(tester.widget<ProjectCarousel>(find.byType(ProjectCarousel)).selectedProjectId,id);
+}
+
 void main() {
   setUp(() => TestWidgetsFlutterBinding.instance.platformDispatcher.accessibilityFeaturesTestValue = FakeAccessibilityFeatures(disableAnimations: true));
   tearDown(() => TestWidgetsFlutterBinding.instance.platformDispatcher.clearAccessibilityFeaturesTestValue());
@@ -122,30 +134,6 @@ void main() {
     expect(native.calls.where((call) => call['method'] == 'POST'), isEmpty);
     await tester.pumpWidget(const SizedBox.shrink());
   });
-  testWidgets('overview expands and collapses project context without leaving home', (tester) async {
-    final native = NavigationNative();
-    final c = navigationController(native);
-    await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.light), home: HomeScreen(controller: c)));
-    await tester.pump();
-    expect(find.text('Hidden durable memory'), findsNothing);
-    expect(find.text('Hidden live answer'), findsNothing);
-    await tester.ensureVisible(find.text('Özeti genişlet'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Özeti genişlet'));
-    await tester.pump();
-    expect(find.text('Hidden durable memory'), findsOneWidget);
-    expect(find.text('Hidden live answer'), findsOneWidget);
-    expect(find.byType(ProjectScreen), findsNothing);
-    await tester.ensureVisible(find.text('Özeti daralt'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Özeti daralt'));
-    await tester.pump();
-    expect(find.text('Hidden durable memory'), findsNothing);
-    expect(find.text('Hidden live answer'), findsNothing);
-    expect(find.byType(HomeScreen), findsOneWidget);
-    await tester.pumpWidget(const SizedBox.shrink());
-    c.dispose();
-  });
 
   testWidgets('overview direct live access opens actual session in one tap', (tester) async {
     final native = NavigationNative();
@@ -171,26 +159,23 @@ void main() {
       final c = navigationController(native)..snapshot = parallelSnapshot(terminal: terminal);
       await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.light), home: HomeScreen(controller: c)));
       await tester.pump();
-      await tester.ensureVisible(find.byTooltip('Sonraki proje'));
-      await tester.tap(find.byTooltip('Sonraki proje'));
-      await tester.pumpAndSettle();
-      final project = find.byKey(const ValueKey('project'));
-      Finder rows() => find.descendant(of: project, matching: find.byType(LocalSessionRow));
+      await selectHomeProject(tester,'project');
+      Finder rows() => find.byType(LocalSessionRow);
       List<String> ids() => tester.widgetList<LocalSessionRow>(rows()).map((row) => row.session.id).toList();
-      expect(ids(), ['terminal-first-12345678', 'terminal-second-12345678']);
+      expect(ids(), ['terminal-first-12345678', 'terminal-second-12345678', 'past-one', 'past-two']);
       final labels = <String, String>{};
       for (final row in tester.widgetList<LocalSessionRow>(rows())) {
         final tile = tester.widget<ListTile>(find.descendant(of: find.byKey(row.key!), matching: find.byType(ListTile)));
         labels[row.session.id] = ((tile.subtitle! as Column).children.last as Text).data!;
       }
-      expect(labels.values.toSet(), hasLength(2));
+      expect(labels.values.toSet(), hasLength(4));
       expect(find.byKey(const ValueKey('recent:project')), findsNothing);
-      expect(find.text('Eski konuşma'), findsNothing);
+      expect(find.text('Eski konuşma'), findsOneWidget);
       c.snapshot = parallelSnapshot(terminal: terminal, updated: true);
       c.notifyListeners();
       await tester.pump();
-      expect(ids(), ['terminal-first-12345678', 'terminal-second-12345678']);
-      for (final id in ids()) {
+      expect(ids(), ['terminal-first-12345678', 'terminal-second-12345678', 'past-one', 'past-two']);
+      for (final id in ['terminal-first-12345678','terminal-second-12345678']) {
         final row = find.byKey(ValueKey(id));
         await tester.ensureVisible(row);
         final tileFinder = find.descendant(of: row, matching: find.byType(ListTile));
@@ -223,21 +208,19 @@ void main() {
     final c = navigationController(NavigationNative())..snapshot = parallelSnapshot(terminal: true);
     c.localState = {'identity': 'test', 'sections': {'pins': {'project:project': true}}};
     await tester.pumpWidget(MaterialApp(home: HomeScreen(controller: c)));
-    await tester.ensureVisible(find.byTooltip('Sonraki proje'));
-    await tester.tap(find.byTooltip('Sonraki proje'));
-    await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'Proje');
     await tester.pump();
-    expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) => row.session.id).toSet(), {'terminal-first-12345678', 'terminal-second-12345678', 'other-live'});
-    expect(find.byType(LocalSessionRow), findsNWidgets(3));
+    await selectHomeProject(tester,'project');
+    expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) => row.session.id).toSet(), {'terminal-first-12345678', 'terminal-second-12345678', 'past-one','past-two'});
+    expect(find.byKey(const ValueKey('other-live')),findsNothing);
     expect(find.byKey(const ValueKey('search:terminal-first-12345678')), findsNothing);
-    await tester.tap(find.widgetWithText(FilterChip, 'Canlı oturumu olan'));
+    await tester.tap(find.descendant(of: find.byKey(const ValueKey('home-filter-tabs')), matching: find.text('Canlı')));
     await tester.pump();
-    expect(find.byKey(const ValueKey('project')), findsOneWidget);
-    await tester.tap(find.widgetWithText(FilterChip, 'Sabitlenen'));
+    expect(tester.widget<ProjectCarousel>(find.byType(ProjectCarousel)).projects.any((p)=>p.id=='project'),isTrue);
+    await tester.tap(find.descendant(of: find.byKey(const ValueKey('home-filter-tabs')), matching: find.text('Sabitlenen')));
     await tester.pump();
-    expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) => row.session.id).toList(), ['terminal-first-12345678', 'terminal-second-12345678']);
-    expect(find.byKey(const ValueKey('other')), findsNothing);
+    expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((row) => row.session.id).toList(), ['terminal-first-12345678', 'terminal-second-12345678', 'past-one','past-two']);
+    expect(tester.widget<ProjectCarousel>(find.byType(ProjectCarousel)).projects.any((p)=>p.id=='other'),isFalse);
     await tester.pumpWidget(const SizedBox.shrink());
     c.dispose();
   });
@@ -249,12 +232,8 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     final c = navigationController(NavigationNative())..snapshot = parallelSnapshot(terminal: true);
     await tester.pumpWidget(MaterialApp(home: HomeScreen(controller: c)));
-    final project = find.byKey(const ValueKey('project'));
-    await tester.ensureVisible(find.byTooltip('Sonraki proje'));
-    await tester.tap(find.byTooltip('Sonraki proje'));
-    await tester.pumpAndSettle();
-    await tester.ensureVisible(find.descendant(of: project, matching: find.text('Projeyi aç')));
-    await tester.tap(find.descendant(of: project, matching: find.text('Projeyi aç')));
+    await selectHomeProject(tester,'project');
+    await tester.tap(find.byTooltip('Seçili projeyi aç'));
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilterChip, 'Canlı'));
     await tester.pump();
@@ -274,7 +253,7 @@ void main() {
     c.dispose();
   });
 
-  testWidgets('archive-only project retains recent history shortcut without dumping history rows', (tester) async {
+  testWidgets('archive-only project exposes all history in selected Home sessions', (tester) async {
     final c = navigationController(NavigationNative())..snapshot = Snapshot.fromJson({
       'projects': [{'id': 'project', 'name': 'Proje'}],
       'sessions': [
@@ -283,11 +262,10 @@ void main() {
       ],
     });
     await tester.pumpWidget(MaterialApp(home: HomeScreen(controller: c)));
-    expect(find.byType(LocalSessionRow), findsNothing);
-    final recent = find.byKey(const ValueKey('recent:project'));
-    await tester.ensureVisible(recent);
     await tester.pumpAndSettle();
-    await tester.tap(recent);
+    expect(tester.widgetList<LocalSessionRow>(find.byType(LocalSessionRow)).map((r)=>r.session.id),['latest','older']);
+    expect(find.byType(ProjectScreen),findsNothing);
+    await tester.tap(find.text('Latest'));
     await tester.pumpAndSettle();
     expect(tester.widget<SessionScreen>(find.byType(SessionScreen)).sessionId, 'latest');
     await tester.pumpWidget(const SizedBox.shrink());
@@ -300,8 +278,8 @@ void main() {
     await tester.pumpWidget(MaterialApp(home: HomeScreen(controller: c)));
     await tester.enterText(find.byType(TextField), 'Unique session');
     await tester.pump();
+    await tester.ensureVisible(find.byKey(const ValueKey('session')));
     expect(find.byType(LocalSessionRow), findsOneWidget);
-    expect(find.byType(SelectedProjectDetails), findsNothing);
     await tester.tap(find.text('Unique session result'));
     await tester.pumpAndSettle();
     expect(tester.widget<SessionScreen>(find.byType(SessionScreen)).sessionId, 'session');
@@ -359,19 +337,19 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink()); c.dispose();
   });
 
-  testWidgets('small phone can pause and step projects without a new-session overlay', (tester) async {
+  testWidgets('small phone can step projects without a new-session overlay', (tester) async {
     tester.view.physicalSize = const Size(393, 851);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     final c = navigationController(NavigationNative())..snapshot = parallelSnapshot();
     await tester.pumpWidget(MaterialApp(home: HomeScreen(controller: c)));
-    final next = find.byTooltip('Sonraki proje');
-    await tester.ensureVisible(next); await tester.pumpAndSettle();
-    expect(next.hitTestable(), findsOneWidget);
-    await tester.tap(next); await tester.pumpAndSettle();
-    expect(tester.widget<SelectedProjectDetails>(find.byType(SelectedProjectDetails)).project.id, 'project');
-    await tester.tap(find.byTooltip('Yeni oturum')); await tester.pumpAndSettle();
+    final rail=find.byKey(const ValueKey('project-carousel-rail'));
+    expect(rail.hitTestable(),findsOneWidget);
+    await selectHomeProject(tester,'project');
+    expect(find.byTooltip('Sonraki proje'),findsNothing);
+    expect(tester.widget<ProjectCarousel>(find.byType(ProjectCarousel)).selectedProjectId, 'project');
+    await tester.tap(find.descendant(of: find.byKey(const ValueKey('home-bottom-tabs')), matching: find.text('Yeni oturum'))); await tester.pumpAndSettle();
     expect(find.byType(NewSessionScreen), findsOneWidget);
     expect(c.operations, isEmpty);
     await tester.pumpWidget(const SizedBox.shrink()); c.dispose();
@@ -386,7 +364,7 @@ void main() {
     c.snapshot = status('running');
     await tester.pumpWidget(MaterialApp(home: ProjectScreen(controller: c, projectId: 'project')));
     await tester.pump();
-    expect(find.byType(WorkingAvatar), findsOneWidget);
+    expect(find.descendant(of: find.byType(LocalSessionRow), matching: find.byType(WorkingAvatar)), findsOneWidget);
     for (final state in ['waiting', 'idle', 'disconnected']) {
       c.snapshot = status(state, asyncWork: state == 'waiting');
       c.notifyListeners();
@@ -395,7 +373,7 @@ void main() {
     }
     c.snapshot = status('idle', asyncWork: true);
     c.notifyListeners(); await tester.pump();
-    expect(find.byType(WorkingAvatar), findsOneWidget);
+    expect(find.descendant(of: find.byType(LocalSessionRow), matching: find.byType(WorkingAvatar)), findsOneWidget);
     c.connection = ConnectionState.fromJson({'paired': true, 'connected': false});
     c.notifyListeners(); await tester.pump();
     expect(find.byType(WorkingAvatar), findsNothing);

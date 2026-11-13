@@ -66,6 +66,34 @@ Future<void> branch(OmputerController controller) => controller.control('session
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test('concurrent submission of the same composer reserves one command UUID before persistence', () async {
+    final native = DraftNative()..accepted = true;
+    final controller = await open(native);
+    final value = draft('Submit this message once');
+    try {
+      final first = expectLater(submit(controller, value), throwsA(isA<CommandAccepted>()));
+      final second = expectLater(submit(controller, value), throwsA(isA<ControllerFailure>().having((error) => error.code, 'code', 'submission_pending')));
+      await Future.wait([first, second]);
+      expect(native.posts, 1);
+      expect(controller.operations, hasLength(1));
+      expect(native.pending.keys.single, native.remote.keys.single);
+    } finally { await close(controller, native); }
+  });
+
+  test('failed draft persistence releases the composer reservation for an explicit retry', () async {
+    final native = DraftNative()..failDraft = true;
+    final controller = await open(native);
+    final value = draft('Not sent while storage is unavailable');
+    try {
+      await expectLater(submit(controller, value), throwsA(isA<ControllerFailure>().having((error) => error.code, 'code', 'storage_failed')));
+      expect(native.posts, 0);
+      native.failDraft = false;
+      await submit(controller, value);
+      expect(native.posts, 1);
+      expect(await controller.loadDraft(promptKey), isNull);
+    } finally { await close(controller, native); }
+  });
+
   test('successful branch restores prepared text and images on the same visible session once', () async {
     final native = DraftNative(); final controller = await open(native);
     await branch(controller);

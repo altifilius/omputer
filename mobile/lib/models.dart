@@ -175,13 +175,15 @@ class Device {
 class Snapshot {
   Snapshot.fromJson(Json j)
       : sequence = (j['sequence'] as num?)?.toInt() ?? 0,
+        journalEpoch = j['journalEpoch'] as String?,
         serverName = j['serverName'] as String? ?? '',
         projects = objects(j['projects']).map(Project.fromJson).toList(),
         sessions = objects(j['sessions']).map(Session.fromJson).toList(),
         interactions = objects(j['interactions']).map(Interaction.fromJson).toList(),
         devices = objects(j['devices']).map(Device.fromJson).toList();
-  Snapshot.empty() : sequence = 0, serverName = '', projects = [], sessions = [], interactions = [], devices = [];
+  Snapshot.empty() : sequence = 0, journalEpoch = null, serverName = '', projects = [], sessions = [], interactions = [], devices = [];
   final int sequence;
+  final String? journalEpoch;
   final String serverName;
   final List<Project> projects;
   final List<Session> sessions;

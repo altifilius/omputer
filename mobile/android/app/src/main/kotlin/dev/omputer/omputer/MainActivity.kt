@@ -54,7 +54,10 @@ class MainActivity : FlutterActivity() {
         }
         fun local(operation: () -> Any?) {
             val identity = LocalConnection.localIdentity()
-            async { LocalConnection.withIdentity(identity, operation) }
+            if (call.hasArgument("expectedJournalEpoch")) {
+                val epoch = call.argument<String>("expectedJournalEpoch")
+                async { LocalConnection.withJournal(identity, epoch, operation) }
+            } else async { LocalConnection.withIdentity(identity, operation) }
         }
         try {
             when (call.method) {
@@ -210,7 +213,11 @@ class MainActivity : FlutterActivity() {
             require(uris.isNotEmpty()) { "Paylaşılan görsel yok." }
             LocalConnection.importImages(identity, uris, shared = true)
         }) { _, error ->
-            LocalConnection.navigate(if (error == null) mapOf("sharedImages" to true) else mapOf("shareError" to error.message))
+            synchronized(LocalConnection) {
+                if (identity == runCatching { LocalConnection.localIdentity() }.getOrNull()) {
+                    LocalConnection.navigate(if (error == null) mapOf("sharedImages" to true) else mapOf("shareError" to error.message))
+                }
+            }
         }
         return true
     }

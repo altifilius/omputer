@@ -49,10 +49,11 @@
       {"name": "route-reverse", "value": "180ms", "purpose": "Retained reverse route transition; zero under disableAnimations."},
       {"name": "route-easing", "value": "Cubic(0.16, 1, 0.3, 1)", "purpose": "Existing route easing; reduced motion returns child directly."},
       {"name": "route-translation", "value": "Offset(0.025, 0)", "purpose": "Fraction of child width; checkpoint routes use Offset(0.045, 0)."},
-      {"name": "project-ring", "value": "20s revolution", "purpose": "Retained user-requested perspective loop, play/pause, drag interruption and previous/next. Text entry pauses; keyboard selects instantly. Reduced motion/accessibility navigation use static selection. Offscreen/inactive ticking stops."},
+      {"name": "project-layered-stack", "value": "paused entry;6s dwell;280ms layered transition", "purpose": "Restore upright overlapping project neighbors with finite clamp and side N-stop slider; no up/down buttons or presentation selector. Transform/opacity cached real cards; stable exact-ID selection and all-session panel, interaction/lifecycle/input/a11y gates preserved."},
+      {"name": "day-night-switch", "value": "240ms", "purpose": "Reference-matched controlled native sun/moon cover, concentric rings, descending clouds and entering four-point stars; reduced/keyboard/assistive immediate."},
       {"name": "working-avatar", "value": "existing speeder motion only", "purpose": "Live connection plus connected writer plus workState running/background only; never human_wait, settled or disconnected. Reduced motion is static with text; offscreen/inactive ticking stops. No new animation."}
     ],
-    "breakpoints": [{"name": "navigation-rail", "value": "720dp"}],
+    "breakpoints": [],
     "native": {
       "platform": "Flutter Android Material 3",
       "dimensionUnit": "logical dp",

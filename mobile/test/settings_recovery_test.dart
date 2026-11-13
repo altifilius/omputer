@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:omputer/controller.dart';
 import 'package:omputer/models.dart';
 import 'package:omputer/settings.dart';
+import 'package:omputer/ui.dart';
 
 class PermissionNative implements NativeAdapter {
   bool allowed = false, background = false;
@@ -22,6 +23,7 @@ class PermissionNative implements NativeAdapter {
     if (method == 'operationList') return <Json>[];
     if (method == 'preferences') return {'theme': 'system'};
     if (method == 'notifications') return allowed;
+    if (method == 'theme') return null;
     if (method == 'background') { background = args!['enabled'] == true; return {...state, 'background': background}; }
     throw StateError('Unexpected $method');
   }
@@ -32,7 +34,7 @@ void main() {
     final native = PermissionNative();
     final controller = OmputerController(adapter: native)
       ..connection = ConnectionState.fromJson({'paired': true, 'connected': true});
-    await tester.pumpWidget(MaterialApp(home: Scaffold(body: SettingsScreen(controller: controller))));
+    await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.dark), home: Scaffold(body: SettingsScreen(controller: controller))));
     final toggle = find.byType(SwitchListTile);
     await tester.scrollUntilVisible(toggle, 250, scrollable: find.byType(Scrollable).first);
     await tester.tap(toggle);
@@ -53,12 +55,37 @@ void main() {
     final controller = OmputerController(adapter: native)
       ..connection = ConnectionState.fromJson({'paired': true, 'connected': true})
       ..snapshot = Snapshot.fromJson({'projects': [{'id': 'p', 'name': 'Scoped project'}]});
-    await tester.pumpWidget(MaterialApp(home: Scaffold(body: SettingsScreen(controller: controller))));
-    await tester.scrollUntilVisible(find.text('Scoped project'), 250, scrollable: find.byType(Scrollable).first);
-    await tester.tap(find.text('Scoped project'));
+    await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.light), home: Scaffold(body: SettingsScreen(controller: controller))));
+    final preference = find.widgetWithText(CheckboxListTile, 'Scoped project');
+    await tester.scrollUntilVisible(preference, 250, scrollable: find.byType(Scrollable).first);
+    await tester.pumpAndSettle();
+    await Scrollable.ensureVisible(tester.element(preference), alignment: .5);
+    await tester.pumpAndSettle();
+    expect(preference.hitTestable(), findsOneWidget);
+    await tester.tap(preference);
     await tester.pumpAndSettle();
     expect(object(object(controller.localState['sections'])['notificationPreferences'])['project:p'], isFalse);
     expect(native.calls.where((call) => call == 'localStateSet'), hasLength(1));
+    await tester.pumpWidget(const SizedBox.shrink()); controller.dispose();
+  });
+  testWidgets('appearance menu retains exact choices and persists the selected theme', (tester) async {
+    final native = PermissionNative();
+    final controller = OmputerController(adapter: native)
+      ..connection = ConnectionState.fromJson({'paired': true, 'connected': true});
+    await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.light), home: Scaffold(body: SettingsScreen(controller: controller))));
+    final theme = find.byType(DropdownButtonFormField<String>);
+    await tester.scrollUntilVisible(theme, 250, scrollable: find.byType(Scrollable).first);
+    await tester.tap(theme);
+    await tester.pumpAndSettle();
+    expect(find.text('Sistemle aynı'), findsWidgets);
+    expect(find.text('Açık · sis grisi'), findsOneWidget);
+    expect(find.text('Koyu · grafit'), findsOneWidget);
+    await tester.tap(find.text('Koyu · grafit'));
+    await tester.pumpAndSettle();
+    expect(controller.theme, 'dark');
+    expect(native.calls.where((call) => call == 'theme'), hasLength(1));
+    expect(find.text('Koyu · grafit'), findsOneWidget);
+    expect(find.text('Yazı boyutu ve Animasyonları kaldır tercihi Android erişilebilirlik ayarlarından izlenir.'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink()); controller.dispose();
   });
 }

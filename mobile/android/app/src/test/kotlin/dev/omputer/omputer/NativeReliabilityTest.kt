@@ -31,6 +31,33 @@ class NativeReliabilityTest {
         buffer.offer(NativeEventBuffer.Event("event", "old text", 1, 10), "message:old")
         assertTrue(buffer.drain(2).isEmpty())
     }
+    @Test fun restoreRetiresQueuedOldHistoryWithoutDroppingNavigationOrConnection() {
+        val buffer = NativeEventBuffer()
+        buffer.offer(NativeEventBuffer.Event("connection", "connected", 1))
+        buffer.offer(NativeEventBuffer.Event("navigate", "session", 1))
+        buffer.offer(NativeEventBuffer.Event("snapshot", "old", 1))
+        buffer.offer(NativeEventBuffer.Event("event", "old text", 1, 8), "message:old")
+        buffer.resetJournal()
+        buffer.offer(NativeEventBuffer.Event("snapshot", "restored", 1))
+        buffer.offer(NativeEventBuffer.Event("history_reset", "reload", 1))
+        buffer.offer(NativeEventBuffer.Event("event", "new text", 1, 8), "message:new")
+        assertEquals(listOf("connected", "restored", "reload", "new text", "session"), buffer.drain(1).map { it.data })
+    }
+    @Test fun pairingResetRetiresSharedImageNavigationButReconnectKeepsIt() {
+        val buffer = NativeEventBuffer()
+        val shared = mapOf("sharedImages" to true)
+        buffer.offer(NativeEventBuffer.Event("navigate", shared, 1))
+        assertEquals(listOf(shared), buffer.drain(2).map { it.data })
+        buffer.offer(NativeEventBuffer.Event("navigate", shared, 2))
+        buffer.offer(NativeEventBuffer.Event("snapshot", "old computer", 2))
+        buffer.offer(NativeEventBuffer.Event("event", "old transcript", 2, 14), "message:old")
+        buffer.resetIdentity()
+        buffer.offer(NativeEventBuffer.Event("snapshot", "new computer", 3))
+        assertEquals(listOf("new computer"), buffer.drain(3).map { it.data })
+        buffer.offer(NativeEventBuffer.Event("navigate", mapOf("shareError" to "old import error"), 3))
+        buffer.resetIdentity()
+        assertTrue(buffer.drain(4).isEmpty())
+    }
     @Test fun semanticCommandFailuresNeverCountAsAcceptedReplies() {
         assertEquals("answer_invalid" to "Choose one", DecisionPolicy.commandError(JSONObject()
             .put("success", true).put("data", JSONObject().put("accepted", false)

@@ -73,7 +73,7 @@ internal object LocalNotifications {
         active.filter { it.id != CONNECTION_ID }.sortedBy { it.postTime }.dropLast(MAX_NOTIFICATIONS - 1).forEach { manager.cancel(it.id) }
         val session = data.optString("sessionId").ifBlank { null }
         val builder = Notification.Builder(context, if (decision) DECISIONS else ACTIVITY)
-            .setSmallIcon(R.drawable.ic_notification).setColor(Color.rgb(111, 108, 213))
+            .setSmallIcon(R.drawable.ic_notification).setColor(Color.rgb(243, 202, 104))
             .setContentTitle(data.optString("title", "Omputer"))
             .setContentText(data.optString("body"))
             .setStyle(Notification.BigTextStyle().bigText(data.optString("body")))

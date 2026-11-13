@@ -1,5 +1,64 @@
 # Changelog
 
+## Android 1.2.7 (16) — restored layered cards and unified native materials
+
+- Restore upright sliding upper/lower project neighbors; keep finite project rail, paused entry and selected-project complete history.
+- Remove project up/down buttons, Projects heading and list/cards UI; cleanly remove the obsolete Dart/Android project-view preference flow.
+- Harmonize native switch/choice/slider/menu state roles, Inbox spacing and Settings grouped surfaces with graphite/fog/amber neumorphism.
+- Simplify New session: remove named connection banner and created-session shortcut; group inset inputs/model within the raised form, preserving draft/UUID/pending/offline and successful-start behavior.
+
+Final contrast-corrected original-signed1.2.7 (16) installed on authorized Samsung; exact installed APK promoted to `dist`. Clean scoped analysis and157 distinct targeted scenarios across focused runs, not a full-suite claim. Guarded layered drag/rail/selected history, dark/light form/IME, Inbox/Settings/Back and final label/icon contrast inspected. Pairing/data/Android settings/PC/bridge preserved; no provider submission or Git publication. [Canonical report](Raporlar/2026-11-13-perspektif-kartlar-ve-birlesik-sekmeler.md#127--katmanlı-kartları-geri-alma-ve-neumorphic-hizalama).
+
+## Android 1.2.6 (15) — selected-project Home workbench
+
+- Replace cross-project live sessions on Home with the selected project's entire session history, exact IDs and status retained.
+- Compose normal phone Home on one screen with shorter cards and an internally scrolling session panel; preserve large-text/IME access.
+- Use finite full-slot vertical transitions with six-second dwell, a project-count scrub rail and explicit restart instead of unnoticed wrapping.
+- Join bottom navigation upward, use an icon-only neumorphic list/cards selector, and revise the native theme switch to the supplied sun/moon/cloud/star reference.
+
+Original-signed 1.2.6 (15) installed and accepted on the authorized Samsung; same installed APK promoted to `dist`. Scoped analysis and 108 distinct scenarios passed across targeted runs, not a new full-suite claim. Actual selected-history Home, rail/endpoints, full-slot motion, reference themes, icon selector and native Back/form navigation inspected. User chose paused startup; Play is explicit. Pairing/data/Android settings/PC/bridge preserved; no provider submission or Git publication. [Canonical report](Raporlar/2026-11-13-perspektif-kartlar-ve-birlesik-sekmeler.md#126--seçili-proje-çalışma-yüzeyi).
+
+## Android 1.2.5 (14) — upright downward cards and wider Home
+
+- Remove X/Y tilt and reversed rear faces; keep every card screen-parallel in one continuous top-to-bottom flow. Wrap repositioning happens only while invisible.
+- Align vertical drag, up/down buttons and keyboard direction with the visual flow; retain manual pause/play, stable project identity and accessibility/visibility gates.
+- Widen Home search, joined filters/panel and bottom controls with 8dp outer gutters; replace percentage card inset with 8dp inside the panel and match list spacing.
+
+Original-signed 1.2.5 (14) installed and visually accepted on the authorized Samsung; exact installed APK promoted to `dist`. Scoped analysis and 34/34 targeted scenarios passed. Actual upright/downward front+rear motion, pause, vertical drag, wider dark/light Home/list and exact front navigation inspected. Pairing and Android settings preserved; no provider/security/PC/bridge or Git changes. [Canonical same-day report](Raporlar/2026-11-13-perspektif-kartlar-ve-birlesik-sekmeler.md).
+
+## Android 1.2.4 (13) — large perspective ring and joined phone tabs
+
+- Restore the user-preferred continuous perspective project ring with the current large readable foreground card,bounded neighbors and retained list alternative. Manual selection,pause/play,stable IDs and visibility/accessibility/lifecycle gates remain.
+- Keep graphite/fog/amber while reducing broad working-card fills to a quiet primary blend plus explicit true-working status/avatar.
+- Move pending decisions off Home into Inbox with its count. Home filters Tümü/Canlı/Sabitlenen and bottom Projects/New session/Inbox use native joined top-rounded/concave-shoulder tabs sharing the local panel surface.
+- Move theme to top left,center Omputer/connection state and place Settings top right with native Back. New session is a bottom action opening its existing form,not a selected destination.
+
+Installed and visually accepted on the authorized Samsung as original-signed 1.2.4 (13); exact installed APK promoted to `dist`. Scoped analysis and 105 distinct targeted scenarios passed across targeted runs. [Canonical report](Raporlar/2026-11-13-perspektif-kartlar-ve-birlesik-sekmeler.md). No tablet/desktop, PC/bridge/provider/security or Git changes.
+
+## Android 1.2.3 (12) — continuity-ring application mark
+
+- Replace the old purple stripe icon with a custom split O representing work continuity between PC and phone. Use the established graphite, amber and fog palette, with one editable SVG source.
+- Wire launcher adaptive foreground/background and Android13 monochrome assets to the same geometry. Remove unused Flutter-template bitmaps. Notification small icon and static native launch reuse the mark; no behavior,permission,pairing or startup-delay changes.
+
+Signed1.2.3(12) is installed on authorized Samsung with exact base-APK hash and preserved first-install/pairing. Actual launcher,app-info and native cold-start mark inspected;app reconnect and scoped error read passed. Mask/small-size previews and packaged adaptive/monochrome/vector resources verified. No full-suite rerun,phone themed-icon setting change,notification delivery test,tablet/desktop work or Git publication. [Canonical logo report](Raporlar/2026-11-13-telefon-logo-ve-adaptif-ikon.md).
+
+## Android 1.2.2 (11) — phone home and appearance choices
+
+- Compact the phone header to one Omputer title with connection status; remove the duplicate computer-name banner and greeting headline. Align the four project filters in equal columns with shared text-scaled height.
+- Restore the vertical project list as default and persist list/large-card selection locally on the phone. Separate all open sessions into Canlı oturumlar with their project names; project cards no longer repeat sessions or long selected-project summaries.
+- Add the requested native sun/moon/cloud/star theme switch to the header, sharing Settings' existing persisted system/light/dark state. Use theme-derived amber surfaces and explicit status for actually running/background projects and sessions.
+- Enlarge and space snap project cards; retain manual selection and user-requested20-second automatic advancement with pause/play and interaction/visibility/lifecycle/accessibility gates.
+
+Ninety distinct targeted cases passed across runs;final switch8/8 and scoped analysis clean. Signed1.2.2(11) installed on authorized Samsung with exact base-APK hash,original first-install/pairing preservation and real phone dark/light/list/cards,filter,working/live-session,persistence,empty IME and timed7/18→8/18 auto checks. Phone left dark/list with clean search and unchanged draft. No tablet/desktop or PC/bridge release,no Git publication. [Canonical plan and execution report](Raporlar/2026-11-13-telefon-ana-sayfa-ve-gorunum-plani.md).
+
+## Android 1.2.1 (10) — manual project cards and compact turns
+
+- Replace the automatic perspective ring with a native snapping deck: wide readable current card, next-card edge, manual swipe and previous/next. Preserve exact project selection through live updates, filtering and reordering; keyboard and accessibility selection remain immediate.
+- Group assistant work between user messages into one compact ordered operation flow. Keep explicit answers/questions and legacy unclassified text readable. Hide thinking, commentary, arguments and tool output from rendering and answer copy without rewriting stored history/export.
+- Match tool results by exact call ID, retain error/interrupted/length-limit/missing-result summaries while collapsed, and open a searched hidden message at its safe operation context. Apply the same projection to owned-child history; preserve answer Markdown, file links, copy and exact source references.
+
+Scoped analyzer clean. Ninety distinct targeted scenarios passed across the initial87-pass run and three corrected-case reruns; final19compact/session cases passed after phone-native source-focus corrections. Actual phone portrait dark/light/200%-text/IME and safe-operation/source-focus screens were inspected. Signed1.2.1(10) is in `dist/omputer-android.apk`; physical phone installation remains unperformed. No tablet/desktop work, new PC/bridge release or Git publication. [Canonical revision report](Raporlar/2026-11-13-proje-kartlari-ve-kompakt-turn.md).
+
 ## Android 1.2.0 (9) — whole-application neumorphic system
 
 - Unify dark graphite and light fog palettes, amber action/focus, dual-shadow raised surfaces, true inset inputs and quiet reading planes. Native Material controls retain callbacks, selection, semantics and permission boundaries.
@@ -15,6 +74,29 @@ Analyzer clean;187 Flutter tests passed. Actual native phone dark/light/large-te
 - Show a native speeder avatar only for genuinely running/background project sessions on a live connection. Waiting, settled and disconnected states do not animate as work; the avatar respects reduced motion, route visibility and app lifecycle.
 
 Signed release is installed on the physical Samsung with exact APK hash and preserved first-install record. Actual project selection/opening, running avatar and neumorphic input above the native keyboard were inspected without submitting work. The new-session action moved to the app bar after native review found its FAB covering carousel controls. Thirty-nine targeted tests plus the added small-phone control regression passed; PC/bridge and pairing are unchanged. See [the canonical UI report](Raporlar/2026-11-13-donen-projeler-ve-calisan-avatar.md) for native scope, package identity and limits.
+
+## PC 0.2.1 / Android 1.1.3 (7) / bridge 1.1.1 — November 4
+
+- Reserve a session/mode draft before asynchronous persistence so overlapping composers cannot submit the same work under two UUIDs. Decision drafts capture pairing identity at edit time, preventing queued old-computer answers from entering a replacement identity.
+- Enforce the native per-operation byte limit after merging retained requests and new results. Pairing/forget retire buffered share navigation, and import completion/UI delivery cannot cross pairing identity; reconnect preserves navigation.
+- Keep acknowledged decisions resolved across immediate transport loss. Pending replay and disconnect cancellation are atomic and cannot reopen a final answer.
+- Protect connected writers, including failed turns, against delayed archive imports and stale discovery refreshes.
+- Close old dialogs on phone-triggered branch/switch lifecycle events and clear the previous journal's turn error.
+- Serialize local maintenance. Backups cannot release an existing update reservation; scheduled restore requires its own cancellation. Interrupted restore rollback now allows startup without a second marker-removal error.
+- Ship the October 29 correctness fixes below in newly built, separately versioned packages. Flutter verification in the bounded Android build runs with one test worker; the previous concurrent timeout is not claimed as a reproduced product deadlock.
+
+Local packages are built and signed. Android 1.1.3 (7) is installed on Samsung with same-signer/exact-APK and bounded connected-read/reconnect/native Back/IME acceptance. The production PC0.2.1/bridge1.1.1 safe-gate activation was independently verified after one restart, retaining identity, device authorization, listener configuration and saved history. The phone then showed matching installed/running components and passed reconnect without a prompt or decision submission. Broader physical acceptance remains separate; see `VERIFICATION.md` and [the activation report](Raporlar/2026-11-05-pc-aktivasyonu-ve-telefon-kabulu.md).
+
+## October 29 correctness fixes — included in the November 4 packages
+
+- Preserve runtime `outcome_unknown` as durable unknown, including UUID replay; repair legacy false failures without changing request identity or replaying commands.
+- Retire oldest safe final Android operation records under count/byte pressure instead of permanently blocking the 1,001st command. Pending/unknown records, unapplied draft/branch effects and unsent drafts remain protected.
+- Bind new-session submissions to exact durable draft revisions/operation UUIDs. Pending duplicates cannot send again; late success clears only its submitted version and exposes the created session. Delayed restoration and loading/status reflow preserve typed text and focus.
+- Reconcile final operation events arriving during an active outcome read. Fence automatic/reviewed draft effects at every asynchronous and native mutation boundary; associate legacy epoch-less effects only after an authoritative UUID result.
+- Chunk large bridge control outcomes losslessly with bounded socket backpressure; benign commands omit full history, oversized single outcomes report uncertainty, cached replay never re-executes effects, and interaction overflow triggers authoritative reconnect recovery.
+- Persist a journal epoch across ordinary restarts and rotate it during staged same-PC restore. Native pinned bootstrap and Dart reset lower-watermark cache/history state without rotating credentials or replaying uncertain work.
+
+At the October 29 milestone these were source-only fixes with isolated verification. They now ship in the November 4 packages above; production activation remains separate. See `VERIFICATION.md` and the canonical October 29 review/fix report.
 
 ## Android 1.1.2 (6)
 

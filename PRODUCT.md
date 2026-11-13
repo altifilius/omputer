@@ -24,9 +24,9 @@ OMP v18.10.2 is installed. The PC app starts and supervises its service automati
 
 ## Capabilities and Constraints
 
-- Project-first navigation with goals, decisions, open work, next steps, source sessions, and freshness.
+- Phone project navigation through upright layered sliding cards and a finite project-count rail; all open and closed sessions of the selected project remain directly accessible with exact references. Goals, decisions, source sessions and freshness stay real. Compact header includes actual connection state and the supplied native day/night switch sharing Settings' theme preference.
 - Unified inbox for pending questions, selections, confirmations, and tool permissions.
-- Live transcript, tool output, todos, subagents, prompt/steer/follow-up/interrupt, model selection, new sessions, and resume.
+- Live conversations with readable answers/questions and a compact ordered operation flow; raw transcript/export remains available separately. Todos, subagents, prompt/steer/follow-up/interrupt, model selection, new sessions, and resume.
 - All application data, pairing, notifications, and history stay on the PC and phone.
 - Outside-home access uses a user-owned reachable network route, such as WireGuard on the user's router/PC. No managed VPN control plane or hosted relay is permitted. CGNAT cannot be traversed without another reachable user-owned endpoint.
 - Android direct-background delivery requires an opt-in connected-device foreground service and possibly battery-optimization exemption. No claim of delivery after force-stop, loss of network, or a sleeping PC.

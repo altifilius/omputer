@@ -22,6 +22,15 @@ internal class NativeEventBuffer(private val maxEvents: Int = 128, private val m
         chars += event.chars
     }
 
+    @Synchronized fun resetJournal() {
+        journal.clear(); chars = 0
+        states.remove("snapshot"); states.remove("history_reset")
+    }
+
+    @Synchronized fun resetIdentity() {
+        states.clear(); journal.clear(); chars = 0
+    }
+
     @Synchronized fun drain(generation: Int): List<Event> {
         val result = ArrayList<Event>(states.size + journal.size)
         // The latest snapshot is authoritative before transcript invalidation/upserts.

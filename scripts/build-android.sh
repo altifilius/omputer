@@ -32,7 +32,7 @@ if [ -d "$tools/android-sdk" ]; then export ANDROID_HOME=$tools/android-sdk; fi
 cd "$base/mobile"
 "$flutter" pub get
 "$flutter" analyze
-"$flutter" test
+"$flutter" test --concurrency=1
 if [ "$#" -eq 0 ]; then set -- --release --target-platform android-arm64,android-x64; fi
 release=false
 for argument in "$@"; do if [ "$argument" = '--release' ]; then release=true; fi; done

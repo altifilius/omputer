@@ -20,19 +20,20 @@ class _InboxScreenState extends State<InboxScreen> {
   String query = '';
   @override
   Widget build(BuildContext context) => ListenableBuilder(listenable: widget.controller, builder: (context, _) {
+    final pendingCount = widget.controller.snapshot.pending.length;
     final items = widget.controller.snapshot.interactions.where((i) => (history || i.pendingAt(DateTime.now())) && '${i.title} ${i.message ?? ''} ${widget.controller.snapshot.project(i.projectId)?.name ?? ''}'.toLowerCase().contains(query.toLowerCase())).toList()..sort((a, b) {
       final ap = a.pendingAt(DateTime.now()), bp = b.pendingAt(DateTime.now());
       if (ap != bp) return ap ? -1 : 1;
       return (b.createdAt ?? DateTime(1970)).compareTo(a.createdAt ?? DateTime(1970));
     });
-    return CustomScrollView(slivers: [
-      SliverToBoxAdapter(child: ConnectionBanner(widget.controller)),
-      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 12, 24, 12), child: TextField(onChanged: (value) => setState(() => query = value), decoration: const InputDecoration(labelText: 'Karar veya proje ara', prefixIcon: Icon(Icons.search_rounded))))),
-      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 12), child: NeoSurface(child: SwitchListTile(contentPadding: const EdgeInsets.all(16), title: const Text('Yanıtlanan ve kapananları göster'), value: history, onChanged: (value) => setState(() => history = value))))),
+    return RefreshIndicator(onRefresh: widget.controller.refresh, child: CustomScrollView(physics: const AlwaysScrollableScrollPhysics(), slivers: [
+      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 8), child: Text('Karar bekleyen · $pendingCount', style: Theme.of(context).textTheme.titleLarge))),
+      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(16, 8, 16, 12), child: TextField(onChanged: (value) => setState(() => query = value), decoration: const InputDecoration(labelText: 'Karar veya proje ara', prefixIcon: Icon(Icons.search_rounded))))),
+      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 12), child: NeoSurface(depth: NeoDepth.inset, radius: 16, child: SwitchListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 12), title: const Text('Yanıtlanan ve kapananları göster'), value: history, onChanged: (value) => setState(() => history = value))))),
       if (items.isEmpty) SliverToBoxAdapter(child: EmptyState(icon: Icons.mark_email_read_outlined, title: query.isNotEmpty ? 'Eşleşen karar yok.' : history ? 'Kayıtlı karar yok.' : 'Şimdilik senden bir karar beklenmiyor.', message: query.isNotEmpty ? 'Aramayı değiştir veya yanıtlanan ve kapananları da göster.' : 'OMP bir soru, seçim veya izin istediğinde burada görünür. Çevrimdışı görünüm son alınan kayıtları gösterir.')),
       SliverList.builder(itemCount: items.length, itemBuilder: (context, index) => InteractionRow(controller: widget.controller, interaction: items[index])),
       const SliverPadding(padding: EdgeInsets.only(bottom: 40)),
-    ]);
+    ]));
   });
 }
 
@@ -78,9 +79,10 @@ class _InteractionScreenState extends State<InteractionScreen> {
     } catch (e) { if (mounted) setState(() { draftLoading = false; draftError = 'Yanıt taslağı açılamadı: $e'; }); }
   }
   void saveDraft() {
-    if (restoring || draftLoading) return;
+    final owner = identity;
+    if (restoring || draftLoading || owner != widget.controller.localState['identity']?.toString()) return;
     final value = <String, dynamic>{'text': input.text, 'selected': selected, 'questions': [for (final answer in answers) {'id': answer.id, 'options': answer.options, 'selected': answer.selected.toList(), 'customSelected': answer.customSelected, 'customInput': answer.customInput, 'note': answer.note}]};
-    draftWrites = draftWrites.catchError((Object _) {}).then((_) => widget.controller.saveDraft(draftKey, value)).catchError((Object e) { if (mounted) setState(() => draftError = 'Yanıt taslağı kaydedilemedi: $e'); });
+    draftWrites = widget.controller.saveDraft(draftKey, value).catchError((Object e) { if (mounted && owner == widget.controller.localState['identity']?.toString()) setState(() => draftError = 'Yanıt taslağı kaydedilemedi: $e'); });
   }
   void changed(VoidCallback change) { setState(change); saveDraft(); }
   Future<void> discard() async {
