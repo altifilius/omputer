@@ -188,5 +188,23 @@ mod tests {
         let mut bad = frames[0].clone();
         bad["byteLength"] = json!(LOGICAL_BYTES + 1);
         assert!(Decoder::default().push(bad).is_err());
+        let mut bad = frames[0].clone();
+        bad["data"] = json!("not valid base64!");
+        assert!(Decoder::default().push(bad).is_err());
+        let mut bad = frames[0].clone();
+        bad["data"] = json!(STANDARD.encode(vec![0; CHUNK_BYTES + 1]));
+        assert!(Decoder::default().push(bad).is_err());
+        let mut malformed_utf8 = vec![b' '; FRAME_BYTES];
+        malformed_utf8[0] = 0xff;
+        let count = malformed_utf8.len().div_ceil(CHUNK_BYTES);
+        let mut d = Decoder::default();
+        for (index, bytes) in malformed_utf8.chunks(CHUNK_BYTES).enumerate() {
+            let result = d.push(json!({"type":"rpc_chunk","chunkId":"invalid-utf8","index":index,"count":count,"byteLength":malformed_utf8.len(),"data":STANDARD.encode(bytes)}));
+            if index + 1 == count {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().is_none());
+            }
+        }
     }
 }

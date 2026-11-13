@@ -207,50 +207,19 @@ async fn action(
                 json!({"serverId":state.server_id,"serverName":state.server_name,"fingerprint":state.fingerprint,"certificate":state.certificate,"port":state.port,"urls":urls,"ready":state.ready.load(Ordering::Acquire),"projects":snapshot["projects"].as_array().map_or(0,Vec::len),"sessions":snapshot["sessions"].as_array().map_or(0,Vec::len),"pendingPairs":state.pending_pairs(),"devices":snapshot["devices"],"discovery":discovery,"managedRpcSessions":app.managed_rpc_sessions(),"components":components,"update":blockers,"backups":crate::backup::list(&app.config.state_dir)?}),
             )
         }
-        "update.prepare" => {
-            empty(payload)?;
-            app.prepare_update().await
-        }
-        "update.cancel" => {
-            empty(payload)?;
-            Ok(app.cancel_update().await)
-        }
+        "update.prepare"
+        | "update.cancel"
+        | "update.closeIdle"
+        | "backup.create"
+        | "backup.restore"
+        | "backup.cancelRestore" => maintenance(app, action, payload).await,
         "update.blockers" => {
             empty(payload)?;
             app.update_blockers().await
         }
-        "update.closeIdle" => {
-            empty(payload)?;
-            app.close_idle_managed().await
-        }
         "update.resume" => {
             let session = identifier(payload, "sessionId")?;
             app.command(&json!({"id":uuid::Uuid::new_v4().to_string(),"action":"session.resume","sessionId":session,"payload":{}})).await
-        }
-        "backup.create" => {
-            empty(payload)?;
-            app.prepare_update().await?;
-            let owned = app.clone();
-            let result = tokio::task::spawn_blocking(move || crate::backup::create(&owned)).await;
-            app.cancel_update().await;
-            result?
-        }
-        "backup.restore" => {
-            let id = identifier(payload, "backupId")?;
-            app.prepare_update().await?;
-            let result = crate::backup::schedule_restore(&app.config.state_dir, id);
-            if result.is_err() {
-                app.cancel_update().await;
-            }
-            result
-        }
-        "backup.cancelRestore" => {
-            empty(payload)?;
-            let request = app.config.state_dir.join("restore.request");
-            if request.exists() {
-                fs::remove_file(request)?;
-            }
-            Ok(app.cancel_update().await)
         }
         "diagnosis.export" => {
             empty(payload)?;
@@ -294,10 +263,190 @@ async fn action(
     }
 }
 
+async fn maintenance(app: &Arc<App>, action: &str, payload: &Value) -> Result<Value> {
+    let _guard = app
+        .maintenance
+        .try_lock()
+        .context("Another local maintenance operation is in progress")?;
+    match action {
+        "update.prepare" => {
+            empty(payload)?;
+            app.prepare_update().await
+        }
+        "update.cancel" => {
+            empty(payload)?;
+            if app.config.state_dir.join("restore.request").exists() {
+                bail!("A restore is scheduled; cancel that restore before releasing admission");
+            }
+            Ok(app.cancel_update().await)
+        }
+        "update.closeIdle" => {
+            empty(payload)?;
+            app.close_idle_managed().await
+        }
+        "backup.create" => {
+            empty(payload)?;
+            if app.update_prepared() {
+                bail!("An update or restore already owns maintenance admission");
+            }
+            app.prepare_update().await?;
+            let owned = app.clone();
+            let result = tokio::task::spawn_blocking(move || crate::backup::create(&owned)).await;
+            app.cancel_update().await;
+            result?
+        }
+        "backup.restore" => {
+            let id = identifier(payload, "backupId")?;
+            if app.update_prepared() {
+                bail!("An update or restore already owns maintenance admission");
+            }
+            app.prepare_update().await?;
+            let result = crate::backup::schedule_restore(&app.config.state_dir, id);
+            if result.is_err() {
+                app.cancel_update().await;
+            }
+            result
+        }
+        "backup.cancelRestore" => {
+            empty(payload)?;
+            let request = app.config.state_dir.join("restore.request");
+            if request.exists() {
+                fs::remove_file(request)?;
+                Ok(app.cancel_update().await)
+            } else {
+                Ok(json!({"cancelled":false,"prepared":app.update_prepared()}))
+            }
+        }
+        _ => bail!("Unknown local maintenance action"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener as StdListener;
+    fn app() -> (tempfile::TempDir, Arc<App>) {
+        let temp = tempfile::tempdir().unwrap();
+        crate::security::initialize(temp.path(), &[]).unwrap();
+        crate::security::private_file(
+            &temp.path().join("server-id"),
+            uuid::Uuid::new_v4().to_string().as_bytes(),
+        )
+        .unwrap();
+        let store = Arc::new(
+            crate::store::Store::open(&temp.path().join("omputer.sqlite"), "Test".into()).unwrap(),
+        );
+        let app = App::new(
+            store,
+            crate::runtime::RuntimeConfig {
+                state_dir: temp.path().into(),
+                omp: "missing-omp".into(),
+                bridge: "missing-bridge".into(),
+            },
+        );
+        (temp, app)
+    }
+
+    #[tokio::test]
+    async fn backup_cannot_release_an_existing_update_reservation() {
+        let (_temp, app) = app();
+        maintenance(&app, "update.prepare", &json!({}))
+            .await
+            .unwrap();
+        maintenance(&app, "update.prepare", &json!({}))
+            .await
+            .unwrap();
+        assert!(
+            maintenance(&app, "backup.create", &json!({}))
+                .await
+                .is_err()
+        );
+        assert!(
+            maintenance(
+                &app,
+                "backup.restore",
+                &json!({"backupId":uuid::Uuid::new_v4().to_string()}),
+            )
+            .await
+            .is_err()
+        );
+        maintenance(&app, "backup.cancelRestore", &json!({}))
+            .await
+            .unwrap();
+        assert!(app.update_prepared());
+        let rejected = app
+            .command(&json!({"action":"session.start","payload":{}}))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::runtime::error_code(&rejected), "update_pending");
+        maintenance(&app, "update.cancel", &json!({}))
+            .await
+            .unwrap();
+        assert!(!app.update_prepared());
+    }
+
+    #[tokio::test]
+    async fn concurrent_maintenance_cannot_cancel_admission_during_backup() {
+        let (_temp, app) = app();
+        app.prepare_update().await.unwrap();
+        let guard = app.maintenance.lock().await;
+        assert!(
+            maintenance(&app, "update.cancel", &json!({}))
+                .await
+                .is_err()
+        );
+        assert!(
+            maintenance(&app, "backup.cancelRestore", &json!({}))
+                .await
+                .is_err()
+        );
+        assert!(
+            maintenance(&app, "backup.create", &json!({}))
+                .await
+                .is_err()
+        );
+        assert!(app.update_prepared());
+        drop(guard);
+        maintenance(&app, "update.cancel", &json!({}))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn scheduled_restore_keeps_admission_until_its_own_cancellation() {
+        let (temp, app) = app();
+        let backup = maintenance(&app, "backup.create", &json!({}))
+            .await
+            .unwrap();
+        assert!(!app.update_prepared());
+        maintenance(&app, "backup.restore", &json!({"backupId":backup["id"]}))
+            .await
+            .unwrap();
+        assert!(
+            maintenance(&app, "update.cancel", &json!({}))
+                .await
+                .is_err()
+        );
+        assert!(
+            maintenance(&app, "backup.create", &json!({}))
+                .await
+                .is_err()
+        );
+        maintenance(&app, "update.prepare", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(temp.path().join("restore.request")).unwrap(),
+            backup["id"].as_str().unwrap()
+        );
+        assert!(app.update_prepared());
+        maintenance(&app, "backup.cancelRestore", &json!({}))
+            .await
+            .unwrap();
+        assert!(!temp.path().join("restore.request").exists());
+        assert!(!app.update_prepared());
+    }
+
     #[tokio::test]
     async fn socket_does_not_replace_files_or_active_listeners() {
         let temp = tempfile::tempdir().unwrap();

@@ -328,10 +328,11 @@ impl ArchiveScanner {
                 .and_then(|id| store.get("session", id).ok());
             let live_owner = owner.as_ref().is_some_and(|session| {
                 session["transport"] != "archive"
-                    && !matches!(
-                        session["status"].as_str(),
-                        Some("disconnected" | "closed" | "failed")
-                    )
+                    && (session["writerConnected"] == true
+                        || !matches!(
+                            session["status"].as_str(),
+                            Some("disconnected" | "closed" | "failed")
+                        ))
             });
             // A successful import may only have recognized a live owner. Its
             // unchanged file still needs materializing once that owner closes.
@@ -351,7 +352,7 @@ impl ArchiveScanner {
                 if let Some(id) = tracked
                     .as_ref()
                     .and_then(|source| source["sessionId"].as_str())
-                    && let Ok(mut session) = store.get("session", id)
+                    && let Ok(session) = store.get("session", id)
                     && session["transport"] == "archive"
                 {
                     let native_id = session["journalId"]
@@ -359,22 +360,7 @@ impl ArchiveScanner {
                         .or(session["runtimeSessionId"].as_str())
                         .unwrap_or(id);
                     let active = archive::ensure_source_inactive(native_id, path).is_err();
-                    let status = if active { "active-unbridged" } else { "closed" };
-                    if session["status"] != status {
-                        session["status"] = json!(status);
-                        session["writerConnected"] = json!(false);
-                        session["workState"] = json!("disconnected");
-                        if !session["journalId"].is_string() {
-                            session["journalId"] = session["runtimeSessionId"].clone();
-                        }
-                        session.as_object_mut().unwrap().remove("runtimeSessionId");
-                        session["capabilities"] = if active {
-                            json!([])
-                        } else {
-                            json!(["session.resume"])
-                        };
-                        let _ = store.put("session", id, &session, Some("session.updated"));
-                    }
+                    let _ = store.refresh_archive_status(&session, active);
                 }
                 unchanged += 1;
                 continue;

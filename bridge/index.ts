@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { ExtensionAPI, ExtensionContext, AgentSession, AgentRef } from '@oh-my-pi/pi-coding-agent';
 import { LocalBridge } from './ipc';
 import { DialogBridge } from './dialogs';
-import { parseCommand, text, type Command, type WireFrame } from './wire';
+import { encodeFrame, parseCommand, text, type Command, type EncodedFrame, type WireFrame } from './wire';
 import { createControls, runControl, type HostControls } from './controls';
 
 interface Lifecycle {
@@ -13,7 +13,7 @@ interface Lifecycle {
   release(id: string, expected: AgentRef, options: { tombstone: boolean }): Promise<boolean>;
 }
 interface LifecycleExport { global(): Lifecycle; }
-interface Outcome { fingerprint: string; response?: WireFrame; running: Promise<WireFrame>; }
+interface Outcome { fingerprint: string; response?: EncodedFrame; pending: boolean; blocksState: boolean; }
 
 /** Explicit opt-in only. Factories are session-local, even when OMP reuses this module for children. */
 export default function omputer(pi: ExtensionAPI) {
@@ -33,6 +33,8 @@ export default function omputer(pi: ExtensionAPI) {
   let controlling = 0;
   let transitioning = 0;
   let turnError: string | undefined;
+  let sendingOutcomes = false;
+  let completingControls = 0;
   let memoryRevision: number | undefined;
   const output = new Map<string, WireFrame>();
   const managed = process.env.OMPUTER_RPC_MANAGED === '1';
@@ -48,6 +50,21 @@ export default function omputer(pi: ExtensionAPI) {
     if (Date.now() - warnedAt < 60_000) return;
     warnedAt = Date.now();
     try { pi.logger.warn('Omputer local bridge unavailable', { error: error instanceof Error ? error.message : String(error) }); } catch {}
+  };
+  const sendOutcomes = async () => {
+    if (sendingOutcomes) return;
+    sendingOutcomes = true;
+    try {
+      while (bridge?.ready) {
+        const outcome = [...outcomes.values()].find(value => value.pending && value.response);
+        if (!outcome?.response) break;
+        const transport = bridge;
+        outcome.pending = false;
+        if (!await transport.sendEncoded(outcome.response)) { outcome.pending = true; break; }
+        if (outcome.blocksState) { outcome.blocksState = false; completingControls--; sendState(true); }
+      }
+    } catch (error) { report(error); }
+    finally { sendingOutcomes = false; }
   };
   const id = () => registeredSessionId ?? (managed && managedSessionId ? managedSessionId : ctx?.sessionManager.getSessionId() ?? '');
   const capabilities = () => [
@@ -105,7 +122,7 @@ export default function omputer(pi: ExtensionAPI) {
       if (live && !controls) controls = createControls(pi, ctx, live);
       if (live && !unsubscribe) unsubscribe = live.subscribe(event => forward(event as unknown as WireFrame));
     }
-    if (!bridge?.ready || !ctx || transitioning) return;
+    if (!bridge?.ready || !ctx || transitioning || completingControls) return;
     try {
       const current = state();
       // updatedAt is emission time, not a reason to emit unchanged snapshots every tick.
@@ -165,6 +182,7 @@ export default function omputer(pi: ExtensionAPI) {
       if (controlling && !readOnly && !cancel) throw Object.assign(new Error('Another session control is executing'), { code: 'session_busy' });
       if (!readOnly) controlling++;
       const changesIdentity = command.action === 'session.command' || (command.action === 'session.control' && ['branch', 'fork', 'tree.navigate'].includes(String(payload.control)));
+      const before = { journalId: ctx.sessionManager.getSessionId(), sessionFile: ctx.sessionManager.getSessionFile(), leafId: ctx.sessionManager.getLeafId() };
       if (changesIdentity) transitioning++;
       try {
         const data = await runControl(controls, command, { journalId: ctx.sessionManager.getSessionId(), bindingRevision }, event => {
@@ -173,10 +191,16 @@ export default function omputer(pi: ExtensionAPI) {
           output.set(outputId, frame); bridge?.send(frame);
         });
         if (command.action !== 'session.controls') await live?.sessionManager.flush();
-        return { ...data, _omputerState: state(), ...(changesIdentity && typeof live?.getOmputerMessages === 'function' ? { _omputerMessages: live.getOmputerMessages() } : {}) };
+        const current = state();
+        const identityChanged = before.journalId !== current.journalId || before.sessionFile !== current.sessionFile || before.leafId !== current.leafId;
+        return { ...data, _omputerState: current, ...(!readOnly && identityChanged && typeof live?.getOmputerMessages === 'function' ? { _omputerMessages: live.getOmputerMessages() } : {}) };
       } catch (error) {
         // A host method can change identity before failing; preserve its truthful outcome state.
-        if (error && typeof error === 'object') Object.assign(error, { _omputerState: state() });
+        if (error && typeof error === 'object') {
+          const current = state();
+          const identityChanged = before.journalId !== current.journalId || before.sessionFile !== current.sessionFile || before.leafId !== current.leafId;
+          Object.assign(error, { _omputerState: current, ...(!readOnly && identityChanged && typeof live?.getOmputerMessages === 'function' ? { _omputerMessages: live.getOmputerMessages() } : {}) });
+        }
         throw error;
       } finally { if (!readOnly) controlling--; if (changesIdentity) transitioning--; }
     }
@@ -266,7 +290,7 @@ export default function omputer(pi: ExtensionAPI) {
     if (existing) {
       if (existing.fingerprint !== fingerprint) {
         bridge?.send({ type: 'response', id: command.id, success: false, error: { code: 'command_conflict', message: 'Command ID was reused with a different payload' } });
-      } else if (existing.response) bridge?.send(existing.response);
+      } else if (existing.response) { existing.pending = true; void sendOutcomes(); }
       // In-flight duplicate shares the original operation and its eventual single outcome.
       return;
     }
@@ -274,11 +298,25 @@ export default function omputer(pi: ExtensionAPI) {
       (error: unknown) => ({ type: 'response', id: command.id, success: false, error: {
         code: error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : 'host_error',
         message: error instanceof Error ? error.message : String(error),
-        }, _omputerState: error && typeof error === 'object' && '_omputerState' in error ? error._omputerState : undefined
+        }, _omputerState: error && typeof error === 'object' && '_omputerState' in error ? error._omputerState : undefined,
+        _omputerMessages: error && typeof error === 'object' && '_omputerMessages' in error ? error._omputerMessages : undefined,
       }));
-    const outcome: Outcome = { fingerprint, running };
+    const blocksState = command.action === 'session.command' || command.action === 'session.control';
+    if (blocksState) completingControls++;
+    const outcome: Outcome = { fingerprint, pending: false, blocksState };
     outcomes.set(command.id, outcome);
-    void running.then(response => { outcome.response = response; bridge?.send(response); sendState(true); }).catch(report);
+    void running.then(response => {
+      try { outcome.response = encodeFrame(response); }
+      catch (error) {
+        // Never retain an unsendable success or repeat its already-executed host effect.
+        const result = 'data' in response && response.data && typeof response.data === 'object' ? response.data as WireFrame : undefined;
+        const current = (result?._omputerState ?? ('_omputerState' in response ? response._omputerState : undefined)) as WireFrame | undefined;
+        outcome.response = encodeFrame({ type: 'response', id: command.id, success: false, error: {
+          code: 'outcome_unknown', message: error instanceof Error ? error.message : String(error),
+        }, ...(current ? { _omputerState: { journalId: current.journalId, sessionFile: current.sessionFile, cwd: current.cwd, leafId: current.leafId } } : {}) });
+      }
+      outcome.pending = true; void sendOutcomes(); sendState(true);
+    }).catch(report);
   };
   const teardown = () => {
     // Close through the old transport before replacing the session or its UI.
@@ -293,7 +331,9 @@ export default function omputer(pi: ExtensionAPI) {
   };
   const initialize = async (_event: unknown, context: ExtensionContext): Promise<void> => {
     if (context.agent.kind !== 'main') return;
+    turnError = undefined;
     if (controlling) {
+      dialogs?.close();
       ctx = context; live = registry.get(context.agent.id)?.session ?? live;
       if (typeof live?.enableOmputerMessageIds === 'function') live.enableOmputerMessageIds();
       controls = createControls(pi, context, live);
@@ -321,8 +361,9 @@ export default function omputer(pi: ExtensionAPI) {
     dialogs.install(context.ui);
     bridge = new LocalBridge(stateDir, () => ({ managed, managedSessionId,
       session: state() }), receive,
-      () => { sendState(true); replayMessages(); dialogs?.reconnect();
-        for (const outcome of outcomes.values()) if (outcome.response) bridge?.send(outcome.response);
+      () => { sendState(true);
+        for (const outcome of outcomes.values()) if (outcome.response) outcome.pending = true;
+        void sendOutcomes(); replayMessages(); dialogs?.reconnect();
         for (const frame of output.values()) bridge?.send(frame); },
       () => { lastState = ''; }, report);
     if (live) unsubscribe = live.subscribe(event => forward(event as unknown as WireFrame));

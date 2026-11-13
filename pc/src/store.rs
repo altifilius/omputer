@@ -81,7 +81,7 @@ pub struct Store {
 }
 impl Store {
     pub fn open(path: &Path, name: String) -> Result<Self> {
-        let db = Connection::open(path)?;
+        let mut db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(10))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS objects(kind TEXT NOT NULL,id TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(kind,id));
@@ -156,22 +156,40 @@ impl Store {
         {
             db.execute_batch("BEGIN IMMEDIATE; DELETE FROM transcript_search; INSERT INTO transcript_search(rowid,text) SELECT sequence,body FROM messages; INSERT INTO store_migrations VALUES('transcript_search_v1'); COMMIT;")?;
         }
+        let tx = db.transaction()?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS journal_state(id INTEGER PRIMARY KEY CHECK(id=1),epoch TEXT NOT NULL);")?;
+        if tx
+            .query_row("SELECT epoch FROM journal_state WHERE id=1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?
+            .is_none()
+        {
+            tx.execute(
+                "INSERT INTO journal_state(id,epoch) VALUES(1,?1)",
+                [Uuid::new_v4().to_string()],
+            )?;
+        }
         let stamp = now();
-        let pending = db
-            .prepare("SELECT id FROM commands WHERE status='running'")?
+        let pending = tx
+            .prepare("SELECT id FROM commands WHERE status='running' OR ((json_extract(result,'$.error.code')='outcome_unknown' OR json_extract(result,'$.status')='unknown') AND (status!='unknown' OR json_extract(result,'$.status') IS NOT 'unknown' OR json_extract(result,'$.success') IS NOT 0))")?
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        db.execute("UPDATE commands SET status=CASE WHEN result IS NULL THEN 'unknown' WHEN json_extract(result,'$.success')=1 THEN 'succeeded' ELSE 'failed' END,created_at=COALESCE(created_at,?1),updated_at=?1 WHERE status='running' OR created_at IS NULL", [&stamp])?;
+        tx.execute("UPDATE commands SET status=CASE WHEN result IS NULL OR json_extract(result,'$.error.code')='outcome_unknown' OR json_extract(result,'$.status')='unknown' THEN 'unknown' WHEN json_extract(result,'$.success')=1 THEN 'succeeded' ELSE 'failed' END,created_at=COALESCE(created_at,?1),updated_at=?1 WHERE status='running' OR created_at IS NULL", [&stamp])?;
+        // Repair old false failures without changing their UUID, request or hash.
+        // Journal bodies are normalized only when their bounded replay page is read.
+        tx.execute("UPDATE commands SET status='unknown',result=json_set(result,'$.status','unknown','$.success',json('false')),updated_at=?1 WHERE (json_extract(result,'$.error.code')='outcome_unknown' OR json_extract(result,'$.status')='unknown') AND (status!='unknown' OR json_extract(result,'$.status') IS NOT 'unknown' OR json_extract(result,'$.success') IS NOT 0)", [&stamp])?;
         for id in pending {
-            let operation = Self::command_status_db(&db, &id)?;
+            let operation = Self::command_status_db(&tx, &id)?;
             Self::append(
-                &db,
+                &tx,
                 "operation.updated",
                 operation["sessionId"].as_str(),
                 None,
                 &operation,
             )?;
         }
+        tx.commit()?;
         Ok(Self {
             db: Mutex::new(db),
             server_name: name,
@@ -204,7 +222,11 @@ impl Store {
         project: Option<&str>,
         data: &Value,
     ) -> Result<Value> {
-        let event = json!({"type":ty,"sessionId":session,"projectId":project,"data":data,"createdAt":now()});
+        let epoch: String =
+            db.query_row("SELECT epoch FROM journal_state WHERE id=1", [], |r| {
+                r.get(0)
+            })?;
+        let event = json!({"journalEpoch":epoch,"type":ty,"sessionId":session,"projectId":project,"data":data,"createdAt":now()});
         db.execute("INSERT INTO journal(body) VALUES(?1)", [event.to_string()])?;
         let mut event = event;
         let sequence = db.last_insert_rowid();
@@ -608,7 +630,7 @@ impl Store {
             project_activity(p, &sessions, &interactions);
         }
         Ok(
-            json!({"sequence":sequence,"serverName":self.server_name,"projects":projects,"sessions":sessions,"interactions":interactions,"devices":Self::devices_db(&db)?}),
+            json!({"journalEpoch":db.query_row("SELECT epoch FROM journal_state WHERE id=1", [], |r| r.get::<_, String>(0))?,"sequence":sequence,"serverName":self.server_name,"projects":projects,"sessions":sessions,"interactions":interactions,"devices":Self::devices_db(&db)?}),
         )
     }
     pub fn journal(&self, after: i64, limit: usize) -> Result<Vec<Value>> {
@@ -617,6 +639,10 @@ impl Store {
         // Existing large journals compact incrementally; startup never scans
         // their complete JSON bodies or VACUUMs the user's database.
         Self::compact_journal(&mut db, limit)?;
+        let epoch: String =
+            db.query_row("SELECT epoch FROM journal_state WHERE id=1", [], |r| {
+                r.get(0)
+            })?;
         let mut stmt = db.prepare(
             "SELECT sequence,body FROM journal WHERE sequence>?1 ORDER BY sequence LIMIT ?2",
         )?;
@@ -627,6 +653,15 @@ impl Store {
             let (seq, body) = r?;
             let mut v: Value = serde_json::from_str(&body)?;
             v["sequence"] = json!(seq);
+            v["journalEpoch"] = json!(epoch);
+            if v["type"] == "operation.updated"
+                && (v["data"]["result"]["error"]["code"] == "outcome_unknown"
+                    || v["data"]["result"]["status"] == "unknown")
+            {
+                v["data"]["status"] = json!("unknown");
+                v["data"]["result"]["status"] = json!("unknown");
+                v["data"]["result"]["success"] = json!(false);
+            }
             Ok(v)
         })
         .collect()
@@ -746,6 +781,53 @@ impl Store {
         }
         Ok(())
     }
+    pub(crate) fn refresh_archive_status(&self, expected: &Value, active: bool) -> Result<()> {
+        let id = expected["id"]
+            .as_str()
+            .context("Archive session id missing")?;
+        let mut db = self.db.lock();
+        let tx = db.transaction()?;
+        let body: Option<String> = tx
+            .query_row(
+                "SELECT body FROM objects WHERE kind='session' AND id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(body) = body else { return Ok(()) };
+        let mut session: Value = serde_json::from_str(&body)?;
+        let status = if active { "active-unbridged" } else { "closed" };
+        if session != *expected || session["transport"] != "archive" || session["status"] == status
+        {
+            return Ok(());
+        }
+        session["status"] = json!(status);
+        session["writerConnected"] = json!(false);
+        session["workState"] = json!("disconnected");
+        if !session["journalId"].is_string() {
+            session["journalId"] = session["runtimeSessionId"].clone();
+        }
+        session.as_object_mut().unwrap().remove("runtimeSessionId");
+        session["capabilities"] = if active {
+            json!([])
+        } else {
+            json!(["session.resume"])
+        };
+        tx.execute(
+            "UPDATE objects SET body=?2 WHERE kind='session' AND id=?1",
+            params![id, session.to_string()],
+        )?;
+        Self::append(
+            &tx,
+            "session.updated",
+            Some(id),
+            session["projectId"].as_str(),
+            &session,
+        )?;
+        Self::refresh_projects(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
     pub(crate) fn import_archive(&self, session: &Value, messages: &[Value]) -> Result<String> {
         let id = session["id"]
             .as_str()
@@ -762,10 +844,11 @@ impl Store {
         // so stale archive bytes can never overwrite a newly live owner.
         if let Some(live) = Self::objects(&tx, "session")?.into_iter().find(|saved| {
             saved["transport"] != "archive"
-                && !matches!(
-                    saved["status"].as_str(),
-                    Some("disconnected" | "closed" | "failed")
-                )
+                && (saved["writerConnected"] == true
+                    || !matches!(
+                        saved["status"].as_str(),
+                        Some("disconnected" | "closed" | "failed")
+                    ))
                 && (saved["id"] == id
                     || saved["sessionFile"]
                         .as_str()
@@ -964,11 +1047,15 @@ impl Store {
         let mut db = self.db.lock();
         let tx = db.transaction()?;
         let mut result = result.clone();
-        let status = if result["success"] == true {
-            "succeeded"
-        } else {
-            "failed"
-        };
+        let status =
+            if result["error"]["code"] == "outcome_unknown" || result["status"] == "unknown" {
+                result["success"] = json!(false);
+                "unknown"
+            } else if result["success"] == true {
+                "succeeded"
+            } else {
+                "failed"
+            };
         result["status"] = json!(status);
         if tx.execute(
             "UPDATE commands SET result=?2,status=?3,updated_at=?4 WHERE id=?1 AND result IS NULL",
@@ -1186,7 +1273,7 @@ impl Store {
         )?;
         Ok(())
     }
-    pub fn reconcile_pending_replay(&self, id: &str, session: &str) -> Result<()> {
+    pub fn reconcile_pending_replay(&self, id: &str, session: &str, native: bool) -> Result<bool> {
         let mut db = self.db.lock();
         let tx = db.transaction()?;
         let body: Option<String> = tx
@@ -1196,16 +1283,38 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
-        if let Some(body) = body {
-            let interaction: Value = serde_json::from_str(&body)?;
-            if interaction["sessionId"] == session
-                && interaction["cancellationReason"] == "disconnect"
-            {
-                tx.execute("DELETE FROM claims WHERE id=?1", [id])?;
-            }
+        let Some(body) = body else { return Ok(false) };
+        let mut interaction: Value = serde_json::from_str(&body)?;
+        if interaction["sessionId"] != session
+            || interaction["responseTransport"] != if native { "rpc" } else { "bridge" }
+            || (interaction["status"] != "pending"
+                && !(interaction["status"] == "cancelled"
+                    && interaction["cancellationReason"] == "disconnect"))
+        {
+            return Ok(true);
         }
+        if interaction["cancellationReason"] == "disconnect" {
+            tx.execute("DELETE FROM claims WHERE id=?1", [id])?;
+        }
+        interaction["status"] = json!("pending");
+        interaction
+            .as_object_mut()
+            .unwrap()
+            .remove("cancellationReason");
+        tx.execute(
+            "UPDATE objects SET body=?2 WHERE kind='interaction' AND id=?1",
+            params![id, interaction.to_string()],
+        )?;
+        Self::append(
+            &tx,
+            "interaction.pending",
+            interaction["sessionId"].as_str(),
+            interaction["projectId"].as_str(),
+            &interaction,
+        )?;
+        Self::refresh_projects(&tx)?;
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
     pub fn end_interaction(&self, id: &str, status: &str) -> Result<()> {
         if !matches!(status, "resolved" | "cancelled" | "expired") {
@@ -1222,8 +1331,11 @@ impl Store {
             .optional()?;
         if let Some(body) = body {
             let mut value: Value = serde_json::from_str(&body)?;
-            if value["status"] == "pending" {
+            if value["status"] == "pending"
+                || (value["status"] == "cancelled" && value["cancellationReason"] == "disconnect")
+            {
                 value["status"] = json!(status);
+                value.as_object_mut().unwrap().remove("cancellationReason");
                 tx.execute(
                     "UPDATE objects SET body=?2 WHERE kind='interaction' AND id=?1",
                     params![id, value.to_string()],
@@ -1242,14 +1354,36 @@ impl Store {
         Ok(())
     }
     pub fn cancel_session_interactions(&self, session: &str) -> Result<()> {
-        for mut i in self.list("interaction")? {
-            if i["sessionId"] == session && i["status"] == "pending" {
-                i["status"] = json!("cancelled");
-                i["cancellationReason"] = json!("disconnect");
-                let id = i["id"].as_str().unwrap_or_default();
-                self.put("interaction", id, &i, Some("interaction.resolved"))?;
+        self.cancel_transport_interactions(session, None)
+    }
+    pub fn cancel_transport_interactions(&self, session: &str, native: Option<bool>) -> Result<()> {
+        let mut db = self.db.lock();
+        let tx = db.transaction()?;
+        for mut interaction in Self::objects(&tx, "interaction")? {
+            if interaction["sessionId"] == session
+                && interaction["status"] == "pending"
+                && native.is_none_or(|native| (interaction["responseTransport"] == "rpc") == native)
+            {
+                interaction["status"] = json!("cancelled");
+                interaction["cancellationReason"] = json!("disconnect");
+                let id = interaction["id"]
+                    .as_str()
+                    .context("Interaction id missing")?;
+                tx.execute(
+                    "UPDATE objects SET body=?2 WHERE kind='interaction' AND id=?1",
+                    params![id, interaction.to_string()],
+                )?;
+                Self::append(
+                    &tx,
+                    "interaction.resolved",
+                    interaction["sessionId"].as_str(),
+                    interaction["projectId"].as_str(),
+                    &interaction,
+                )?;
             }
         }
+        Self::refresh_projects(&tx)?;
+        tx.commit()?;
         Ok(())
     }
     pub fn expire_interactions(&self) -> Result<()> {
@@ -1583,6 +1717,73 @@ mod tests {
             "live"
         );
     }
+    #[test]
+    fn archive_status_refresh_cannot_restore_a_stale_owner_snapshot() {
+        let store = store();
+        let archive = json!({"id":"s","transport":"archive","status":"closed","journalId":"native","sessionFile":"/saved/session.jsonl","capabilities":["session.resume"]});
+        store.put("session", "s", &archive, None).unwrap();
+        store.refresh_archive_status(&archive, true).unwrap();
+        let active = store.get("session", "s").unwrap();
+        assert_eq!(active["status"], "active-unbridged");
+        assert_eq!(active["capabilities"], json!([]));
+        let live = json!({"id":"s","transport":"rpc","status":"failed","writerConnected":true,"sessionFile":"/saved/session.jsonl"});
+        store.put("session", "s", &live, None).unwrap();
+        store.refresh_archive_status(&active, false).unwrap();
+        assert_eq!(store.get("session", "s").unwrap(), live);
+    }
+    #[test]
+    fn disconnect_replay_and_late_resolution_preserve_final_decisions() {
+        let store = store();
+        let pending = json!({"id":"q","sessionId":"s","responseTransport":"bridge","status":"pending","title":"Original","expiresAt":"2099-01-01T00:00:00Z"});
+        for outcome in ["resolved", "cancelled", "expired"] {
+            store.put("interaction", "q", &pending, None).unwrap();
+            store
+                .cancel_transport_interactions("s", Some(false))
+                .unwrap();
+            store.end_interaction("q", outcome).unwrap();
+            let settled = store.get("interaction", "q").unwrap();
+            assert_eq!(settled["status"], outcome);
+            assert!(settled.get("cancellationReason").is_none());
+            store.cancel_session_interactions("s").unwrap();
+            assert!(store.reconcile_pending_replay("q", "s", false).unwrap());
+            assert_eq!(store.get("interaction", "q").unwrap(), settled);
+        }
+        store.put("interaction", "q", &pending, None).unwrap();
+        store.claim_interaction("q", "abandoned").unwrap();
+        store.cancel_session_interactions("s").unwrap();
+        store.reconcile_pending_replay("q", "s", true).unwrap();
+        assert_eq!(
+            store.get("interaction", "q").unwrap()["status"],
+            "cancelled"
+        );
+        store.reconcile_pending_replay("q", "s", false).unwrap();
+        assert_eq!(store.get("interaction", "q").unwrap(), pending);
+        store.claim_interaction("q", "next").unwrap();
+        store.reconcile_pending_replay("q", "s", false).unwrap();
+        assert!(store.claim_interaction("q", "duplicate").is_err());
+    }
+    #[test]
+    fn archive_import_preserves_failed_turn_with_connected_writer() {
+        let store = store();
+        let live = json!({"id":"managed","transport":"rpc","status":"failed","writerConnected":true,"sessionFile":"/saved/session.jsonl"});
+        store.put("session", "managed", &live, None).unwrap();
+        store
+            .message(
+                "managed",
+                "live",
+                &json!({"id":"live","content":"authoritative"}),
+            )
+            .unwrap();
+        let archive = json!({"id":"managed","transport":"archive","status":"closed","sessionFile":"/saved/session.jsonl","capabilities":["session.resume"]});
+        store
+            .import_archive(&archive, &[json!({"id":"stale","content":"old bytes"})])
+            .unwrap();
+        assert_eq!(store.get("session", "managed").unwrap(), live);
+        assert_eq!(
+            store.messages("managed", i64::MAX, 50).unwrap()["messages"][0]["id"],
+            "live"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1733,6 +1934,131 @@ mod continuity_tests {
 #[cfg(test)]
 mod operation_memory_search_tests {
     use super::*;
+    #[test]
+    fn finish_command_preserves_unknown_even_when_legacy_caller_labels_failed() {
+        let store = Store::open(Path::new(":memory:"), "test".into()).unwrap();
+        let id = Uuid::new_v4().to_string();
+        let request = json!({"id":id,"action":"session.bash","sessionId":"s"});
+        store.begin_command(&id, &request).unwrap();
+        store.finish_command(&id, &json!({"id":id,"success":false,"status":"failed","error":{"code":"outcome_unknown","message":"No final acknowledgement"}})).unwrap();
+        let operation = store.command_status(&id).unwrap();
+        assert_eq!(operation["status"], "unknown");
+        assert_eq!(operation["result"]["status"], "unknown");
+        assert_eq!(
+            store.begin_command(&id, &request).unwrap().unwrap()["status"],
+            "unknown"
+        );
+        let events = store.journal(0, 100).unwrap();
+        assert_eq!(events.last().unwrap()["data"]["status"], "unknown");
+    }
+    #[test]
+    fn reopen_repairs_legacy_unknown_failure_without_changing_request_or_uuid() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.sqlite");
+        let id = Uuid::new_v4().to_string();
+        let request =
+            json!({"id":id,"action":"session.bash","sessionId":"s","payload":{"command":"once"}});
+        let rejected = Uuid::new_v4().to_string();
+        {
+            let store = Store::open(&path, "test".into()).unwrap();
+            store.begin_command(&id, &request).unwrap();
+            store
+                .begin_command(&rejected, &json!({"id":rejected,"action":"session.bash"}))
+                .unwrap();
+            store.finish_command(&rejected, &json!({"id":rejected,"success":false,"error":{"code":"command_rejected","message":"not admitted"}})).unwrap();
+            let result = json!({"id":id,"success":false,"status":"failed","error":{"code":"outcome_unknown","message":"Accepted but disconnected"}});
+            let db = store.db.lock();
+            db.execute(
+                "UPDATE commands SET status='failed',result=?2 WHERE id=?1",
+                params![id, result.to_string()],
+            )
+            .unwrap();
+            let operation = Store::command_status_db(&db, &id).unwrap();
+            Store::append(&db, "operation.updated", Some("s"), None, &operation).unwrap();
+        }
+        let store = Store::open(&path, "test".into()).unwrap();
+        assert_eq!(store.command_status(&id).unwrap()["status"], "unknown");
+        let replay = store.begin_command(&id, &request).unwrap().unwrap();
+        assert_eq!(replay["id"], id);
+        assert_eq!(replay["status"], "unknown");
+        assert_eq!(replay["error"]["message"], "Accepted but disconnected");
+        assert_eq!(store.command_status(&rejected).unwrap()["status"], "failed");
+        let persisted: (String, String, String) = store
+            .db
+            .lock()
+            .query_row(
+                "SELECT id,request,request_hash FROM commands WHERE id=?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            persisted,
+            (
+                id.clone(),
+                request.to_string(),
+                security::hash(&request.to_string())
+            )
+        );
+        assert!(
+            store
+                .journal(0, 100)
+                .unwrap()
+                .iter()
+                .filter(|e| e["data"]["result"]["error"]["code"] == "outcome_unknown")
+                .all(|e| e["data"]["status"] == "unknown"
+                    && e["data"]["result"]["status"] == "unknown")
+        );
+        let sequence = store.snapshot().unwrap()["sequence"].clone();
+        drop(store);
+        let reopened = Store::open(&path, "test".into()).unwrap();
+        assert_eq!(
+            reopened.begin_command(&id, &request).unwrap().unwrap(),
+            replay
+        );
+        assert_eq!(reopened.snapshot().unwrap()["sequence"], sequence);
+    }
+    #[test]
+    fn journal_epoch_survives_reopen_and_decorates_legacy_and_new_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.sqlite");
+        let store = Store::open(&path, "test".into()).unwrap();
+        let epoch = store.snapshot().unwrap()["journalEpoch"].clone();
+        Uuid::parse_str(epoch.as_str().expect("snapshot journalEpoch")).unwrap();
+        let raw =
+            json!({"type":"session.event","sessionId":"s","data":{"type":"legacy"}}).to_string();
+        store
+            .db
+            .lock()
+            .execute("INSERT INTO journal(body) VALUES(?1)", [&raw])
+            .unwrap();
+        let appended = store
+            .event("session.event", Some("s"), None, &json!({"type":"new"}))
+            .unwrap();
+        assert_eq!(appended["journalEpoch"], epoch);
+        let events = store.journal(0, 100).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event["journalEpoch"] == epoch));
+        assert_eq!(events[1], appended);
+        let unchanged: String = store
+            .db
+            .lock()
+            .query_row("SELECT body FROM journal WHERE sequence=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(unchanged, raw);
+        drop(store);
+        let reopened = Store::open(&path, "test".into()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap()["journalEpoch"], epoch);
+        assert!(
+            reopened
+                .journal(0, 100)
+                .unwrap()
+                .iter()
+                .all(|event| event["journalEpoch"] == epoch)
+        );
+    }
     #[test]
     fn restart_marks_running_unknown_and_never_replays_uuid() {
         let tmp = tempfile::tempdir().unwrap();

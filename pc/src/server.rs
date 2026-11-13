@@ -560,7 +560,13 @@ where
                 let result = match outcome {
                     Ok(data) => json!({"id":id,"success":true,"status":"succeeded","data":data}),
                     Err(error) => {
-                        json!({"id":id,"success":false,"status":"failed","error":{"code":crate::runtime::error_code(&error),"message":error.to_string()}})
+                        let code = crate::runtime::error_code(&error);
+                        let status = if code == "outcome_unknown" {
+                            "unknown"
+                        } else {
+                            "failed"
+                        };
+                        json!({"id":id,"success":false,"status":status,"error":{"code":code,"message":error.to_string()}})
                     }
                 };
                 app.store.finish_command(&id, &result)?;
@@ -634,7 +640,7 @@ async fn replay_events(app: Arc<App>, sender: tokio::sync::mpsc::Sender<Message>
             if cursor > sequence {
                 cursor = 0;
             } else if sequence == cursor {
-                let event = json!({"sequence":sequence,"type":"snapshot","data":snapshot,"createdAt":crate::store::now()});
+                let event = json!({"journalEpoch":snapshot["journalEpoch"],"sequence":sequence,"type":"snapshot","data":snapshot,"createdAt":crate::store::now()});
                 if sender
                     .send(Message::Text(event.to_string().into()))
                     .await
@@ -856,11 +862,42 @@ mod pairing_tests {
 #[cfg(test)]
 mod operation_lifetime_tests {
     use super::*;
+    #[tokio::test]
+    async fn websocket_replay_and_snapshot_share_journal_epoch() {
+        let app = app();
+        let expected = app.store.snapshot().unwrap()["journalEpoch"].clone();
+        assert!(
+            expected.is_string(),
+            "snapshot journalEpoch must be present"
+        );
+        app.store
+            .event("session.event", Some("s"), None, &json!({"type":"saved"}))
+            .unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let task = tokio::spawn(replay_events(app, sender, 0));
+        for expected_type in ["session.event", "snapshot"] {
+            let message = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected text event")
+            };
+            let event: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(event["type"], expected_type);
+            assert_eq!(event["journalEpoch"], expected);
+            if expected_type == "snapshot" {
+                assert_eq!(event["data"]["journalEpoch"], expected);
+            }
+        }
+        task.abort();
+    }
     fn app() -> Arc<App> {
+        app_at(std::path::Path::new(":memory:"))
+    }
+    fn app_at(path: &std::path::Path) -> Arc<App> {
         App::new(
-            Arc::new(
-                crate::store::Store::open(std::path::Path::new(":memory:"), "test".into()).unwrap(),
-            ),
+            Arc::new(crate::store::Store::open(path, "test".into()).unwrap()),
             crate::runtime::RuntimeConfig {
                 state_dir: Default::default(),
                 omp: Default::default(),
@@ -908,6 +945,88 @@ mod operation_lifetime_tests {
         assert_eq!(
             app.store.command_output_page(&id, 0, 10).unwrap()["items"][0]["text"],
             "finished after disconnect"
+        );
+    }
+    #[tokio::test]
+    async fn runtime_unknown_is_durable_and_same_uuid_never_reexecutes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.sqlite");
+        let app = app_at(&path);
+        let id = uuid::Uuid::new_v4().to_string();
+        let request = json!({"id":id,"action":"session.bash","sessionId":"s"});
+        app.store.begin_command(&id, &request).unwrap();
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = executions.clone();
+        let result = spawn_command(app.clone(), id.clone(), async move {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(crate::runtime::CommandError {
+                code: "outcome_unknown".into(),
+                message: "Writer disconnected after accepting work".into(),
+            }
+            .into())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["status"], "unknown");
+        assert_eq!(result["error"]["code"], "outcome_unknown");
+        assert_eq!(
+            command_response(result.clone()).status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(app.store.command_status(&id).unwrap()["status"], "unknown");
+        assert_eq!(app.store.command_status(&id).unwrap()["result"], result);
+        let replay = command(State(app.clone()), Json(request.clone()))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(replay.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), result);
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(app);
+        let reopened = app_at(&path);
+        assert_eq!(
+            reopened.store.command_status(&id).unwrap()["status"],
+            "unknown"
+        );
+        assert_eq!(
+            reopened
+                .store
+                .begin_command(&id, &request)
+                .unwrap()
+                .unwrap(),
+            result
+        );
+        let replay = command(State(reopened), Json(request)).await.unwrap();
+        let body = axum::body::to_bytes(replay.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), result);
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn definitive_command_rejection_remains_failed() {
+        let app = app();
+        let id = uuid::Uuid::new_v4().to_string();
+        let request = json!({"id":id,"action":"session.bash"});
+        app.store.begin_command(&id, &request).unwrap();
+        let result = spawn_command(app.clone(), id.clone(), async {
+            Err(crate::runtime::CommandError {
+                code: "command_rejected".into(),
+                message: "Command was not admitted".into(),
+            }
+            .into())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["status"], "failed");
+        assert_eq!(app.store.command_status(&id).unwrap()["status"], "failed");
+        assert_eq!(
+            app.store.begin_command(&id, &request).unwrap().unwrap(),
+            result
         );
     }
     #[tokio::test]

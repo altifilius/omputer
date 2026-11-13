@@ -81,6 +81,7 @@ pub struct App {
     revisions: Mutex<HashMap<String, u64>>,
     notifications: Mutex<HashMap<String, (bool, std::time::Instant)>>,
     starting: tokio::sync::Mutex<()>,
+    pub(crate) maintenance: tokio::sync::Mutex<()>,
     managed_children: Mutex<HashSet<String>>,
     update_pending: AtomicBool,
     admitted_commands: AtomicUsize,
@@ -98,6 +99,7 @@ impl App {
             revisions: Mutex::new(HashMap::new()),
             notifications: Mutex::new(HashMap::new()),
             starting: tokio::sync::Mutex::new(()),
+            maintenance: tokio::sync::Mutex::new(()),
             managed_children: Mutex::new(HashSet::new()),
             update_pending: AtomicBool::new(false),
             admitted_commands: AtomicUsize::new(0),
@@ -319,6 +321,9 @@ impl App {
         self.update_pending.store(false, Ordering::SeqCst);
         result
     }
+    pub(crate) fn update_prepared(&self) -> bool {
+        self.update_pending.load(Ordering::SeqCst)
+    }
     pub async fn prepare_update(&self) -> Result<Value> {
         let _guard = self.starting.lock().await;
         if self
@@ -410,22 +415,8 @@ impl App {
         Ok(reply["data"].clone())
     }
     fn cancel_transport_interactions(&self, session: &str, native: bool) -> Result<()> {
-        for mut interaction in self.store.list("interaction")? {
-            if interaction["sessionId"] == session
-                && interaction["status"] == "pending"
-                && (interaction["responseTransport"] == "rpc") == native
-            {
-                interaction["status"] = json!("cancelled");
-                interaction["cancellationReason"] = json!("disconnect");
-                self.store.put(
-                    "interaction",
-                    required(&interaction, "id")?,
-                    &interaction,
-                    Some("interaction.resolved"),
-                )?;
-            }
-        }
-        Ok(())
+        self.store
+            .cancel_transport_interactions(session, Some(native))
     }
     fn fail_pending(&self, session: &str, bridge: bool) {
         self.responses
@@ -1385,7 +1376,10 @@ impl App {
                     {
                         if let Err(error) = self.apply_control_state(session, previous, state) {
                             frame = json!({"type":"response","success":false,"error":{"code":error_code(&error),"message":error.to_string()}});
-                        } else if let Some(messages) = frame["data"]["_omputerMessages"].as_array()
+                        } else if let Some(messages) = frame["data"]
+                            .get("_omputerMessages")
+                            .or(frame.get("_omputerMessages"))
+                            .and_then(Value::as_array)
                         {
                             let views = messages
                                 .iter()
@@ -1714,21 +1708,7 @@ impl App {
     fn interaction(&self, id: &str, request: &Value, native: bool) -> Result<()> {
         let session = self.store.get("session", id)?;
         let rid = required(request, "id")?;
-        if let Ok(previous) = self.store.get("interaction", rid) {
-            // Identity, provenance and deadline are immutable while a host still waits.
-            if previous["sessionId"] != id
-                || previous["responseTransport"] != if native { "rpc" } else { "bridge" }
-                || (previous["status"] != "pending"
-                    && previous["cancellationReason"] != "disconnect")
-            {
-                return Ok(());
-            }
-            self.store.reconcile_pending_replay(rid, id)?;
-            let mut replay = previous;
-            replay["status"] = json!("pending");
-            replay.as_object_mut().unwrap().remove("cancellationReason");
-            self.store
-                .put("interaction", rid, &replay, Some("interaction.pending"))?;
+        if self.store.reconcile_pending_replay(rid, id, native)? {
             return Ok(());
         }
         let mut interaction = json!({"id":rid,"sessionId":id,"projectId":session["projectId"],"method":request["method"],"title":request["title"].as_str().unwrap_or("OMP question"),"createdAt":request["createdAt"].as_str().unwrap_or(&now()),"status":"pending"});
@@ -2023,15 +2003,19 @@ impl App {
             tx.send(json!({"type":"registered","sessionId":id,"projectId":project["id"],"memoryRevision":project["memoryRevision"].as_u64().unwrap_or(0),"bindingRevision":generation}))
                 .await?;
             self.apply_state(&id, raw, true)?;
+            let mut decoder = rpc_transport::Decoder::default();
             loop {
                 let next = tokio::select! {
-                    line = rpc_transport::line(&mut reader, rpc_transport::LOGICAL_BYTES) => line?,
+                    line = rpc_transport::line(&mut reader, rpc_transport::FRAME_BYTES) => line?,
                     _ = &mut writer_failed_rx => bail!("Bridge command writer disconnected"),
                 };
                 let Some(line) = next else {
                     break;
                 };
-                let frame: Value = serde_json::from_str(&line)?;
+                let raw: Value = serde_json::from_str(&line)?;
+                let Some(frame) = decoder.push(raw)? else {
+                    continue;
+                };
                 if frame
                     .get("sessionId")
                     .is_some_and(|sid| sid.as_str() != Some(id.as_str()))
@@ -2040,6 +2024,7 @@ impl App {
                 }
                 self.frame(&id, frame, true).await?;
             }
+            decoder.finish()?;
             Ok(())
         }
         .await;
@@ -2573,6 +2558,41 @@ mod tests {
             .unwrap_err();
         assert_eq!(error_code(&result), "outcome_unknown");
     }
+    #[tokio::test]
+    async fn acknowledged_answer_survives_disconnect_before_command_completion() {
+        let app = app();
+        app.interaction("s", &ask(), false).unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        app.links.lock().entry("s".into()).or_default().bridge = Some(tx);
+        let worker = app.clone();
+        let call = tokio::spawn(async move {
+            worker
+                .command(&json!({"id":Uuid::new_v4().to_string(),"action":"interaction.respond","payload":submitted()}))
+                .await
+        });
+        let frame = rx.recv().await.unwrap();
+        app.frame(
+            "s",
+            json!({"type":"response","id":frame["id"],"success":true,"data":{"accepted":true}}),
+            true,
+        )
+        .await
+        .unwrap();
+        // The reader can observe EOF before the awakened command worker runs.
+        app.fail_pending("s", true);
+        app.cancel_transport_interactions("s", false).unwrap();
+        assert_eq!(call.await.unwrap().unwrap()["accepted"], true);
+        assert_eq!(
+            app.store.get("interaction", "q").unwrap()["status"],
+            "resolved"
+        );
+        app.interaction("s", &ask(), false).unwrap();
+        assert_eq!(
+            app.store.get("interaction", "q").unwrap()["status"],
+            "resolved"
+        );
+        assert!(app.store.claim_interaction("q", "another-answer").is_err());
+    }
     #[test]
     fn disconnect_pending_replay_clears_abandoned_claim_only() {
         let app = app();
@@ -2907,6 +2927,90 @@ mod tests {
         assert_eq!(app.store.list("session").unwrap().len(), 1);
         let error = app.command(&json!({"id":"stale","sessionId":"s","action":"session.control","payload":{"expectedJournalId":"journal-original","expectedBindingRevision":"binding-one"}})).await.unwrap_err();
         assert_eq!(error_code(&error), "stale_identity");
+    }
+    #[tokio::test]
+    async fn bridge_chunk_completion_preserves_large_utf8_history_before_control_acknowledgement() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::write(root.join("bridge.token"), "private-test-token").unwrap();
+        let original = root.join("original.jsonl");
+        let branch = root.join("branch.jsonl");
+        for (file, journal) in [(&original, "original"), (&branch, "branched")] {
+            std::fs::write(
+                file,
+                format!("{}\n", json!({"type":"session","id":journal,"cwd":root})),
+            )
+            .unwrap();
+        }
+        let store = app().store.clone();
+        let project = store.register_project(&root, None).unwrap();
+        store.put("session", "s", &json!({"id":"s","projectId":project["id"],"cwd":root,"journalId":"original","sessionFile":original,"transport":"bridge","todos":[]}), None).unwrap();
+        store.replace_messages("s", &[json!({"id":"old-message","role":"user","content":[{"type":"text","text":"old history"}]})]).unwrap();
+        let app = App::new(
+            store,
+            RuntimeConfig {
+                state_dir: root.clone(),
+                omp: PathBuf::new(),
+                bridge: PathBuf::new(),
+            },
+        );
+        let (client, server) = UnixStream::pair().unwrap();
+        let worker = app.clone();
+        let connection = tokio::spawn(async move { worker.bridge_connection(server).await });
+        let (read, mut write) = client.into_split();
+        let mut reader = BufReader::new(read);
+        let registration = json!({"type":"register","token":"private-test-token","session":{"id":"s","journalId":"original","cwd":root,"sessionFile":original,"status":"idle","capabilities":["session.controls","session.control"]}});
+        write
+            .write_all(format!("{registration}\n").as_bytes())
+            .await
+            .unwrap();
+        let registered: Value = serde_json::from_str(
+            &rpc_transport::line(&mut reader, rpc_transport::FRAME_BYTES)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let worker = app.clone();
+        let call = tokio::spawn(async move {
+            worker.command(&json!({"id":"durable-branch","sessionId":"s","action":"session.control","payload":{"control":"branch","arguments":{"entryId":"entry"},"expectedJournalId":"original","expectedBindingRevision":registered["bindingRevision"]}})).await
+        });
+        let request: Value = serde_json::from_str(
+            &rpc_transport::line(&mut reader, rpc_transport::FRAME_BYTES)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let text = "ş🦀".repeat(3 * 1024 * 1024);
+        let response = json!({"type":"response","id":request["id"],"success":true,"data":{"branched":true,"_omputerState":{"journalId":"branched","sessionFile":branch,"cwd":root,"leafId":"next-leaf","status":"idle"},"_omputerMessages":[{"role":"user","_entryId":"new-message","content":text}]}});
+        let bytes = serde_json::to_vec(&response).unwrap();
+        assert!(bytes.len() > 16 * 1024 * 1024);
+        let count = bytes.len().div_ceil(256 * 1024);
+        for (index, part) in bytes.chunks(256 * 1024).enumerate() {
+            let chunk = json!({"type":"rpc_chunk","chunkId":"bridge-test","index":index,"count":count,"byteLength":bytes.len(),"data":STANDARD.encode(part)});
+            write
+                .write_all(format!("{chunk}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .expect("chunked bridge completion was never acknowledged")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["branched"], true);
+        let messages = app.store.messages("s", i64::MAX, 10).unwrap();
+        assert_eq!(messages["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(messages["messages"][0]["content"][0]["text"], text);
+        assert_eq!(
+            app.store.get("session", "s").unwrap()["journalId"],
+            "branched"
+        );
+        drop(write);
+        drop(reader);
+        connection.await.unwrap().unwrap();
     }
     #[tokio::test]
     async fn idle_close_refuses_external_writer_before_signalling_any_managed_child() {

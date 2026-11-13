@@ -436,7 +436,9 @@ pub fn recover_interrupted_restore(state: &Path) -> Result<()> {
             )),
         )?;
     }
-    fs::remove_file(state.join("restore.cutover"))?;
+    if state.join("restore.cutover").exists() {
+        fs::remove_file(state.join("restore.cutover"))?;
+    }
     File::open(state)?.sync_all()?;
     Ok(())
 }
@@ -500,6 +502,10 @@ pub fn apply_pending_restore(state: &Path) -> Result<bool> {
         copy(&root.join("omputer.sqlite"), &staged, MAX_TOTAL)?;
         let mut db = Connection::open(&staged)?;
         let tx = db.transaction()?;
+        // A restored history is a new generation, not a lower cursor in the old one.
+        // Rotate only the staged image so rollback preserves the live generation.
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS journal_state(id INTEGER PRIMARY KEY CHECK(id=1),epoch TEXT NOT NULL);")?;
+        tx.execute("INSERT INTO journal_state(id,epoch) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET epoch=excluded.epoch", [uuid::Uuid::new_v4().to_string()])?;
         for entry in &manifest.entries {
             if let Some(source) = &entry.source {
                 let destination = journals.join(&entry.path);
@@ -872,6 +878,118 @@ mod tests {
         assert!(revoked.is_some());
     }
     #[test]
+    fn older_restore_rotates_epoch_with_lower_watermark_and_preserves_identity() {
+        let (temp, app) = fixture();
+        let identity_before = identity(temp.path()).unwrap();
+        let device = app.store.issue_device("test").unwrap();
+        let command_id = uuid::Uuid::new_v4().to_string();
+        let request = json!({"id":command_id,"action":"session.bash","sessionId":"s"});
+        app.store.begin_command(&command_id, &request).unwrap();
+        app.store
+            .event("session.event", Some("s"), None, &json!({"type":"saved"}))
+            .unwrap();
+        let saved = app.store.snapshot().unwrap();
+        let epoch = saved["journalEpoch"]
+            .as_str()
+            .expect("saved journalEpoch")
+            .to_owned();
+        let backup = create(&app).unwrap();
+        for index in 0..4 {
+            app.store
+                .event(
+                    "session.event",
+                    Some("s"),
+                    None,
+                    &json!({"type":"later","index":index}),
+                )
+                .unwrap();
+        }
+        let latest = app.store.snapshot().unwrap()["sequence"].as_i64().unwrap();
+        drop(app);
+        schedule_restore(temp.path(), backup["id"].as_str().unwrap()).unwrap();
+        assert!(apply_pending_restore(temp.path()).unwrap());
+        let store =
+            crate::store::Store::open(&temp.path().join("omputer.sqlite"), "PC".into()).unwrap();
+        let restored = store.snapshot().unwrap();
+        assert!(restored["sequence"].as_i64().unwrap() < latest);
+        assert!(saved["sequence"].as_i64().unwrap() < latest);
+        assert_ne!(restored["journalEpoch"], epoch);
+        uuid::Uuid::parse_str(restored["journalEpoch"].as_str().unwrap()).unwrap();
+        assert!(
+            store
+                .journal(0, 100)
+                .unwrap()
+                .iter()
+                .all(|event| event["journalEpoch"] == restored["journalEpoch"])
+        );
+        let event = store
+            .event(
+                "session.event",
+                Some("s"),
+                None,
+                &json!({"type":"restored"}),
+            )
+            .unwrap();
+        assert_eq!(event["journalEpoch"], restored["journalEpoch"]);
+        assert_eq!(
+            store.begin_command(&command_id, &request).unwrap().unwrap()["status"],
+            "unknown"
+        );
+        assert_eq!(identity(temp.path()).unwrap(), identity_before);
+        assert!(
+            store.snapshot().unwrap()["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == device["deviceId"])
+        );
+        drop(store);
+        finish_restore(temp.path(), true).unwrap();
+        let reopened =
+            crate::store::Store::open(&temp.path().join("omputer.sqlite"), "PC".into()).unwrap();
+        assert_eq!(
+            reopened.snapshot().unwrap()["journalEpoch"],
+            restored["journalEpoch"]
+        );
+    }
+    #[test]
+    fn failed_restore_rolls_back_without_mutating_live_epoch_or_watermark() {
+        let (temp, app) = fixture();
+        let backup = create(&app).unwrap();
+        app.store
+            .event("session.event", Some("s"), None, &json!({"type":"latest"}))
+            .unwrap();
+        let live = app.store.snapshot().unwrap();
+        let live_epoch = live["journalEpoch"]
+            .as_str()
+            .expect("live journalEpoch")
+            .to_owned();
+        drop(app);
+        schedule_restore(temp.path(), backup["id"].as_str().unwrap()).unwrap();
+        apply_pending_restore(temp.path()).unwrap();
+        {
+            let staged =
+                crate::store::Store::open(&temp.path().join("omputer.sqlite"), "PC".into())
+                    .unwrap();
+            assert_ne!(staged.snapshot().unwrap()["journalEpoch"], live_epoch);
+        }
+        finish_restore(temp.path(), false).unwrap();
+        let rolled_back =
+            crate::store::Store::open(&temp.path().join("omputer.sqlite"), "PC".into()).unwrap();
+        assert_eq!(rolled_back.snapshot().unwrap()["journalEpoch"], live_epoch);
+        assert_eq!(
+            rolled_back.snapshot().unwrap()["sequence"],
+            live["sequence"]
+        );
+        assert!(
+            rolled_back
+                .journal(0, 100)
+                .unwrap()
+                .iter()
+                .all(|event| event["journalEpoch"] == live_epoch)
+        );
+    }
+    #[test]
     fn rollback_after_failed_migration_retains_both_databases() {
         let (temp, app) = fixture();
         let value = create(&app).unwrap();
@@ -898,6 +1016,40 @@ mod tests {
         assert!(integrity(&temp.path().join("omputer.sqlite")).is_ok());
         assert!(!temp.path().join("restore.request").exists());
     }
+    #[test]
+    fn interrupted_restore_after_database_cutover_recovers_and_allows_startup() {
+        let (temp, app) = fixture();
+        let backup = create(&app).unwrap();
+        app.store
+            .put(
+                "project",
+                "current",
+                &json!({"id":"current","summary":"Work after the backup"}),
+                None,
+            )
+            .unwrap();
+        let live = app.store.snapshot().unwrap();
+        drop(app);
+        schedule_restore(temp.path(), backup["id"].as_str().unwrap()).unwrap();
+        apply_pending_restore(temp.path()).unwrap();
+
+        recover_interrupted_restore(temp.path()).unwrap();
+        let restored =
+            crate::store::Store::open(&temp.path().join("omputer.sqlite"), "PC".into()).unwrap();
+        assert_eq!(
+            restored.snapshot().unwrap()["journalEpoch"],
+            live["journalEpoch"]
+        );
+        assert_eq!(
+            restored.get("project", "current").unwrap()["summary"],
+            "Work after the backup"
+        );
+        assert!(!temp.path().join("restore.cutover").exists());
+        assert!(!temp.path().join("restore.request").exists());
+        assert!(!apply_pending_restore(temp.path()).unwrap());
+        recover_interrupted_restore(temp.path()).unwrap();
+    }
+
     #[test]
     fn restore_clones_saved_journals_without_overwriting_sources() {
         let (temp, app) = fixture();

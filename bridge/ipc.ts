@@ -2,7 +2,7 @@ import { createConnection, type Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { lstat, open } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { WireFrame } from './wire';
+import { CHUNK_BYTES, FRAME_BYTES, LOGICAL_BYTES, encodeFrame, type EncodedFrame, type WireFrame } from './wire';
 
 /** Best-effort observability; callers replay durable state and command outcomes after registration. */
 export class LocalBridge {
@@ -12,6 +12,11 @@ export class LocalBridge {
   private connecting = false;
   private generation = 0;
   private delay = 250;
+  private queue: { frame: EncodedFrame; complete?: (sent: boolean) => void }[] = [];
+  private queuedBytes = 0;
+  private writing = false;
+  private capacity?: () => void;
+  private reliableWaiting = false;
   ready = false;
   private requests = new Map<string, { resolve: (frame: WireFrame) => void; reject: (error: Error) => void }>();
   async request(frame: WireFrame, signal?: AbortSignal): Promise<WireFrame> {
@@ -51,14 +56,90 @@ export class LocalBridge {
   send(frame: WireFrame): boolean {
     if (!this.ready || !this.socket || this.socket.destroyed) return false;
     try {
-      const data = JSON.stringify(frame) + '\n';
-      if (this.socket.writableLength + Buffer.byteLength(data) > 16 * 1024 * 1024) {
-        this.socket.destroy(new Error('Omputer socket backpressure limit reached'));
-        return false;
+      const sent = this.enqueue(encodeFrame(frame));
+      if (!sent && (frame.type === 'interaction' || frame.type === 'interaction_end')) this.socket.destroy(new Error('Omputer interaction queue overflow; reconnecting for authoritative replay'));
+      return sent;
+    }
+    catch (error) { this.report(error); return false; }
+  }
+  /** The extension serializes durable replay; at most one logical frame waits outside the queue. */
+  async sendEncoded(frame: EncodedFrame): Promise<boolean> {
+    if (this.reliableWaiting || frame.bytes.length > LOGICAL_BYTES) return false;
+    this.reliableWaiting = true;
+    const socket = this.socket;
+    try {
+      while (this.ready && socket === this.socket && socket && !socket.destroyed) {
+        if (this.queuedBytes + frame.bytes.length <= LOGICAL_BYTES + FRAME_BYTES && this.queue.length < 1024) {
+          const completed = Promise.withResolvers<boolean>();
+          if (!this.enqueue(frame, completed.resolve)) return false;
+          return await completed.promise;
+        }
+        const available = Promise.withResolvers<void>();
+        this.capacity = available.resolve;
+        await available.promise;
       }
-      this.socket.write(data);
-      return true;
-    } catch (error) { this.failed(error); return false; }
+      return false;
+    } finally { this.reliableWaiting = false; }
+  }
+  private enqueue(frame: EncodedFrame, complete?: (sent: boolean) => void): boolean {
+    if (!this.ready || !this.socket || this.socket.destroyed || frame.bytes.length > LOGICAL_BYTES ||
+        this.queuedBytes + frame.bytes.length > LOGICAL_BYTES + FRAME_BYTES || this.queue.length >= 1024) return false;
+    this.queue.push({ frame, complete });
+    this.queuedBytes += frame.bytes.length;
+    if (!this.writing) void this.writeQueue(this.socket);
+    return true;
+  }
+  private async writeQueue(socket: Socket): Promise<void> {
+    this.writing = true;
+    try {
+      while (socket === this.socket && !socket.destroyed && this.queue.length) {
+        const item = this.queue[0];
+        const bytes = item.frame.bytes;
+        if (bytes.length + 1 <= FRAME_BYTES) await this.write(socket, Buffer.concat([bytes, Buffer.from('\n')]));
+        else {
+          const chunkId = randomUUID();
+          const count = Math.ceil(bytes.length / CHUNK_BYTES);
+          for (let index = 0; index < count; index++) {
+            const data = bytes.subarray(index * CHUNK_BYTES, (index + 1) * CHUNK_BYTES).toString('base64');
+            await this.write(socket, JSON.stringify({ type: 'rpc_chunk', chunkId, index, count, byteLength: bytes.length, data }) + '\n');
+          }
+        }
+        if (socket !== this.socket) return;
+        this.queue.shift();
+        this.queuedBytes -= bytes.length;
+        item.complete?.(true);
+        this.capacity?.(); this.capacity = undefined;
+      }
+    } catch (error) {
+      if (socket === this.socket && !this.stopped) { this.report(error); socket.destroy(); }
+    } finally {
+      if (socket === this.socket) this.writing = false;
+    }
+  }
+  private async write(socket: Socket, bytes: string | Buffer): Promise<void> {
+    if (socket !== this.socket || socket.destroyed) throw new Error('Omputer bridge closed during write');
+    const completed = Promise.withResolvers<void>();
+    let flushed = false;
+    let drained = false;
+    const finish = () => { if (flushed && drained) completed.resolve(); };
+    const drain = () => { drained = true; finish(); };
+    const close = () => completed.reject(new Error('Omputer bridge closed during write'));
+    const error = (failure: Error) => completed.reject(failure);
+    socket.once('drain', drain); socket.once('close', close); socket.once('error', error);
+    try {
+      drained = socket.write(bytes, failure => {
+        if (failure) completed.reject(failure);
+        else { flushed = true; finish(); }
+      });
+      await completed.promise;
+    } finally {
+      socket.off('drain', drain); socket.off('close', close); socket.off('error', error);
+    }
+  }
+  private clearQueue(): void {
+    for (const item of this.queue) item.complete?.(false);
+    this.queue = []; this.queuedBytes = 0; this.writing = false;
+    this.capacity?.(); this.capacity = undefined;
   }
   stop(): void {
     this.stopped = true;
@@ -67,6 +148,7 @@ export class LocalBridge {
     this.socket = undefined;
     this.ready = false;
     this.rejectRequests();
+    this.clearQueue();
   }
   private failed(error: unknown): void {
     this.report(error);
@@ -138,6 +220,7 @@ export class LocalBridge {
         if (generation !== this.generation) return;
         const wasReady = this.ready;
         this.socket = undefined; this.ready = false;
+        this.clearQueue();
         this.rejectRequests();
         if (wasReady) { try { this.disconnected(); } catch (error) { this.report(error); } }
         this.schedule();
