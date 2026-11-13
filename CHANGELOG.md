@@ -1,5 +1,13 @@
 # Changelog
 
+## Bridge 1.1.2 — HTML-form questions from terminal OMP
+
+- Route modern terminal `formDialog` asks through OMP's canonical field walker while the local bridge is connected, using existing Inbox select/input/editor interactions. Preserve original form behavior offline and leave managed RPC unchanged.
+- Keep HTML parsing, submitted values, constraints, defaults, Other and multi-selection in the host runtime; no HTML renderer, remote resources or new phone permissions.
+- Restore the original optional form surface on teardown and disconnect. Already-loaded terminal extensions require a normal safe `/restart` or close/resume; conversation reload alone does not reload code.
+
+Ten targeted bridge/lifecycle tests passed. Real installed OMP18.20.0 AskTool preserved a radio value and numeric input; a separate real-socket physical-phone round trip returned `{"delivery":"received"}` to the same host AskTool. Android APK and daemon binary were not rebuilt for the installed bridge hotfix. Whole-form preview/option notes are intentionally not available in the canonical field-by-field route.
+
 ## Android 1.2.10 (19) — larger Sisyphus before project names
 
 - Move the working project-card GIF from the continuation preview's trailing edge to the start of the heading, enlarged from40dp to64dp with12dp before the project name.

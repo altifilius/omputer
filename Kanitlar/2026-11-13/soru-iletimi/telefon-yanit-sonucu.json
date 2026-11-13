@@ -1,0 +1,20 @@
+{
+  "version": "18.20.0",
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "User answers:\n{\n  \"delivery\": \"received\"\n}"
+      }
+    ],
+    "details": {
+      "answers": [
+        {
+          "name": "delivery",
+          "question": "Telefon bağlantısı",
+          "answer": "Telefona ulaştı"
+        }
+      ]
+    }
+  }
+}

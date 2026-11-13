@@ -74,6 +74,23 @@ export class DialogBridge {
         if (descriptor) Object.defineProperty(ui, method, descriptor); else Reflect.deleteProperty(ui, method);
       });
     }
+    // Modern OMP asks use formDialog instead of askDialog. Its canonical field
+    // walker preserves values, constraints, defaults and cancellation through the
+    // select/input/editor methods above; do not reimplement HTML in the bridge.
+    // Keep the full terminal form when IPC is unavailable, and leave managed RPC
+    // surfaces to their native controller. Never invent a missing host method.
+    if (!this.managed) {
+      const original = underlyingMethod(ui, 'formDialog');
+      if (original) {
+        const descriptor = Object.getOwnPropertyDescriptor(ui, 'formDialog');
+        const get = () => installation.active && this.isReady() ? undefined : original;
+        Object.defineProperty(ui, 'formDialog', { get, configurable: true, enumerable: true });
+        this.restore.push(() => {
+          if (Object.getOwnPropertyDescriptor(ui, 'formDialog')?.get !== get) return;
+          if (descriptor) Object.defineProperty(ui, 'formDialog', descriptor); else Reflect.deleteProperty(ui, 'formDialog');
+        });
+      }
+    }
     const notify = underlyingMethod(ui, 'notify');
     if (notify) {
       const descriptor = Object.getOwnPropertyDescriptor(ui, 'notify');

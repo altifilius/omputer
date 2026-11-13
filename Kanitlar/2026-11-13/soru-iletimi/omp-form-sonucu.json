@@ -1,0 +1,46 @@
+{
+  "version": "18.20.0",
+  "received": [
+    {
+      "method": "select",
+      "title": "Yalnız yerel form aktarımı sınaması\n\nSeçim",
+      "options": [
+        {
+          "label": "Bir"
+        },
+        {
+          "label": "İki"
+        },
+        {
+          "label": "Other (type your own)"
+        }
+      ]
+    },
+    {
+      "method": "editor",
+      "title": "Deneme sayısı"
+    }
+  ],
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "User answers:\n{\n  \"choice\": \"two\",\n  \"count\": 7\n}"
+      }
+    ],
+    "details": {
+      "answers": [
+        {
+          "name": "choice",
+          "question": "Seçim",
+          "answer": "İki"
+        },
+        {
+          "name": "count",
+          "question": "Deneme sayısı",
+          "answer": "7"
+        }
+      ]
+    }
+  }
+}

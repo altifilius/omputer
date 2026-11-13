@@ -157,4 +157,41 @@ describe('DialogBridge ownership and first answer', () => {
       expect(() => f.bridge.respond({ interactionId: request.id, answer })).toThrow('Question is no longer pending');
     } finally { f.bridge.close(); }
   });
+
+  test('HTML forms use the host field walker only while the terminal bridge is ready', async () => {
+    let ready = false;
+    const frames: WireFrame[] = [];
+    let localForms = 0;
+    const original = async () => { localForms++; return { data: { color: 'blue' } }; };
+    const ui = { formDialog: original, select: async () => undefined } as unknown as ExtensionUIContext & { formDialog?: typeof original };
+    const bridge = new DialogBridge(() => 'session', frame => { frames.push(frame); return true; }, () => ready, false, () => {});
+    const descriptor = Object.getOwnPropertyDescriptor(ui, 'formDialog');
+    bridge.install(ui);
+    try {
+      expect(await ui.formDialog!()).toEqual({ data: { color: 'blue' } });
+      ready = true;
+      expect(ui.formDialog).toBeUndefined();
+      const selected = ui.select('Renk?', ['Mavi', 'Yeşil']);
+      const request = frames[0].request as WireFrame;
+      bridge.respond({ interactionId: request.id, value: 'Yeşil' });
+      expect(await selected).toBe('Yeşil');
+      ready = false;
+      expect(await ui.formDialog!()).toEqual({ data: { color: 'blue' } });
+      expect(localForms).toBe(2);
+    } finally { bridge.close(); }
+    expect(Object.getOwnPropertyDescriptor(ui, 'formDialog')).toEqual(descriptor);
+    expect(ui.formDialog).toBe(original);
+  });
+
+  test('managed RPC keeps its native form surface and legacy hosts gain no form method', () => {
+    const original = async () => ({ data: {} });
+    const ui = { formDialog: original } as unknown as ExtensionUIContext;
+    const bridge = new DialogBridge(() => 'session', () => true, () => true, true, () => {});
+    bridge.install(ui);
+    try { expect('formDialog' in ui && ui.formDialog).toBe(original); }
+    finally { bridge.close(); }
+    const f = fixture();
+    try { expect('formDialog' in f.ui).toBe(false); }
+    finally { f.bridge.close(); }
+  });
 });
