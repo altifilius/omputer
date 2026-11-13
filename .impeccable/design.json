@@ -1,120 +1,87 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-17T15:00:55Z",
+  "generatedAt": "2026-11-13",
   "title": "Design System: Omputer Android",
   "extensions": {
     "colorMeta": {
-      "ink": {"role": "neutral", "displayName": "Ink"},
-      "periwinkle": {"role": "primary", "displayName": "Periwinkle"},
-      "citrus": {"role": "secondary", "displayName": "Citrus"},
-      "scheme-seed": {"role": "primary", "displayName": "Material scheme seed"},
-      "dark-surface": {"role": "neutral", "displayName": "Dusk surface"},
-      "dark-on-surface": {"role": "neutral", "displayName": "Porcelain text"},
-      "dark-secondary-container": {"role": "secondary", "displayName": "Dusk olive container"},
-      "light-primary": {"role": "primary", "displayName": "Light indigo"},
-      "light-on-primary": {"role": "neutral", "displayName": "White on indigo"},
-      "light-surface": {"role": "neutral", "displayName": "Cool paper"},
-      "light-secondary-container": {"role": "secondary", "displayName": "Pale citrus container"},
-      "light-on-secondary-container": {"role": "secondary", "displayName": "Dark olive foreground"}
+      "scheme-seed": {"role": "primary", "displayName": "Material seed", "value": "#a87920"},
+      "dark-base": {"role": "neutral", "displayName": "Graphite base", "value": "#23272f"},
+      "dark-raised": {"role": "neutral", "displayName": "Graphite raised", "value": "#292e37"},
+      "dark-inset": {"role": "neutral", "displayName": "Graphite inset", "value": "#20242b"},
+      "dark-highlight": {"role": "neutral", "displayName": "Graphite highlight", "value": "#383e49"},
+      "dark-shadow": {"role": "neutral", "displayName": "Graphite shadow", "value": "#13161c"},
+      "dark-text": {"role": "neutral", "displayName": "Dark reading text", "value": "#f1f3f5"},
+      "dark-secondary": {"role": "neutral", "displayName": "Dark secondary text", "value": "#c0c6cf"},
+      "dark-primary": {"role": "primary", "displayName": "Dark amber action", "value": "#f3ca68"},
+      "dark-on-primary": {"role": "neutral", "displayName": "On dark amber", "value": "#272016"},
+      "dark-primary-container": {"role": "primary", "displayName": "Dark primary container", "value": "#463c28"},
+      "dark-on-primary-container": {"role": "primary", "displayName": "On dark primary container", "value": "#ffe3a2"},
+      "dark-outline": {"role": "neutral", "displayName": "Dark outline", "value": "#8e98a5"},
+      "dark-outline-variant": {"role": "neutral", "displayName": "Dark outline variant", "value": "#454e5b"},
+      "light-base": {"role": "neutral", "displayName": "Fog base", "value": "#e8edf2"},
+      "light-raised": {"role": "neutral", "displayName": "Fog raised", "value": "#eef2f6"},
+      "light-inset": {"role": "neutral", "displayName": "Fog inset", "value": "#e2e8ee"},
+      "light-highlight": {"role": "neutral", "displayName": "Fog highlight", "value": "#ffffff"},
+      "light-shadow": {"role": "neutral", "displayName": "Fog shadow", "value": "#bdc6d0"},
+      "light-text": {"role": "neutral", "displayName": "Light reading text", "value": "#252c35"},
+      "light-secondary": {"role": "neutral", "displayName": "Light secondary text", "value": "#505b68"},
+      "light-primary": {"role": "primary", "displayName": "Light amber action", "value": "#775500"},
+      "light-on-primary": {"role": "neutral", "displayName": "On light amber", "value": "#ffffff"},
+      "light-primary-container": {"role": "primary", "displayName": "Light primary container", "value": "#f1dfb5"},
+      "light-on-primary-container": {"role": "primary", "displayName": "On light primary container", "value": "#4a370d"},
+      "light-outline": {"role": "neutral", "displayName": "Light outline", "value": "#677482"},
+      "light-outline-variant": {"role": "neutral", "displayName": "Light outline variant", "value": "#bdc7d1"}
     },
     "typographyMeta": {
-      "wayfinding": {"displayName": "Wayfinding", "purpose": "Material headlineLarge with the authored weight and tracking override."},
-      "project-title": {"displayName": "Project title", "purpose": "Material titleLarge with the authored weight override."},
-      "reading": {"displayName": "Extended reading", "purpose": "Material bodyLarge with expanded line height for activity and memory."},
-      "editor": {"displayName": "Local editor", "purpose": "System monospace for editor-method request content."}
+      "native": {"displayName": "Android Roboto", "purpose": "Material 2021 headline/title/body/label roles; preserve system text scaling and wrapping, no remote font."},
+      "project-title": {"displayName": "Project title", "purpose": "Native titleLarge with weight 600; app-bar titleLarge also uses 600."},
+      "reading": {"displayName": "Extended reading", "purpose": "Roboto body roles; authored extended reading line-height 1.5."},
+      "editor": {"displayName": "Local editor", "purpose": "System monospace with authored line-height 1.5, native editing and IME."}
     },
-    "shadows": [],
-    "motion": [
-      {"name": "route-forward", "value": "220ms", "purpose": "Custom detail-route fade and horizontal translation; zero when disableAnimations is true."},
-      {"name": "route-reverse", "value": "180ms", "purpose": "Custom reverse transition; zero when disableAnimations is true."},
-      {"name": "route-easing", "value": "Cubic(0.16, 1, 0.3, 1)", "purpose": "Flutter custom route easing; reduced-motion branch returns the child directly."},
-      {"name": "route-translation", "value": "Offset(0.025, 0)", "purpose": "Normal route initial horizontal offset as a fraction of child width."},
-      {"name": "checkpoint-translation", "value": "Offset(0.045, 0)", "purpose": "Checkpoint route initial horizontal offset as a fraction of child width."}
+    "shadows": [
+      {"name": "raised", "value": "shadow (4dp,4dp), blurRadius 10dp, alpha .7; highlight (-4dp,-4dp), blurRadius 10dp, alpha .55", "purpose": "NeoSurface raised using brightness-specific neutral shadow/highlight colors."},
+      {"name": "compact", "value": "shadow (2dp,2dp), blurRadius 5dp, alpha .7; highlight (-2dp,-2dp), blurRadius 5dp, alpha .55", "purpose": "Compact raised native control backgrounds."},
+      {"name": "inset", "value": "shadow (3dp,3dp), alpha .6; highlight (-3dp,-3dp), alpha .65; MaskFilter blur sigma 3dp", "purpose": "Clipped even-odd native interior painter; sigma is not CSS blur radius."},
+      {"name": "flat", "value": "none", "purpose": "Reading planes and disabled native button depth."}
     ],
-    "breakpoints": [{"name": "navigation-rail", "value": "720dp"}]
+    "motion": [
+      {"name": "route-forward", "value": "220ms", "purpose": "Retained custom route fade/slide; zero under disableAnimations."},
+      {"name": "route-reverse", "value": "180ms", "purpose": "Retained reverse route transition; zero under disableAnimations."},
+      {"name": "route-easing", "value": "Cubic(0.16, 1, 0.3, 1)", "purpose": "Existing route easing; reduced motion returns child directly."},
+      {"name": "route-translation", "value": "Offset(0.025, 0)", "purpose": "Fraction of child width; checkpoint routes use Offset(0.045, 0)."},
+      {"name": "project-ring", "value": "20s revolution", "purpose": "Retained user-requested perspective loop, play/pause, drag interruption and previous/next. Text entry pauses; keyboard selects instantly. Reduced motion/accessibility navigation use static selection. Offscreen/inactive ticking stops."},
+      {"name": "working-avatar", "value": "existing speeder motion only", "purpose": "Live connection plus connected writer plus workState running/background only; never human_wait, settled or disconnected. Reduced motion is static with text; offscreen/inactive ticking stops. No new animation."}
+    ],
+    "breakpoints": [{"name": "navigation-rail", "value": "720dp"}],
+    "native": {
+      "platform": "Flutter Android Material 3",
+      "dimensionUnit": "logical dp",
+      "textScale": "Android system scale; sp semantics",
+      "sourceOfTruth": ["mobile/lib/neumorphic.dart", "mobile/lib/ui.dart"],
+      "acceptanceReport": "Raporlar/2026-11-13-butunsel-neumorphic-ui.md",
+      "acceptance": "Source-derived record only; historical captures are not redesign acceptance. No test or native runtime acceptance is asserted here.",
+      "colorGeneration": "ColorScheme.fromSeed #a87920 with authored overrides; remaining roles including errors are SDK-generated. No wallpaper Dynamic Color.",
+      "surfaceRoles": "surface/scaffold/canvas=base; low/high=raised; lowest/highest/secondaryContainer=inset; onSurface/onSecondaryContainer=text; onSurfaceVariant/secondary=secondary text; onSecondary=base; tertiary=primary; onTertiary=base",
+      "radii": {"chipTextButton": "12dp", "fieldButtonRowMenu": "16dp", "defaultSurface": "20dp", "dialogSheet": "24dp"},
+      "spacing": ["8dp", "12dp", "16dp", "20dp", "24dp"],
+      "stateDetails": "Fields: resting outlineVariant, focused amber 2dp, disabled outlineVariant alpha .5; error uses native error role. Cursor/handles amber, selection alpha .24. Button border focused primary, disabled outlineVariant alpha .4, otherwise alpha .55. Divider outlineVariant alpha .65. Native state layers and callbacks remain intact.",
+      "previewPolicy": "No HTML/CSS preview included; this sidecar is documentation, not a second implementation or browser acceptance baseline."
+    }
   },
   "components": [
-    {
-      "name": "Filled action · dark",
-      "kind": "button",
-      "refersTo": "button-filled-dark",
-      "description": "Documentation-panel translation of the dark FilledButton color pair and minimum height. Browser pixels are preview-only; shipping controls use Flutter Material states and dp.",
-      "html": "<button class=\"ds-filled-dark\">Yanıtı gönder</button>",
-      "css": ".ds-filled-dark{background:#b8b9ff;color:#151d37;min-width:48px;min-height:52px;border:0;font-family:Roboto,sans-serif}.ds-filled-dark:hover,.ds-filled-dark:active{outline:1px solid currentColor}.ds-filled-dark:focus-visible{outline:2px solid currentColor;outline-offset:2px}.ds-filled-dark:disabled{opacity:.38}"
-    },
-    {
-      "name": "Filled action · light",
-      "kind": "button",
-      "refersTo": "button-filled-light",
-      "description": "Preview of the authored light FilledButton color pair. Browser state outlines are preview affordances, not extracted native state-layer tokens.",
-      "html": "<button class=\"ds-filled-light\">Yanıtı gönder</button>",
-      "css": ".ds-filled-light{background:#494bb0;color:#ffffff;min-width:48px;min-height:52px;border:0;font-family:Roboto,sans-serif}.ds-filled-light:hover,.ds-filled-light:active{outline:1px solid currentColor}.ds-filled-light:focus-visible{outline:2px solid #494bb0;outline-offset:2px}.ds-filled-light:disabled{opacity:.38}"
-    },
-    {
-      "name": "Outlined source action",
-      "kind": "button",
-      "description": "Source-session action; only the primary foreground and minimum target translate here. Native outline, shape, and state-layer values remain SDK-owned, not authored tokens.",
-      "html": "<button class=\"ds-source\">Kaynak oturuma git</button>",
-      "css": ".ds-source{color:#b8b9ff;background:#10172a;min-width:48px;min-height:52px;font-family:Roboto,sans-serif}.ds-source:hover,.ds-source:active{outline:1px solid currentColor}.ds-source:focus-visible{outline:2px solid currentColor;outline-offset:2px}"
-    },
-    {
-      "name": "Search field",
-      "kind": "input",
-      "refersTo": "input",
-      "description": "Field radius and padding translation. Preview deliberately omits SDK-generated surfaceContainerHighest fill rather than inventing a hex value; native fill uses that role at 0.55 alpha.",
-      "html": "<input class=\"ds-search\" aria-label=\"Proje veya oturum ara\" placeholder=\"Proje veya oturum ara\">",
-      "css": ".ds-search{border:0;border-radius:16px;padding:16px;font-family:Roboto,sans-serif}.ds-search:hover{outline:1px solid #494bb0}.ds-search:focus-visible{outline:2px solid #494bb0;outline-offset:2px}"
-    },
-    {
-      "name": "Three-destination navigation",
-      "kind": "nav",
-      "description": "Semantic preview of the compact destinations, not a native NavigationBar reproduction. At 720dp the shipping layout uses NavigationRail. Selected indicator tone and native dimensions remain SDK-derived.",
-      "html": "<nav class=\"ds-nav\" aria-label=\"Ana gezinme\"><button aria-current=\"page\">Projeler</button><button>Gelen kutusu</button><button>Ayarlar</button></nav>",
-      "css": ".ds-nav{display:flex;background:#10172a;color:#eeeff8}.ds-nav button{flex:1;min-width:48px;min-height:48px;background:transparent;color:inherit;border:0;font-family:Roboto,sans-serif}.ds-nav button[aria-current]{font-weight:600}.ds-nav button:hover,.ds-nav button:active{outline:1px solid currentColor}.ds-nav button:focus-visible{outline:2px solid currentColor;outline-offset:-2px}"
-    },
-    {
-      "name": "Selected filter",
-      "kind": "chip",
-      "description": "Selected FilterChip secondary-container pair; native check icon, shape and state layers remain Material-owned. Preview is not an additional chip implementation.",
-      "html": "<button class=\"ds-filter\" aria-pressed=\"true\">Tümü</button>",
-      "css": ".ds-filter{background:#353e28;color:#e0ed8b;min-width:48px;min-height:48px;font-family:Roboto,sans-serif}.ds-filter:hover,.ds-filter:active{outline:1px solid currentColor}.ds-filter:focus-visible{outline:2px solid currentColor;outline-offset:2px}"
-    },
-    {
-      "name": "Waiting-decision strip",
-      "kind": "card",
-      "refersTo": "decision-strip-dark",
-      "description": "Actionable waiting-decision container, using the actual secondary-container fill, inherited dark on-surface text, 20dp radius and padding. Preview pixels represent documentation only.",
-      "html": "<button class=\"ds-decision\"><strong>Karar seni bekliyor</strong><span>Gelen kutusunu aç</span></button>",
-      "css": ".ds-decision{display:flex;flex-direction:column;text-align:left;background:#353e28;color:#eeeff8;border:0;border-radius:20px;padding:20px;font-family:Roboto,sans-serif}.ds-decision:hover,.ds-decision:active{outline:1px solid currentColor}.ds-decision:focus-visible{outline:2px solid currentColor;outline-offset:2px}"
-    }
+    {"name": "Native affirmative action", "kind": "button", "refersTo": "button", "description": "FilledButton: 48x52dp minimum, radius 16dp, amber/onPrimary while enabled. backgroundBuilder uses compact raised at rest, inset pressed/selected, flat disabled; native semantics, focus and ink response retained."},
+    {"name": "Native secondary action", "kind": "button", "refersTo": "button", "description": "OutlinedButton uses the neutral native neumorphic backgroundBuilder, 48x52dp minimum and radius 16dp. TextButton is 48x48dp minimum, radius 12dp. Compact/icon control minimum is 48x48dp."},
+    {"name": "Inset field", "kind": "input", "refersTo": "input", "description": "NeoInputBorder with native InputDecorator, inset fill, 16dp radius/padding and 2dp amber focus. Preserve floating labels, accessible names, validation, multiline selection and IME. Composer retains persistent OMP’ye mesaj name and anchored input/send row."},
+    {"name": "Native navigation", "kind": "nav", "description": "Projeler/Gelen kutusu/Ayarlar: native NavigationBar or labeled NavigationRail at 720dp. Inset 16dp indicator, amber selected labels/icons, native Back and destination semantics. App-bar elevation and scrolled-under elevation zero."},
+    {"name": "Native selected filter", "kind": "chip", "description": "Raised resting, inset selected, base disabled; radius 12dp, padding 8dp, outlineVariant side and native amber checkmark. Wrapping remains available."},
+    {"name": "Native contextual surfaces", "kind": "card", "description": "NeoSurface default radius 20dp; menus raised 16dp; dialogs/sheet top corners raised 24dp with outlineVariant border and native confirmation/dismissal. Keep long transcripts/files/diffs flat. Snackbars use text background/base content."}
   ],
   "narrative": {
-    "northStar": "Dusk atelier",
-    "overview": "A calm working companion, not a terminal compressed onto a phone. Deep blue surfaces, periwinkle actions, generous headings, and grounded rows make project context readable before exposing session mechanics. Cool paper and indigo give the light scheme its own identity.\n\nMaterial 3 supplies the interaction vocabulary. Turkish-first copy names the project, the pending decision, the source, and the freshness of a record. Recorded project memory and live conversation context remain visibly distinct; a finished agent turn is not presented as a finished project.",
-    "keyCharacteristics": [
-      "Native Material 3 controls and adaptive navigation.",
-      "Flat grouped rows with selective tonal containers.",
-      "Source-linked context and explicit connection state.",
-      "Readable, system-scaled typography without remote fonts."
-    ],
-    "rules": [
-      {"name": "The Semantic Pair Rule", "body": "Resolve light/dark roles through `Theme.of(context).colorScheme`; do not transplant a dark foreground or background into the light theme.", "section": "colors"},
-      {"name": "The Scale-With-The-Reader Rule", "body": "Keep system text scaling and wrapping. Do not replace Material roles with fixed raster text or shrink content to preserve a screenshot composition.", "section": "typography"},
-      {"name": "The First Valid Response Rule", "body": "The first valid desktop or phone answer wins. Closed or expired requests must not look actionable; disconnected answers are not silently queued. The interface explicitly tells the user to reconnect and check the current request. Tool approval includes a command/tool-context warning and separate approval/rejection choices. Cancellation requires a native confirmation dialog.", "section": "components"}
-    ],
-    "dos": [
-      "**Do** use Material color roles and preserve both authored brightness schemes.",
-      "**Do** keep native text scaling, wrapping, semantic labels, and minimum 48dp touch targets.",
-      "**Do** show connection, request status, provenance, and freshness in words as well as visual cues.",
-      "**Do** distinguish durable project memory from live session activity and link to its source when available.",
-      "**Do** honor Remove animations in custom route transitions."
-    ],
-    "donts": [
-      "**Don't** convert these dp/sp records into CSS layout rules for the Android app.",
-      "**Don't** replace flat project rows with a cramped terminal or uniform dashboard-card grid.",
-      "**Don't** add decorative glow, glass, gradients, or generated photography to this native working surface.",
-      "**Don't** make closed or disconnected requests appear submittable or imply offline answers are queued.",
-      "**Don't** claim tablet, physical-device, TalkBack, or motion verification from phone screenshots alone."
-    ]
+    "northStar": "Graphite workbench",
+    "overview": "Explicitly requested whole-app graphite/fog neumorphism replaces the previous visual world. One amber action accent and top-left lighting serve a Turkish-first, local-first native companion for project continuity, conversations and human decisions. Source-derived documentation is not native acceptance; canonical implementation report owns evidence.",
+    "keyCharacteristics": ["One neutral lighting model with raised, inset and flat depth", "Native Roboto/Material roles and system text scale", "Quiet flat reading planes and true inset inputs", "Actual project/source/paired-PC identity, freshness and connection state"],
+    "rules": ["First valid desktop or phone response wins; disconnected decisions are not silently queued.", "Only pending, connected, valid, non-submitting requests are actionable; closed/expired requests stay read-only.", "Keep source-session identity and durable memory distinct from live activity; finished turns are not finished projects.", "Preserve draft ownership, acknowledged-version clearing, multiline growth, safe-area and IME anchoring.", "Keep file/diff inspection read-only, diagnostics redacted, local Markdown free of remote fetches; host enforces project path confinement."],
+    "dos": ["Resolve brightness-specific semantic pairs through the theme", "Keep native callbacks, touch targets, labels, focus and pressed/disabled states", "Show status/failure/freshness in words as well as color", "Retain reduced-motion and inactive/offscreen stop rules", "Use canonical report for current acceptance and historical evidence"],
+    "donts": ["Do not imply wallpaper Dynamic Color or invent an authored tonal ramp", "Do not add colored glows, decorative imagery or new looping animation", "Do not wrap every reading paragraph in raised decoration", "Do not substitute previews or historical screenshots for current native acceptance", "Do not change trust, source, permission, privacy or first-response boundaries through styling"]
   }
 }

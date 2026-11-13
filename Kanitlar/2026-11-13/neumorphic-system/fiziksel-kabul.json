@@ -1,0 +1,38 @@
+{
+  "device": "Samsung SM-G990E / Android16",
+  "before": {
+    "versionCode": "8",
+    "versionName": "1.1.4",
+    "firstInstallTime": "2026-10-17 20:01:38",
+    "lastUpdateTime": "2026-11-13 13:18:05"
+  },
+  "after": {
+    "versionCode": "9",
+    "versionName": "1.2.0",
+    "firstInstallTime": "2026-10-17 20:01:38",
+    "lastUpdateTime": "2026-11-13 14:03:41"
+  },
+  "sha256": "f2515a1e402a2603a9cbdd8c7165935e001d8d35f537cf33be2ffdd53e46ddfc",
+  "installedApkMatchesRelease": true,
+  "firstInstallTimePreserved": true,
+  "uninstallDataClearOrPairingReplacement": false,
+  "realMessageDecisionPermissionOrSessionSubmission": false,
+  "verificationScope": "Phone only by explicit user request. Real Samsung settings/navigation/project/session/empty IME checks; synthetic Android phone dark/light/200% matrix and187 Flutter tests. Tablet excluded.",
+  "themeSystem": "Graphite/fog, shared raised/inset/flat and amber action/focus",
+  "phonePreferencesPreserved": {
+    "fontScale": 1.0,
+    "nightMode": "yes",
+    "animatorDurationScale": 0.5
+  },
+  "physicalUiResult": {
+    "connectedSettingsVisible": true,
+    "nativeInboxInspected": true,
+    "searchSelectedExactSession": true,
+    "emptyComposerUnchanged": true,
+    "inputFocused": true,
+    "inputBoundsWithIme": "[56,1097][855,1254]",
+    "imeShown": true,
+    "appErrors": "empty",
+    "realSubmission": false
+  }
+}

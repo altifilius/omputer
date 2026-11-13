@@ -6,7 +6,7 @@ Monitor OMP sessions on your own PC from an Android phone, answer agent question
 
 The current application interface is in Turkish. This README uses English descriptions and includes the existing interface labels where needed.
 
-Release artifacts: **PC 0.2.0 · Android 1.1.2 (6) · bridge 1.1.0**, built with the private OMP 18.10.2 runtime. `dist/build-info.json` distinguishes packaged, installed and running hashes; `VERIFICATION.md` records exercised workflows and remaining hardware acceptance. A successful build is not a physical-device pass.
+Release artifacts and active production components: **PC 0.2.1 · Android 1.2.0 (9) · bridge 1.1.1**, with private OMP18.10.2 bundled on PC. Android now uses one graphite/fog neumorphic system across its screens, retaining the rotating project ring and real-work avatar. The approved same-signer Samsung update, exact installed APK, preserved first-install/pairing and bounded native settings/inbox/session/IME checks passed. The independent native finish review covers the phone screenshot/source matrix only. Tablet work is excluded by the user; physical model/decision delivery, TalkBack and performance remain separate. PC/bridge are unchanged; `dist/build-info.json` separates current Android evidence from historical backend checks.
 
 ## Components
 
@@ -133,4 +133,4 @@ Discovery is not authorization. Initial pairing requires two-sided v2 commit/rev
 
 See [VERIFICATION.md](VERIFICATION.md) for exercised checks and their limits. Emulator results do not establish physical-device battery or Doze behavior.
 
-Project work reports: [Raporlar](Raporlar/README.md). Latest: [October 29 — physical Android installation and Git delivery](Raporlar/2026-10-29-android-kurulum-ve-git-yayini.md).
+Project work reports: [Raporlar](Raporlar/README.md). Latest: [November 13 — Whole-application neumorphic UI plan and execution](Raporlar/2026-11-13-butunsel-neumorphic-ui.md), phone-only acceptance; earlier [rotating project/avatar](Raporlar/2026-11-13-donen-projeler-ve-calisan-avatar.md) and [message input](Raporlar/2026-11-13-neumorphic-mesaj-alani.md) milestones.

@@ -10,6 +10,8 @@ import 'session.dart';
 import 'settings.dart';
 import 'models.dart';
 import 'project_files.dart';
+import 'project_carousel.dart';
+import 'neumorphic.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -152,11 +154,16 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int destination = 0;
   String query = '', filter = 'all';
+  String? selectedProjectId;
   final search = TextEditingController();
+  final searchFocus = FocusNode();
   final _projectOrder = StableActivityOrder();
   final _searchSessionOrder = StableActivityOrder();
   @override
-  void dispose() { search.dispose(); super.dispose(); }
+  void initState() { super.initState(); searchFocus.addListener(searchFocusChanged); }
+  void searchFocusChanged() { if (mounted) setState(() {}); }
+  @override
+  void dispose() { searchFocus.removeListener(searchFocusChanged); searchFocus.dispose(); search.dispose(); super.dispose(); }
   @override
   Widget build(BuildContext context) => ListenableBuilder(listenable: widget.controller, builder: (context, _) {
     final c = widget.controller;
@@ -168,10 +175,9 @@ class _HomeScreenState extends State<HomeScreen> {
     };
     final wide = MediaQuery.sizeOf(context).width >= 720;
     return Scaffold(
-      appBar: AppBar(title: Text(['Omputer', 'Gelen kutusu', 'Ayarlar'][destination]), actions: [if (destination != 2) IconButton(tooltip: 'Görünümü yenile', onPressed: () => perform(context, c.refresh), icon: const Icon(Icons.refresh_rounded))]),
+      appBar: AppBar(title: Text(['Omputer', 'Gelen kutusu', 'Ayarlar'][destination]), actions: [if (destination == 0 && c.snapshot.projects.isNotEmpty) IconButton(tooltip: 'Yeni oturum', onPressed: c.connection.connected ? () => openScreen(context, NewSessionScreen(controller: c)) : null, icon: const Icon(Icons.add_rounded)), if (destination != 2) IconButton(tooltip: 'Görünümü yenile', onPressed: () => perform(context, c.refresh), icon: const Icon(Icons.refresh_rounded))]),
       body: SafeArea(top: false, child: wide ? Row(children: [NavigationRail(selectedIndex: destination, onDestinationSelected: (i) => setState(() => destination = i), labelType: NavigationRailLabelType.all, destinations: const [NavigationRailDestination(icon: Icon(Icons.folder_outlined), label: Text('Projeler')), NavigationRailDestination(icon: Icon(Icons.inbox_outlined), label: Text('Gelen kutusu')), NavigationRailDestination(icon: Icon(Icons.tune_rounded), label: Text('Ayarlar'))]), const VerticalDivider(width: 1), Expanded(child: content)]) : content),
-      bottomNavigationBar: wide ? null : NavigationBar(selectedIndex: destination, onDestinationSelected: (i) => setState(() => destination = i), destinations: destinations),
-      floatingActionButton: destination == 0 && c.snapshot.projects.isNotEmpty ? FloatingActionButton.extended(onPressed: c.connection.connected ? () => openScreen(context, NewSessionScreen(controller: c)) : null, icon: const Icon(Icons.add_rounded), label: const Text('Yeni oturum')) : null,
+      bottomNavigationBar: wide ? null : NeoSurface(radius: 24, child: NavigationBar(selectedIndex: destination, onDestinationSelected: (i) => setState(() => destination = i), destinations: destinations)),
     );
   });
 
@@ -187,18 +193,19 @@ class _HomeScreenState extends State<HomeScreen> {
           (filter != 'pinned' || pins['project:$projectId'] == true);
     }
     final projects = ordered.where((p) => '${p.name} ${p.goal} ${p.summary} ${p.nextStep} ${p.path}'.toLowerCase().contains(needle) && matchesFilter(p.id)).toList();
-    final visibleProjectIds = projects.map((p) => p.id).toSet();
+    final selected = projects.where((p) => p.id == selectedProjectId).firstOrNull ?? projects.firstOrNull;
+    selectedProjectId = selected?.id;
     final orderedSessions = c.snapshot.sessions.toList();
     _searchSessionOrder.apply(orderedSessions, (s) => s.id, (s) => s.updatedAt);
     final matchingSessions = needle.isEmpty ? <Session>[] : orderedSessions.where((s) =>
         '${s.name} ${s.cwd}'.toLowerCase().contains(needle) && matchesFilter(s.projectId) &&
-        !((!s.archived || s.activeUnbridged) && visibleProjectIds.contains(s.projectId))).toList();
+        !((!s.archived || s.activeUnbridged) && s.projectId == selected?.id)).toList();
     return RefreshIndicator(onRefresh: c.refresh, child: CustomScrollView(key: const PageStorageKey('project-overview'), physics: const AlwaysScrollableScrollPhysics(), slivers: [
       SliverToBoxAdapter(child: ConnectionBanner(c)),
       if (c.error != null) SliverToBoxAdapter(child: ErrorNotice(c.error!, onRetry: () => perform(context, () async { c.clearError(); await c.reconnect(); }))),
       if (c.snapshot.pending.isNotEmpty) SliverToBoxAdapter(child: ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 24), leading: const Icon(Icons.pending_actions_rounded), title: Text('${c.snapshot.pending.length} karar seni bekliyor'), subtitle: Text(c.snapshot.pending.first.title, maxLines: 1, overflow: TextOverflow.ellipsis), trailing: const Icon(Icons.chevron_right_rounded), onTap: () => setState(() => destination = 1))),
       SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 8, 24, 0), child: Text('Kaldığın yerden.', style: Theme.of(context).textTheme.headlineLarge?.copyWith(fontWeight: FontWeight.w600, letterSpacing: -.7)))),
-      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 20, 24, 8), child: TextField(controller: search, onChanged: (s) => setState(() => query = s), onSubmitted: (s) { if (s.trim().isNotEmpty) openScreen(context, SessionSearchScreen(controller: c, initialQuery: s)); }, decoration: InputDecoration(labelText: 'Proje veya oturum ara', prefixIcon: const Icon(Icons.search_rounded), suffixIcon: query.isEmpty ? null : IconButton(tooltip: 'Aramayı temizle', onPressed: () { search.clear(); setState(() => query = ''); }, icon: const Icon(Icons.close_rounded)))))),
+      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 20, 24, 8), child: TextField(controller: search, focusNode: searchFocus, onChanged: (s) => setState(() => query = s), onSubmitted: (s) { if (s.trim().isNotEmpty) openScreen(context, SessionSearchScreen(controller: c, initialQuery: s)); }, decoration: InputDecoration(labelText: 'Proje veya oturum ara', prefixIcon: const Icon(Icons.search_rounded), suffixIcon: query.isEmpty ? null : IconButton(tooltip: 'Aramayı temizle', onPressed: () { search.clear(); setState(() => query = ''); }, icon: const Icon(Icons.close_rounded)))))),
       SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: Wrap(spacing: 8, children: [('all', 'Tümü'), ('waiting', 'Karar bekleyen'), ('live', 'Canlı oturumu olan'), ('pinned', 'Sabitlenen')].map((item) => FilterChip(label: Text(item.$2), selected: filter == item.$1, onSelected: (_) => setState(() => filter = item.$1))).toList()))),
       if (needle.isNotEmpty) ...[
         const SliverToBoxAdapter(child: SectionHeading('Eşleşen oturumlar')),
@@ -206,8 +213,11 @@ class _HomeScreenState extends State<HomeScreen> {
         SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: OutlinedButton.icon(onPressed: c.connection.connected ? () => openScreen(context, SessionSearchScreen(controller: c, initialQuery: query)) : null, icon: const Icon(Icons.manage_search_rounded), label: const Text('Konuşma içeriğinde ara')))),
       ],
       if (projects.isEmpty && matchingSessions.isEmpty) SliverToBoxAdapter(child: EmptyState(icon: Icons.folder_open_rounded, title: c.snapshot.projects.isEmpty ? 'Projelerin bilgisayardan gelir.' : 'Eşleşen proje yok.', message: c.snapshot.projects.isEmpty ? 'Bilgisayarındaki kayıtlı OMP projeleri ve oturumları otomatik bulunur. İlk çalışmandan sonra burada görünür.' : 'Başka bir arama dene veya filtreyi değiştir.')),
-      SliverList.builder(itemCount: projects.length, itemBuilder: (context, index) => ProjectOverviewRow(controller: c, project: projects[index], key: ValueKey(projects[index].id))),
-      const SliverPadding(padding: EdgeInsets.only(bottom: 100)),
+      if (selected != null) SliverToBoxAdapter(child: Column(children: [
+        ProjectCarousel(controller: c, projects: projects, selectedProjectId: selected.id, onSelected: (id) => setState(() => selectedProjectId = id), autoRotate: needle.isEmpty && !searchFocus.hasFocus),
+        SelectedProjectDetails(controller: c, project: selected, key: ValueKey(selected.id)),
+      ])),
+      const SliverPadding(padding: EdgeInsets.only(bottom: 24)),
     ]));
   }
 }

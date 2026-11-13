@@ -1,5 +1,21 @@
 # Changelog
 
+## Android 1.2.0 (9) — whole-application neumorphic system
+
+- Unify dark graphite and light fog palettes, amber action/focus, dual-shadow raised surfaces, true inset inputs and quiet reading planes. Native Material controls retain callbacks, selection, semantics and permission boundaries.
+- Apply the same material to navigation, projects, sessions/composer, inbox/decisions, pairing, settings/diagnostics, files/diff/context, memory/history, commands and operations. Preserve the rotating project ring and truthfully gated working avatar.
+- Replace the message field's separate palette/painter with shared depth tokens. Keep system typography/scaling, 48dp minimum targets, explicit focus/pressed/disabled states, draft ownership and input/send anchoring above IME.
+
+Analyzer clean;187 Flutter tests passed. Actual native phone dark/light/large-text/IME surfaces were inspected; independent finish review returned ship for that bounded matrix. Same-signer1.2.0(9) is installed on Samsung with exact APK hash and preserved first-install record/pairing; physical settings/inbox/exact session/empty IME acceptance passed. Tablet excluded by user; no real work/decision/permission was submitted. See [the canonical report](Raporlar/2026-11-13-butunsel-neumorphic-ui.md).
+
+## Android 1.1.4 (8) — November 13
+
+- Apply the requested Uiverse-inspired neumorphic treatment only to the session message editor: graphite bevel, inset soft shadows, nested 16/12dp corners and an amber keyboard-focus outline/caret. Light mode keeps theme-derived surfaces; native editing, draft/send behavior and the bottom-above-IME layout are preserved. The accessible field name remains present for populated drafts.
+- Replace the home project list with a perspective rotating card ring, preserving real project data, stable identities, search/filters and selected-project session shortcuts. Drag, previous/next and play/pause controls provide explicit navigation; reduced motion and keyboard selection remain static.
+- Show a native speeder avatar only for genuinely running/background project sessions on a live connection. Waiting, settled and disconnected states do not animate as work; the avatar respects reduced motion, route visibility and app lifecycle.
+
+Signed release is installed on the physical Samsung with exact APK hash and preserved first-install record. Actual project selection/opening, running avatar and neumorphic input above the native keyboard were inspected without submitting work. The new-session action moved to the app bar after native review found its FAB covering carousel controls. Thirty-nine targeted tests plus the added small-phone control regression passed; PC/bridge and pairing are unchanged. See [the canonical UI report](Raporlar/2026-11-13-donen-projeler-ve-calisan-avatar.md) for native scope, package identity and limits.
+
 ## Android 1.1.2 (6)
 
 - Listed each open session beneath its project on the home screen instead of exposing only one recent-session shortcut. Same-name sessions have collision-aware identity references; live updates keep established row order and search avoids duplicate rows.

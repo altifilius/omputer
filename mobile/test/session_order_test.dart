@@ -18,6 +18,8 @@ Json session(String id, int minute) => {
 };
 
 void main() {
+  setUp(() => TestWidgetsFlutterBinding.instance.platformDispatcher.accessibilityFeaturesTestValue = FakeAccessibilityFeatures(disableAnimations: true));
+  tearDown(() => TestWidgetsFlutterBinding.instance.platformDispatcher.clearAccessibilityFeaturesTestValue());
   testWidgets('open session list retains row positions while incoming activity and payload order change', (tester) async {
     tester.view.physicalSize = const Size(900, 2400);
     tester.view.devicePixelRatio = 1;
@@ -48,7 +50,7 @@ void main() {
     controller.dispose();
   });
 
-  testWidgets('open project list does not promote streaming projects on each activity update', (tester) async {
+  testWidgets('project ring retains selection and next identity while streaming payload order changes', (tester) async {
     tester.view.physicalSize = const Size(900, 1800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -58,13 +60,20 @@ void main() {
       ..snapshot = Snapshot.fromJson({'projects': [project('a', 3), project('b', 2), project('c', 1)]});
     await tester.pumpWidget(MaterialApp(home: HomeScreen(controller: controller)));
     await tester.pump();
-    expect(tester.getTopLeft(find.text('Project a')).dy, lessThan(tester.getTopLeft(find.text('Project b')).dy));
-    expect(tester.getTopLeft(find.text('Project b')).dy, lessThan(tester.getTopLeft(find.text('Project c')).dy));
+    await tester.ensureVisible(find.byTooltip('Sonraki proje'));
+    await tester.tap(find.byTooltip('Sonraki proje'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<SelectedProjectDetails>(find.byType(SelectedProjectDetails)).project.id, 'b');
     controller.snapshot = Snapshot.fromJson({'projects': [project('c', 5), project('b', 4), project('a', 3)]});
     controller.notifyListeners();
     await tester.pump();
-    expect(tester.getTopLeft(find.text('Project a')).dy, lessThan(tester.getTopLeft(find.text('Project b')).dy));
-    expect(tester.getTopLeft(find.text('Project b')).dy, lessThan(tester.getTopLeft(find.text('Project c')).dy));
+    expect(tester.widget<SelectedProjectDetails>(find.byType(SelectedProjectDetails)).project.id, 'b');
+    await tester.tap(find.byTooltip('Sonraki proje'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<SelectedProjectDetails>(find.byType(SelectedProjectDetails)).project.id, 'c');
+    await tester.tap(find.byTooltip('Sonraki proje'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<SelectedProjectDetails>(find.byType(SelectedProjectDetails)).project.id, 'a');
     await tester.pumpWidget(const SizedBox.shrink());
     controller.dispose();
   });

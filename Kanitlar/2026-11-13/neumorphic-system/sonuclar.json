@@ -1,0 +1,18 @@
+{
+  "scope": "phone only; tablet explicitly excluded by user",
+  "flutterAnalyze": "clean",
+  "flutterTestsPassed": 187,
+  "testMode": "serial --concurrency=1",
+  "nativeFixture": "real Flutter product widgets on owned Android35 phone emulator720x1280/320dpi, synthetic local data",
+  "nativeAppErrors": "empty",
+  "nativeReviewedRequiredScreenshots": 20,
+  "independentReviewDisposition": "ship",
+  "independentReviewScope": "supplied phone screenshot matrix and sampled source; not physical device review by reviewer",
+  "physicalAcceptance": "separate parent-observed Samsung Android16 navigation/settings/inbox/search/exact session/empty IME",
+  "fullLargeFontSubmitFlow": false,
+  "talkBackOrPerformanceCertification": false,
+  "productionEntrypoint": "lib/main.dart",
+  "releaseVersion": "1.2.0+9",
+  "releaseSha256": "f2515a1e402a2603a9cbdd8c7165935e001d8d35f537cf33be2ffdd53e46ddfc",
+  "rawPhoneScreenshotsRetained": false
+}

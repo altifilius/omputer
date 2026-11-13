@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'controller.dart';
 import 'models.dart';
+import 'neumorphic.dart';
 import 'session.dart';
 import 'ui.dart';
 
@@ -34,7 +35,7 @@ class _MemoryHistoryScreenState extends State<MemoryHistoryScreen> {
     if (busy) const LinearProgressIndicator(),
     if (error != null) ErrorNotice(error!, onRetry: load),
     if (!busy && error == null && entries.isEmpty) const Padding(padding: EdgeInsets.all(24), child: Text('Kaydedilmiş hafıza sürümü yok.')),
-    for (final entry in entries) ExpansionTile(key: ValueKey('revision:${entry['sequence']}'), tilePadding: const EdgeInsets.symmetric(horizontal: 24), childrenPadding: const EdgeInsets.all(24), title: Text('Sürüm ${entry['revision']} · ${entry['origin'] == 'agent' ? 'Ajan kaydı' : 'Elle düzenleme'}'), subtitle: Text(dateLabel(instant(entry['createdAt']))), children: [
+    for (final entry in entries) Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: NeoSurface(radius: 20, compact: true, child: ExpansionTile(key: ValueKey('revision:${entry['sequence']}'), tilePadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4), childrenPadding: const EdgeInsets.fromLTRB(20, 0, 20, 20), expandedCrossAxisAlignment: CrossAxisAlignment.stretch, shape: const Border(), collapsedShape: const Border(), title: Text('Sürüm ${entry['revision']} · ${entry['origin'] == 'agent' ? 'Ajan kaydı' : 'Elle düzenleme'}'), subtitle: Text(dateLabel(instant(entry['createdAt']))), children: [
       for (final field in [('goal', 'Hedef'), ('summary', 'Durum özeti'), ('nextStep', 'Sonraki adım')]) ...[
         Align(alignment: Alignment.centerLeft, child: Text(field.$2, style: Theme.of(context).textTheme.titleSmall)),
         Align(alignment: Alignment.centerLeft, child: LocalMarkdown(data: '${object(entry['memory'])[field.$1] ?? ''}')),
@@ -42,7 +43,7 @@ class _MemoryHistoryScreenState extends State<MemoryHistoryScreen> {
       ],
       for (final decision in strings(object(entry['memory'])['decisions'])) Align(alignment: Alignment.centerLeft, child: LocalMarkdown(data: decision)),
       if (entry['sourceSessionId'] != null) TextButton.icon(onPressed: () => openScreen(context, SessionScreen(controller: widget.controller, sessionId: '${entry['sourceSessionId']}')), icon: const Icon(Icons.commit_rounded), label: const Text('Kaynak oturumu aç')),
-    ]),
+    ]))),
     if (more) Padding(padding: const EdgeInsets.all(24), child: OutlinedButton(onPressed: busy ? null : () => load(append: true), child: const Text('Önceki sürümler'))),
   ])));
 }

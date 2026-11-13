@@ -4,6 +4,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'controller.dart';
 import 'models.dart';
 import 'ui.dart';
+import 'neumorphic.dart';
 
 class PairingScreen extends StatefulWidget {
   const PairingScreen({super.key, required this.controller, this.initialBundle});
@@ -107,33 +108,39 @@ class _PairingScreenState extends State<PairingScreen> with WidgetsBindingObserv
     final scheme = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
     return Scaffold(appBar: AppBar(title: const Text('Omputer')), body: SafeArea(top: false, child: ListView(padding: const EdgeInsets.fromLTRB(24, 24, 24, 40), children: [
-      Align(alignment: Alignment.centerLeft, child: Material(color: scheme.primaryContainer, borderRadius: BorderRadius.circular(24), child: Padding(padding: const EdgeInsets.all(20), child: Icon(Icons.devices_rounded, size: 42, color: scheme.onPrimaryContainer)))),
+      Align(alignment: Alignment.centerLeft, child: NeoSurface(padding: const EdgeInsets.all(20), child: Icon(Icons.devices_rounded, size: 40, color: scheme.onSurfaceVariant))),
       const SizedBox(height: 28),
       Text(waiting ? 'Bilgisayarında\nonayla.' : 'Bilgisayarınla\naynı sayfada.', style: text.headlineLarge?.copyWith(fontWeight: FontWeight.w600, letterSpacing: -.8)),
       const SizedBox(height: 16),
       Text(waiting ? '${pending?['serverName']} ekranındaki kodun aşağıdaki kodla aynı olduğunu kontrol et. Yalnızca kodlar aynıysa bilgisayarında Onayla’ya bas.' : 'Bilgisayarında Omputer’ı aç. Telefonun ve bilgisayarın aynı yerel ağdayken birbirini bulur. Komut, adres veya bulut hesabı gerekmez.', style: text.bodyLarge?.copyWith(height: 1.5)),
       if (waiting && pending != null) ...[
         const SizedBox(height: 28),
-        Semantics(label: 'Doğrulama kodu: ${'${pending['verificationCode']}'.split('').join(' ')}', excludeSemantics: true, child: SelectableText('${pending['verificationCode']}', style: text.displayMedium?.copyWith(fontFeatures: const [FontFeature.tabularFigures()]))),
+        NeoSurface(depth: NeoDepth.inset, padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Text('Doğrulama kodu', style: text.titleMedium),
+          const SizedBox(height: 12),
+          Semantics(label: 'Doğrulama kodu: ${'${pending['verificationCode']}'.split('').join(' ')}', excludeSemantics: true, child: SelectableText('${pending['verificationCode']}', style: text.headlineMedium?.copyWith(color: scheme.onSurface, fontWeight: FontWeight.w600, fontFeatures: const [FontFeature.tabularFigures()]))),
+        ])),
         const SizedBox(height: 20),
         Semantics(liveRegion: true, child: const Text('Bilgisayarında onayla · onay bekleniyor')),
         const SizedBox(height: 16),
-        const Text('Kodu eşleşmeyen veya tanımadığın bir bilgisayarı onaylama. Bu ağdaki keşif bilgisi tek başına erişim yetkisi vermez.'),
+        NeoSurface(depth: NeoDepth.inset, padding: const EdgeInsets.all(16), child: const Text('Kodu eşleşmeyen veya tanımadığın bir bilgisayarı onaylama. Bu ağdaki keşif bilgisi tek başına erişim yetkisi vermez.')),
         const SizedBox(height: 16),
-        ExpansionTile(tilePadding: EdgeInsets.zero, title: const Text('Bilgisayarın sertifika parmak izi'), children: [SelectableText('${pending['fingerprint']}', style: text.bodySmall)]),
+        NeoSurface(depth: NeoDepth.inset, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: ExpansionTile(tilePadding: EdgeInsets.zero, childrenPadding: const EdgeInsets.only(bottom: 12), title: const Text('Bilgisayarın sertifika parmak izi'), children: [SelectableText('${pending['fingerprint']}', style: text.bodySmall)])),
         const SizedBox(height: 16),
         OutlinedButton.icon(onPressed: _cancel, icon: const Icon(Icons.close_rounded), label: const Text('Eşleştirmeyi iptal et')),
       ] else ...[
         const SizedBox(height: 28),
-        TextField(controller: name, enabled: !busy, decoration: const InputDecoration(labelText: 'Bu cihazın adı'), textInputAction: TextInputAction.done),
-        const SizedBox(height: 16),
-        SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('Arka planda bağlantıyı sürdür'), subtitle: const Text('Eşleştirmeden sonra Android’de görünür bağlı-cihaz bildirimiyle çalışır. Bildirim izni senden istenir; bu tercihi Ayarlar’dan kapatabilirsin.'), value: background, onChanged: busy ? null : (value) => setState(() => background = value)),
+        NeoSurface(padding: const EdgeInsets.all(16), child: Column(children: [
+          TextField(controller: name, enabled: !busy, decoration: const InputDecoration(labelText: 'Bu cihazın adı'), textInputAction: TextInputAction.done),
+          const SizedBox(height: 16),
+          SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('Arka planda bağlantıyı sürdür'), subtitle: const Text('Eşleştirmeden sonra Android’de görünür bağlı-cihaz bildirimiyle çalışır. Bildirim izni senden istenir; bu tercihi Ayarlar’dan kapatabilirsin.'), value: background, onChanged: busy ? null : (value) => setState(() => background = value)),
+        ])),
         const SizedBox(height: 24),
         Semantics(liveRegion: true, child: Text(controller.computers.isEmpty ? (controller.scanning ? 'Yakındaki bilgisayarlar aranıyor…' : 'Yakındaki bilgisayarlar') : 'Bulunan bilgisayarlar', style: text.titleLarge)),
         const SizedBox(height: 12),
         if (controller.scanning && controller.computers.isEmpty && !MediaQuery.disableAnimationsOf(context)) const LinearProgressIndicator(),
         if (controller.computers.isEmpty) const Padding(padding: EdgeInsets.symmetric(vertical: 16), child: Text('Bilgisayar henüz görünmüyor. Omputer açık ve iki cihaz aynı Wi-Fi / yerel ağda olmalı. Misafir ağları cihazların birbirini bulmasını engelleyebilir. Arama kendiliğinden sürer.')),
-        for (final computer in controller.computers) ListTile(contentPadding: const EdgeInsets.symmetric(vertical: 12), leading: const Icon(Icons.computer_rounded), title: Text('${computer['name']}'), subtitle: const Text('Yerel ağ · seç ve bilgisayarında onayla'), trailing: busy ? null : const Icon(Icons.chevron_right_rounded), enabled: !busy, onTap: () => _request(computer)),
+        for (final computer in controller.computers) Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: NeoSurface(child: ListTile(contentPadding: const EdgeInsets.all(16), leading: const Icon(Icons.computer_rounded), title: Text('${computer['name']}'), subtitle: const Text('Yerel ağ · seç ve bilgisayarında onayla'), trailing: busy ? null : const Icon(Icons.chevron_right_rounded), enabled: !busy, onTap: () => _request(computer)))),
         if (busy) Padding(padding: const EdgeInsets.symmetric(vertical: 16), child: Semantics(liveRegion: true, child: const Text('Bilgisayarın kimliği doğrulanıyor…'))),
         if (controller.discoveryError != null) ErrorNotice(controller.discoveryError!, onRetry: _discover),
         if (controller.pairingStatus == 'denied' || controller.pairingStatus == 'expired') ErrorNotice(controller.pairingStatus == 'denied' ? 'Bilgisayar eşleştirmeyi reddetti. Doğru bilgisayarı seçerek yeniden isteyebilirsin.' : 'Onayın süresi doldu. Bilgisayarı seçerek yeni bir kod oluştur.'),
@@ -164,7 +171,7 @@ class _ScanPairingScreenState extends State<ScanPairingScreen> {
   @override
   void dispose() { scanner.dispose(); super.dispose(); }
   @override
-  Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: const Text('Eşleştirme QR’ı')), body: SafeArea(top: false, child: Column(children: [const Padding(padding: EdgeInsets.all(24), child: Text('Bilgisayarındaki Omputer uygulamasının eşleştirme QR’ını çerçeveye al.')), Expanded(child: MobileScanner(controller: scanner, errorBuilder: (context, error) => EmptyState(icon: Icons.no_photography_outlined, title: 'Kamera açılamadı.', message: '${error.errorDetails?.message ?? 'Kamera iznini Android ayarlarından ver veya yakındaki bilgisayar aramasına geri dön.'}'), onDetect: (capture) {
+  Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: const Text('Eşleştirme QR’ı')), body: SafeArea(top: false, child: Column(children: [const Padding(padding: EdgeInsets.all(16), child: NeoSurface(padding: EdgeInsets.all(20), child: Text('Bilgisayarındaki Omputer uygulamasının eşleştirme QR’ını çerçeveye al.'))), Expanded(child: MobileScanner(controller: scanner, errorBuilder: (context, error) => EmptyState(icon: Icons.no_photography_outlined, title: 'Kamera açılamadı.', message: '${error.errorDetails?.message ?? 'Kamera iznini Android ayarlarından ver veya yakındaki bilgisayar aramasına geri dön.'}'), onDetect: (capture) {
     if (accepted) return;
     final value = capture.barcodes.map((b) => b.rawValue).whereType<String>().where((s) => s.startsWith('omputer://pair') || s.trimLeft().startsWith('{')).firstOrNull;
     if (value == null) return;

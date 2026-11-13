@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'controller.dart';
 import 'models.dart';
+import 'neumorphic.dart';
 import 'projects.dart';
 import 'session.dart';
 import 'ui.dart';
@@ -43,14 +44,14 @@ class _ProjectFilesScreenState extends State<ProjectFilesScreen> {
       Padding(padding: const EdgeInsets.fromLTRB(24, 12, 24, 8), child: const Text('Salt okunur dosyalar · git yalnızca değişiklikleri okumak için kullanılır; dosyalar ve git durumu değiştirilmez.')),
       Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: Wrap(spacing: 8, children: [ChoiceChip(label: const Text('Dosya ağacı'), selected: !changed, onSelected: busy ? null : (_) { setState(() { changed = false; }); load(); }), ChoiceChip(label: const Text('Değişen dosyalar'), selected: changed, onSelected: busy ? null : (_) { setState(() { changed = true; }); load(); })])),
       if (!changed) Padding(padding: const EdgeInsets.all(24), child: TextField(controller: search, enabled: !busy, textInputAction: TextInputAction.search, onSubmitted: (_) => load(), decoration: InputDecoration(labelText: 'Bu klasörde dosya ara', prefixIcon: const Icon(Icons.search_rounded), suffixIcon: IconButton(tooltip: 'Dosyaları ara', onPressed: busy ? null : load, icon: const Icon(Icons.arrow_forward_rounded))))),
-      if (!changed) ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 24), leading: const Icon(Icons.drive_folder_upload_outlined), title: Text(path.isEmpty ? 'Proje kökü' : path), subtitle: path.isEmpty ? null : const Text('Üst klasöre dön'), onTap: path.isEmpty || busy ? null : () => directory(path.contains('/') ? path.substring(0, path.lastIndexOf('/')) : '')),
+      if (!changed) Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: NeoSurface(depth: NeoDepth.inset, radius: 16, compact: true, child: ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 16), leading: const Icon(Icons.drive_folder_upload_outlined), title: Text(path.isEmpty ? 'Proje kökü' : path), subtitle: path.isEmpty ? null : const Text('Üst klasöre dön'), onTap: path.isEmpty || busy ? null : () => directory(path.contains('/') ? path.substring(0, path.lastIndexOf('/')) : '')))),
       if (busy) const LinearProgressIndicator(),
       if (error != null) ErrorNotice(error!, onRetry: load),
       if (!busy && error == null && entries.isEmpty) const Padding(padding: EdgeInsets.all(24), child: Text('Bu görünümde dosya yok.')),
-      for (final entry in entries) ListTile(key: ValueKey('${changed ? 'diff' : 'tree'}:${entry['path']}'), contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8), leading: Icon(entry['kind'] == 'directory' ? Icons.folder_outlined : changed ? Icons.difference_outlined : Icons.description_outlined), title: Text('${entry['name'] ?? entry['path']}'), subtitle: changed ? Text('${entry['status'] ?? ''}${entry['oldPath'] == null ? '' : ' · önce: ${entry['oldPath']}'}') : null, trailing: const Icon(Icons.chevron_right_rounded), onTap: busy ? null : () {
+      for (final entry in entries) Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: NeoSurface(radius: 16, compact: true, child: ListTile(key: ValueKey('${changed ? 'diff' : 'tree'}:${entry['path']}'), contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), leading: Icon(entry['kind'] == 'directory' ? Icons.folder_outlined : changed ? Icons.difference_outlined : Icons.description_outlined), title: Text('${entry['name'] ?? entry['path']}'), subtitle: changed ? Text('${entry['status'] ?? ''}${entry['oldPath'] == null ? '' : ' · önce: ${entry['oldPath']}'}') : null, trailing: const Icon(Icons.chevron_right_rounded), onTap: busy ? null : () {
         final target = '${entry['path']}';
         if (!changed && entry['kind'] == 'directory') { directory(target); } else if (changed) { openScreen(context, ProjectDiffScreen(controller: widget.controller, project: widget.project, path: target)); } else { openScreen(context, FilePreviewScreen(controller: widget.controller, project: widget.project, initialPath: target)); }
-      }),
+      }))),
       if (truncated) const Padding(padding: EdgeInsets.all(24), child: Text('Değişiklik listesi boyut sınırında kesildi. Kalanını bilgisayarda incele.')),
       if (more) Padding(padding: const EdgeInsets.all(24), child: OutlinedButton(onPressed: busy ? null : () => load(append: true), child: const Text('Sonraki dosyaları yükle'))),
     ])),
@@ -80,7 +81,7 @@ class _ProjectDiffScreenState extends State<ProjectDiffScreen> {
   }
   @override
   Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: const Text('Salt okunur fark')), body: SafeArea(top: false, child: ListView(padding: const EdgeInsets.all(24), children: [
-    SelectableText(widget.path),
+    NeoSurface(depth: NeoDepth.inset, radius: 16, padding: const EdgeInsets.all(16), child: SelectableText(widget.path, style: Theme.of(context).textTheme.bodySmall)),
     TextButton.icon(onPressed: () => openScreen(context, FilePreviewScreen(controller: widget.controller, project: widget.project, initialPath: widget.path)), icon: const Icon(Icons.description_outlined), label: const Text('Güncel dosyayı aç')),
     if (busy) const LinearProgressIndicator(),
     if (error != null) ErrorNotice(error!, onRetry: load),
@@ -126,7 +127,7 @@ class _SessionSearchScreenState extends State<SessionSearchScreen> {
     if (busy) const LinearProgressIndicator(),
     if (error != null) ErrorNotice(error!, onRetry: load),
     if (!busy && loadedQuery.isNotEmpty && error == null && results.isEmpty) const Padding(padding: EdgeInsets.all(24), child: Text('Eşleşen konuşma bulunamadı.')),
-    for (final result in results) ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12), title: Text('${result['title'] ?? widget.controller.snapshot.session('${result['sessionId']}')?.name ?? 'Konuşma'}'), subtitle: Text('${result['snippet'] ?? ''}', maxLines: 4, overflow: TextOverflow.ellipsis), trailing: const Icon(Icons.arrow_forward_rounded), onTap: () => openScreen(context, SessionScreen(controller: widget.controller, sessionId: '${result['sessionId']}', initialMessageId: result['messageId']?.toString()))),
+    for (final result in results) Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: NeoSurface(radius: 16, compact: true, child: ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), title: Text('${result['title'] ?? widget.controller.snapshot.session('${result['sessionId']}')?.name ?? 'Konuşma'}'), subtitle: Text('${result['snippet'] ?? ''}', maxLines: 4, overflow: TextOverflow.ellipsis), trailing: const Icon(Icons.arrow_forward_rounded), onTap: () => openScreen(context, SessionScreen(controller: widget.controller, sessionId: '${result['sessionId']}', initialMessageId: result['messageId']?.toString()))))),
     if (more) Padding(padding: const EdgeInsets.all(24), child: OutlinedButton(onPressed: busy ? null : () => load(append: true), child: const Text('Daha fazla sonuç'))),
   ])));
 }

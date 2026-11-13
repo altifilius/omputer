@@ -6,16 +6,18 @@ import 'session.dart';
 import 'interactions.dart';
 import 'project_files.dart';
 import 'memory_history.dart';
+import 'working_avatar.dart';
+import 'neumorphic.dart';
 
-class ProjectOverviewRow extends StatefulWidget {
-  const ProjectOverviewRow({super.key, required this.controller, required this.project});
+class SelectedProjectDetails extends StatefulWidget {
+  const SelectedProjectDetails({super.key, required this.controller, required this.project});
   final OmputerController controller;
   final Project project;
   @override
-  State<ProjectOverviewRow> createState() => _ProjectOverviewRowState();
+  State<SelectedProjectDetails> createState() => _SelectedProjectDetailsState();
 }
 
-class _ProjectOverviewRowState extends State<ProjectOverviewRow> {
+class _SelectedProjectDetailsState extends State<SelectedProjectDetails> {
   bool expanded = false;
   final order = StableActivityOrder();
   @override
@@ -71,10 +73,10 @@ class LocalSessionRow extends StatelessWidget {
         break;
       }
     }
-    return ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8), leading: Icon(pinned ? Icons.push_pin_rounded : session.archived && !session.activeUnbridged ? Icons.history_rounded : Icons.chat_bubble_outline_rounded), title: Text(session.name.isEmpty ? 'Adsız oturum' : session.name, maxLines: 2, overflow: TextOverflow.ellipsis), subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    return Padding(padding: const EdgeInsets.fromLTRB(16, 6, 16, 6), child: NeoSurface(radius: 18, compact: true, child: ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), leading: Icon(pinned ? Icons.push_pin_rounded : session.archived && !session.activeUnbridged ? Icons.history_rounded : Icons.chat_bubble_outline_rounded), title: Text(session.name.isEmpty ? 'Adsız oturum' : session.name, maxLines: 2, overflow: TextOverflow.ellipsis), subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Text('${session.statusLabel}${unread ? ' · Okunmadı' : marker.isNotEmpty ? ' · Okundu' : ''}\n${dateLabel(session.updatedAt)}'),
       Text('Oturum $reference', style: Theme.of(context).textTheme.bodySmall),
-    ]), onTap: () => openScreen(context, SessionScreen(controller: controller, sessionId: session.id)), trailing: IconButton(tooltip: pinned ? 'Oturum sabitlemesini kaldır' : 'Oturumu sabitle', icon: Icon(pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined), onPressed: () => perform(context, () => controller.updateLocalState('pins', 'session:${session.id}', !pinned))));
+    ]), onTap: () => openScreen(context, SessionScreen(controller: controller, sessionId: session.id)), trailing: IconButton(tooltip: pinned ? 'Oturum sabitlemesini kaldır' : 'Oturumu sabitle', icon: Icon(pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined), onPressed: () => perform(context, () => controller.updateLocalState('pins', 'session:${session.id}', !pinned))))));
   }
 }
 
@@ -98,8 +100,10 @@ class _ProjectScreenState extends State<ProjectScreen> {
     final pins = object(object(c.localState['sections'])['pins']);
     final sessions = ordered.where((s) => s.name.toLowerCase().contains(query.toLowerCase()) && (filter == 'all' || (filter == 'pinned' ? pins['session:${s.id}'] == true : filter == 'archive' ? s.archived && !s.activeUnbridged : !s.archived || s.activeUnbridged))).toList();
     final pending = c.snapshot.pending.where((i) => i.projectId == p.id).toList();
+    final working = c.connection.connected && ordered.any((s) => s.writerConnected && (s.workState == 'running' || s.workState == 'background'));
     return Scaffold(appBar: AppBar(title: Text(p.name), actions: [IconButton(tooltip: 'Yeni oturum', onPressed: c.connection.connected ? () => openScreen(context, NewSessionScreen(controller: c, projectId: p.id)) : null, icon: const Icon(Icons.add_rounded)), IconButton(tooltip: 'Proje dosyalarını incele', onPressed: () => openScreen(context, ProjectFilesScreen(controller: c, project: p)), icon: const Icon(Icons.folder_copy_outlined))]), body: SafeArea(top: false, child: CustomScrollView(key: PageStorageKey('project:${p.id}'), slivers: [
       SliverToBoxAdapter(child: ConnectionBanner(c)),
+      if (working) SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 8, 24, 8), child: Row(children: [const WorkingAvatar(size: 56), const SizedBox(width: 12), Expanded(child: Text('Bu projede çalışma sürüyor', style: Theme.of(context).textTheme.bodyMedium))]))),
       if (pending.isNotEmpty) ...[const SliverToBoxAdapter(child: SectionHeading('Yanıt bekliyor')), SliverList.builder(itemCount: pending.length, itemBuilder: (context, index) => InteractionRow(controller: c, interaction: pending[index]))],
       const SliverToBoxAdapter(child: SectionHeading('Oturumlar')),
       SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 0, 24, 8), child: TextField(onChanged: (s) => setState(() => query = s), onSubmitted: (s) { if (s.trim().isNotEmpty) openScreen(context, SessionSearchScreen(controller: c, projectId: p.id, initialQuery: s)); }, decoration: InputDecoration(labelText: 'Bu projede oturum ara', prefixIcon: const Icon(Icons.search_rounded), suffixIcon: IconButton(tooltip: 'Konuşma içeriğinde ara', onPressed: () => openScreen(context, SessionSearchScreen(controller: c, projectId: p.id, initialQuery: query)), icon: const Icon(Icons.manage_search_rounded)))))),

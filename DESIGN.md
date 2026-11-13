@@ -1,24 +1,37 @@
 ---
 name: Omputer Android
-description: A local-first Material 3 companion for project continuity and human decisions.
+description: A local-first native working companion in graphite and fog neumorphic materials.
 colors:
-  ink: "#151d37"
-  periwinkle: "#b8b9ff"
-  citrus: "#e0ed8b"
-  scheme-seed: "#595bc4"
-  dark-surface: "#10172a"
-  dark-on-surface: "#eeeff8"
-  dark-secondary-container: "#353e28"
-  light-primary: "#494bb0"
+  scheme-seed: "#a87920"
+  dark-base: "#23272f"
+  dark-raised: "#292e37"
+  dark-inset: "#20242b"
+  dark-highlight: "#383e49"
+  dark-shadow: "#13161c"
+  dark-text: "#f1f3f5"
+  dark-secondary: "#c0c6cf"
+  dark-primary: "#f3ca68"
+  dark-on-primary: "#272016"
+  dark-primary-container: "#463c28"
+  dark-on-primary-container: "#ffe3a2"
+  dark-outline: "#8e98a5"
+  dark-outline-variant: "#454e5b"
+  light-base: "#e8edf2"
+  light-raised: "#eef2f6"
+  light-inset: "#e2e8ee"
+  light-highlight: "#ffffff"
+  light-shadow: "#bdc6d0"
+  light-text: "#252c35"
+  light-secondary: "#505b68"
+  light-primary: "#775500"
   light-on-primary: "#ffffff"
-  light-surface: "#f8f8ff"
-  light-secondary-container: "#e7efbc"
-  light-on-secondary-container: "#313b0e"
+  light-primary-container: "#f1dfb5"
+  light-on-primary-container: "#4a370d"
+  light-outline: "#677482"
+  light-outline-variant: "#bdc7d1"
 typography:
-  wayfinding:
+  native:
     fontFamily: Roboto
-    fontWeight: 600
-    letterSpacing: "-0.7sp"
   project-title:
     fontFamily: Roboto
     fontWeight: 600
@@ -29,162 +42,103 @@ typography:
     fontFamily: monospace
     lineHeight: 1.5
 rounded:
-  field-notice: "16dp"
-  decision-strip: "20dp"
-  activity: "24dp"
+  chip-text-button: "12dp"
+  field-button-row-menu: "16dp"
+  surface: "20dp"
+  dialog-sheet: "24dp"
 spacing:
   compact: "8dp"
   related: "12dp"
   control: "16dp"
   container: "20dp"
   page: "24dp"
+shadows:
+  raised:
+    shadowOffset: "4dp 4dp"
+    highlightOffset: "-4dp -4dp"
+    blurRadius: "10dp"
+    shadowAlpha: 0.7
+    highlightAlpha: 0.55
+  compact:
+    shadowOffset: "2dp 2dp"
+    highlightOffset: "-2dp -2dp"
+    blurRadius: "5dp"
+    shadowAlpha: 0.7
+    highlightAlpha: 0.55
+  inset:
+    shadowOffset: "3dp 3dp"
+    highlightOffset: "-3dp -3dp"
+    maskBlurSigma: "3dp"
+    shadowAlpha: 0.6
+    highlightAlpha: 0.65
 components:
-  button-filled-dark:
-    backgroundColor: "{colors.periwinkle}"
-    textColor: "{colors.ink}"
+  button:
+    width: "48dp minimum"
     height: "52dp minimum"
-  button-filled-light:
-    backgroundColor: "{colors.light-primary}"
-    textColor: "{colors.light-on-primary}"
-    height: "52dp minimum"
+    rounded: "{rounded.field-button-row-menu}"
+  compact-button:
+    width: "48dp minimum"
+    height: "48dp minimum"
   input:
-    rounded: "{rounded.field-notice}"
-    padding: "16dp 16dp"
-  decision-strip-dark:
-    backgroundColor: "{colors.dark-secondary-container}"
-    rounded: "{rounded.decision-strip}"
-    padding: "20dp"
-  decision-strip-light:
-    backgroundColor: "{colors.light-secondary-container}"
-    rounded: "{rounded.decision-strip}"
-    padding: "20dp"
-  activity:
-    rounded: "{rounded.activity}"
-    padding: "20dp"
+    rounded: "{rounded.field-button-row-menu}"
+    padding: "16dp"
 ---
 
 # Design System: Omputer Android
 
 ## Overview
 
-**Creative North Star: "Dusk atelier"**
+**Creative North Star: Graphite workbench.** The explicitly requested whole-app neumorphic redesign uses graphite in dark mode and fog in light mode, one amber action accent, and consistent top-left lighting. This replaces the previous visual world rather than layering another style onto it. The product remains a Turkish-first, local-first native companion for paired-PC project continuity, conversations and human decisions—not a cloud dashboard or marketing surface.
 
-A calm working companion, not a terminal compressed onto a phone. Deep blue surfaces, periwinkle actions, generous headings, and grounded rows make project context readable before exposing session mechanics. Cool paper and indigo give the light scheme its own identity.
-
-Material 3 supplies the interaction vocabulary. Turkish-first copy names the project, the pending decision, the source, and the freshness of a record. Recorded project memory and live conversation context remain visibly distinct; a finished agent turn is not presented as a finished project.
-
-**Key Characteristics:**
-- Native Material 3 controls and adaptive navigation.
-- Flat grouped rows with selective tonal containers.
-- Source-linked context and explicit connection state.
-- Readable, system-scaled typography without remote fonts.
-
-This record describes the native Flutter Android app, not a web implementation. Dimensions are logical dp and text scales with Android font settings in sp terms. Sources include `mobile/lib/ui.dart`, `main.dart`, `projects.dart`, and `interactions.dart`. Historical visual evidence includes `.impeccable/review/phone-dark.png`, `phone-project-detail.png`, `phone-question.png`, and `phone-large-font.png`. Those earlier Android 35 Pixel 7 emulator captures are not visual acceptance of Android 1.1.0+4. Current-version native screenshots and scoped review remain pending; tablet, landscape, physical-device performance, TalkBack and reduced-motion runtime verification are not established by the historical captures.
-
-## Current integration direction — Android 1.1.0+4 / PC 0.2.0
-
-Preserve the existing **Operate** direction: a local-only, native working companion with compact information hierarchy, not a marketing dashboard, general terminal or cloud control plane. Keep the existing Material vocabulary, color roles, typography, system scaling and three-destination navigation. This section records the integrated interaction direction; it is not a visual ship decision or proof that every native acceptance gate has passed.
-
-- **Overview and finding work:** compact project rows and an accessible live-session section keep active work reachable without reading long memory excerpts. Direct session search opens the matched session rather than only its containing project. Pins and read markers express priority and reading state; streaming tokens must not reorder established rows or turn every delta into unread work. Preferences remain scoped to the paired PC identity.
-- **Commands and operations:** the slash palette exposes the host catalog and supported context/session/skill actions without pretending every TUI command works remotely. Selecting a command is distinct from submitting it. Arguments, unsupported/stale states and correlated operation results remain visible; acknowledgement is not presented as successful completion.
-- **Writing and queues:** session/mode drafts, attachment previews and explicit discard preserve user intent across navigation. Sending clears only the acknowledged draft version, not newer text. Host-backed queue entries expose their actual state and available edit/remove/promote actions; decisions are not silently stored as offline approvals. Process-death/offline restoration still requires current native acceptance.
-- **Branch and review:** tree/history, branch/fork and plan review are contextual session actions, not destructive shortcuts hidden behind generic icons. Preserve the original source history, make the selected branch and ownership clear, and restore returned text/images into the destination draft. Pending decisions and session generations must not leak between branches. Queue-promotion/resume message identity and branch draft restoration remain under integration.
-- **Files and history:** read-only file/tree/diff and checkpoint history support inspecting the work product and returning to the conversation. Source/path context, stale revisions, confinement errors and conflicts must stay explicit; inspection is not a stage/reset/commit surface.
-- **Diagnostics and continuity:** connection freshness, cached/offline state, installed/running versions, update blockers and recovery status belong to the operating UI. Diagnostics must distinguish provider, journal and process identities and default to redacted output; they must not imply that a production update or restore occurred merely because a private fixture passed.
-
-The source/runtime evidence and current completion gates are recorded at the top of `VERIFICATION.md` and in `.impeccable/review/roadmap-runtime-evidence.json`. Actual compiled managed and terminal runtime acceptance does not substitute for native palette, draft, attachment, branch, accessibility or lifecycle acceptance. No new audit score, before/after visual comparison or current-version ship disposition is asserted here. The integration owner will append the verified native review and final package/signer/profile evidence separately.
+`mobile/lib/neumorphic.dart` owns `NeoPalette`, `NeoSurface`, `NeoInputBorder` and native button backgrounds. `mobile/lib/ui.dart` owns the Material theme, semantic roles and route transitions; screen-specific composition remains in the native screen files. All dimensions here are logical dp; text follows Android system scaling, expressed in sp terms. This is source-derived documentation, not native visual acceptance. Acceptance and historical evidence belong in [the canonical implementation report](Raporlar/2026-11-13-butunsel-neumorphic-ui.md); earlier screenshots do not establish acceptance of this redesign.
 
 ## Colors
 
-### Primary
+The frontmatter records authored constants, not an invented tonal ramp. `ColorScheme.fromSeed` uses `#a87920` at the selected brightness; `ui.dart` overrides the recorded roles. There is no wallpaper-derived Dynamic Color implementation. Resolve every foreground/background through the active theme rather than transplanting a dark pair into light mode.
 
-Periwinkle is dark-theme `primary`, with ink as `onPrimary`. Light-theme primary is indigo (`light-primary`), with white on-primary. Actions, source links, leading icons, and memory labels use semantic scheme roles, not fixed dark-theme swatches.
-
-### Secondary
-
-Citrus is dark `onSecondaryContainer`; the dark secondary container is muted olive. The light scheme uses pale citrus container and dark olive foreground. Selected Material chips and the waiting-decision strip draw attention through secondary-container tone; citrus is not reserved exclusively for warnings. The strip itself inherits text styling rather than explicitly overriding it with `onSecondaryContainer`.
-
-### Neutral
-
-Dark surfaces are blue-black, with porcelain on-surface text. Light surfaces are cool paper, with ink on-surface text. App bars and compact navigation use the scheme surface. Input fill uses `surfaceContainerHighest` at 0.55 alpha; dividers use `outlineVariant` at 0.65 alpha.
-
-**The Semantic Pair Rule.** Resolve light/dark roles through `Theme.of(context).colorScheme`; do not transplant a dark foreground or background into the light theme.
-
-The frontmatter records exact authored constants and overrides only. Remaining roles—including primary containers, outlines, error colors, and tonal surfaces—come from `ColorScheme.fromSeed` for each brightness. There is no authored tonal ramp or wallpaper-derived Dynamic Color implementation to document.
+`surface`, scaffold and canvas use base; low/high surface containers use raised; lowest/highest containers and secondary containers use inset. `onSurface` and `onSecondaryContainer` use text; `onSurfaceVariant` and secondary use secondary text. `onSecondary` uses base. Tertiary shares amber primary with base as its foreground. Primary containers use the authored amber-muted pair; unoverridden roles, including errors, remain generated Material roles. Amber means action, selection or focus—not generic decoration. Error notices use `errorContainer`/`onErrorContainer` and retain explanatory text.
 
 ## Typography
 
-Android Material 2021 typography (`Typography.material2021(platform: TargetPlatform.android)`) is the native hierarchy; Roboto is the Android text face. There is no bundled brand font or remote font dependency. Preserve the SDK role definitions rather than introducing a parallel hand-sized type scale.
-
-- **Wayfinding:** `headlineLarge`, with weight 600 and tightened tracking from the frontmatter, for “Kaldığın yerden.”
-- **Screen/empty-state headings:** `headlineSmall`; section headings use `titleLarge`.
-- **Project titles:** `titleLarge`, weight 600; activity goals use `titleMedium`.
-- **Reading:** `bodyLarge`; extended memory and activity excerpts use the frontmatter reading line-height. Overview excerpts may be line-limited; detail memory remains selectable and reflows.
-- **Metadata:** `labelLarge` / `labelMedium` for connection, status, provenance, and timestamps; paths use `bodySmall`.
-- **Editor content:** system `monospace`, with the recorded reading line-height. Ordinary answers retain native body typography.
-
-**The Scale-With-The-Reader Rule.** Keep system text scaling and wrapping. Do not replace Material roles with fixed raster text or shrink content to preserve a screenshot composition.
+Use native Roboto and `Typography.material2021(platform: TargetPlatform.android)`, with no remote font dependency or parallel fixed-size type scale. Screen headings use headline roles, sections/project names use title roles, reading uses body roles and provenance/status use label roles. App-bar titles and project titles use weight 600. Extended reading and system-monospace editor content use line-height 1.5 where authored. Preserve wrapping, selectable reading content and system text scale; do not shrink text to maintain a composition.
 
 ## Layout
 
-The compact home uses three bottom destinations: Projeler, Gelen kutusu, Ayarlar. At available width **720dp and above**, the same destinations become a labeled `NavigationRail` beside the content and a vertical divider. This is a width check, not a device-model check; it is not a claim of a fully verified tablet split-view layout.
+Compact navigation has Projeler, Gelen kutusu and Ayarlar; at available width 720dp it becomes a labeled native NavigationRail. This width rule is not proof of tablet acceptance. Common gutters are 24dp, with 8/12/16/20/24dp spacing for increasingly separated groups. Section-heading padding remains left 24, top 28, right 16, bottom 12dp.
 
-Common page gutters are 24dp. Related content uses the frontmatter spacing steps; sections establish a stronger gap (section-heading padding: left 24dp, top 28dp, right 16dp, bottom 12dp). Project rows use left/right 24dp, top 22dp, bottom 24dp. List rows and fine separators carry hierarchy instead of an equal-sized dashboard-card grid.
+Keep long transcripts, files, diffs and memory on quiet flat reading planes. Use raised surfaces for actionable groups and inset surfaces for entry/selection, not a shadow around every paragraph. The project ring keeps real project-ID ordering; selected-project text and session actions remain outside the transform. Search, empty/loading/error states and offline saved-view labels represent actual data, never demonstration content.
 
-Home reserves 100dp bottom scroll padding near its extended new-session FAB; project detail reserves 110dp. `SafeArea(top: false)` protects body insets beneath app bars; forms use scrollable content. Filters wrap rather than forcing a single horizontal line. Empty, missing, loading, disconnected, and failed states remain explicit instead of being filled with demonstration data.
-
-Android 1.1.2 shows each open session directly beneath its project, with stable visible-ID references for identical names. Terminal-open sessions remain explicitly read-only. Closed history stays in project detail rather than filling the home list. The conversation editor/send row is anchored to the resized safe-area bottom; only ancillary composer controls/attachments scroll. Header metadata and notices use a bounded scroll area on short screens so the keyboard cannot collapse the editable row. October 28 native emulator acceptance covers the changed phone flow and 200% text, not physical-device or tablet certification.
+The composer input/send row remains anchored above the resized safe-area/IME bottom; ancillary controls and attachments may scroll independently. Short-screen headers/notices must not collapse the editable row. Preserve draft ownership, multiline growth, selection, keyboard submission rules and acknowledged-version clearing.
 
 ## Elevation & Depth
 
-Depth is primarily tonal. Project overview rows are flat; activity context uses `primaryContainer`, and waiting decisions use `secondaryContainer`. The app bar specifies scrolled-under elevation 1. FABs, dialogs, state layers, and navigation indicators retain Material behavior; there are no authored bespoke shadow tokens. Do not substitute glow, glass, or decorative gradients for this hierarchy.
+One lighting model applies across the app. Raised surfaces use a lower-right shadow at (4,4), blur radius 10, alpha .7 and upper-left highlight at (-4,-4), blur radius 10, alpha .55. Compact controls use ±2 offsets and blur radius 5 with the same alpha. Inset surfaces clip an even-odd interior shadow: shadow at (3,3), alpha .6, highlight at (-3,-3), alpha .65, with native mask-blur sigma 3. Sigma is not a CSS box-shadow blur radius. Flat surfaces have no depth shadows. Palette highlight/shadow colors resolve by brightness.
 
-Custom screen navigation fades with a small horizontal translation: 220ms forward, 180ms reverse, `Cubic(.16, 1, .3, 1)`. The translation begins at 0.025 of the child width, or 0.045 for checkpoint routes. `MediaQuery.disableAnimationsOf(context)` makes these custom route durations zero and returns the child without fade/slide. Retain native Material component behavior; this record does not claim every SDK animation has been independently exercised with Remove animations.
+Existing route motion remains 220ms forward/180ms reverse, Cubic(.16,1,.3,1), fade plus horizontal offset .025 of child width (.045 for checkpoints). `disableAnimations` returns the untransformed child with zero custom duration. No new depth animation is prescribed.
+
+The existing perspective project ring retains its 20-second revolution, play/pause, drag interruption and previous/next controls. Text entry pauses rotation; keyboard selection is immediate. Reduced motion/accessibility navigation use static selection; route inactivity and app inactivity suspend ticking. The speeder avatar only indicates a live connection with a connected writer and `workState` running/background. Human-wait, settled and disconnected states never animate merely because a process exists. Reduced motion uses a static silhouette with text; offscreen/inactive ticking stops. These are retained user-requested exceptions, not permission to add decorative loops.
 
 ## Shapes
 
-Use gently rounded filled fields and notices, softer waiting-decision strips, and larger activity context containers with the frontmatter radii. Fields have no resting outline stroke. Buttons, filter chips, FABs, radio controls, checkboxes, dialogs, and navigation indicators use their Material 3 shapes; do not invent a separate radius scale for those SDK defaults. Fine dividers and crisp Material icons balance the rounded containers.
+Use 12dp for chips/text buttons, 16dp for fields/buttons/rows/menus, default 20dp for `NeoSurface`, and 24dp for dialogs and sheet top corners. These are authored roles, not a mandate to replace every SDK shape. Native radio, checkbox and other Material control geometry remains native. App bars have zero elevation/scrolled-under elevation; transparent tint avoids a competing lighting layer.
 
 ## Components
 
-### Buttons
+Filled and outlined buttons keep native callbacks, semantics, focus and ink response. Minimum size is 48×52dp; compact/icon and text buttons are at least 48×48dp. Filled/outlined/icon button backgrounds use `backgroundBuilder`: resting raised, pressed/selected inset, disabled flat. Enabled filled actions use amber and its on-primary pair. Focus uses the primary border; disabled treatment remains explicit, with the authored muted foreground and border rather than an invented universal opacity.
 
-Filled buttons are the clear affirmative action. Filled and outlined buttons have a 48dp minimum width and 52dp minimum height; text buttons have a 48×48dp minimum. Tonal buttons resume the recent conversation; outlined buttons expose source records or a negative alternative. Keep Material pressed, focus, disabled, and ink-response states, not web hover effects. A single extended FAB starts a new session on populated project home and is disabled when disconnected.
+Fields use true `NeoInputBorder` inset painting, 16dp padding/radius, a resting outline-variant border and 2dp amber focus border. Error borders use native error roles; disabled outline alpha is .5. Native floating labels, accessible names, editing, IME, selection and validation remain intact. Cursor/handles use amber; selection uses amber alpha .24. The message editor retains its persistent “OMP’ye mesaj” name and native draft behavior.
 
-### Inputs and filters
+Navigation uses inset indicators and amber selected labels/icons without replacing native destinations or Back. Chips use raised/inset/base for resting/selected/disabled, radius 12 and 8dp padding, with a native selection checkmark. Menus use raised 16dp surfaces; dialogs and sheets use raised 24dp surfaces and native dismissal/confirmation behavior. Snackbars use text-colored backgrounds with base-colored content; dividers use outline-variant alpha .65.
 
-Filled text fields use the recorded radius and padding with scheme-derived tonal fill. Search exposes a clear action when populated. Native filter chips carry selection state and wrap on narrow screens. Questions use native radio or checkbox list tiles, not custom pseudo-controls; custom answers and contextual notes use multiline fields.
+**First valid response and trust.** The first valid desktop or phone answer wins. Requests are actionable only while pending, connected, valid and not submitting. Closed/expired requests stay read-only; offline answers are not silently queued. Tool decisions retain command/context warnings and separate approve/reject actions; cancellation uses native confirmation. Status, freshness, saved/offline state and failure are conveyed in words, not color alone.
 
-### Project rows and activity containers
-
-Overview rows show project name, goal, next step, session/freshness metadata, and a forward affordance. Detail distinguishes “Son kaldığın yer” (conversation/task-derived activity, when available) from “Projenin hafızası” (persistent goal, summary, next step, decisions). The memory footer identifies agent-sourced versus manually edited records and includes freshness. A source-session button appears when a source exists; it opens the actual session, with a checkpoint-thread marker rather than a decorative identity badge.
-
-### Decisions and first-response states
-
-The waiting-decision strip leads to the inbox. Rows identify project, title, status, and creation time; detail retains the source-conversation action and any deadline. A response is enabled only while the request is pending, connected, and not submitting; structured questions also require valid answers and selection requires a selected option. Busy text names submission, errors remain visible, and closed requests display a read-only explanation.
-
-**The First Valid Response Rule.** The first valid desktop or phone answer wins. Closed or expired requests must not look actionable; disconnected answers are not silently queued. The interface explicitly tells the user to reconnect and check the current request. Tool approval includes a command/tool-context warning and separate approval/rejection choices. Cancellation requires a native confirmation dialog.
-
-### Connection and feedback
-
-Connection state combines an icon, text, and a live-region semantic wrapper. Offline state says it is a saved view and exposes reconnect; color is not the only signal. Failures use `errorContainer`/`onErrorContainer` notices with retry where available. Transient success uses a Material snackbar; failure snackbars remain longer (8 seconds) and include close affordance.
-
-### Navigation
-
-Use the Material app bar for screen context, native Back, bottom navigation or the width-adapted rail for top-level destinations, and contextual detail routes. Source links must retain the actual session identity. The sidecar's HTML/CSS entries are isolated documentation-panel translations only, not shipping components, Android measurements, or a browser acceptance baseline.
+Preserve source-session, project, branch and paired-PC identity. Durable project memory remains distinct from live activity; a finished agent turn is not project completion. File/diff inspection is read-only, not implicit stage/reset/commit. Local Markdown does not fetch remote images or follow arbitrary URLs; remote/absolute references remain copy-only and navigable project paths retain host-enforced confinement. Diagnostics stay redacted by default; surface styling grants no new permissions or disclosure.
 
 ## Do's and Don'ts
 
-### Do:
-- **Do** use Material color roles and preserve both authored brightness schemes.
-- **Do** keep native text scaling, wrapping, semantic labels, and minimum 48dp touch targets.
-- **Do** show connection, request status, provenance, and freshness in words as well as visual cues.
-- **Do** distinguish durable project memory from live session activity and link to its source when available.
-- **Do** honor Remove animations in custom route transitions.
-
-### Don't:
-- **Don't** convert these dp/sp records into CSS layout rules for the Android app.
-- **Don't** replace flat project rows with a cramped terminal or uniform dashboard-card grid.
-- **Don't** add decorative glow, glass, gradients, or generated photography to this native working surface.
-- **Don't** make closed or disconnected requests appear submittable or imply offline answers are queued.
-- **Don't** claim tablet, physical-device, TalkBack, or motion verification from phone screenshots alone.
+- Do use the active palette and Material semantic pairs, native Roboto roles and system scale.
+- Do keep meaningful touch targets, labels, focus, readable flat content and real source/freshness context.
+- Do retain the existing reduced-motion and inactive/offscreen stop rules.
+- Don't add colored glows, wallpaper claims, decorative imagery, new looping motion or a competing aesthetic.
+- Don't replace native semantics, response gating, draft/IME behavior or privacy boundaries with decorative controls.
+- Don't treat this record, sidecar previews or historical captures as current native acceptance. Physical-device performance, TalkBack, large-font, landscape/tablet and reduced-motion runtime results must be established in the canonical report, not inferred here.

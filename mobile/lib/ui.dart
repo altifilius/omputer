@@ -4,34 +4,58 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'controller.dart';
 import 'models.dart';
+import 'neumorphic.dart';
 
-const ink = Color(0xff151d37);
-const periwinkle = Color(0xffb8b9ff);
-const citrus = Color(0xffe0ed8b);
 
 ThemeData omputerTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;
-  final scheme = ColorScheme.fromSeed(seedColor: const Color(0xff595bc4), brightness: brightness).copyWith(
-    primary: dark ? periwinkle : const Color(0xff494bb0),
-    onPrimary: dark ? ink : Colors.white,
-    surface: dark ? const Color(0xff10172a) : const Color(0xfff8f8ff),
-    onSurface: dark ? const Color(0xffeeeff8) : ink,
-    secondaryContainer: dark ? const Color(0xff353e28) : const Color(0xffe7efbc),
-    onSecondaryContainer: dark ? citrus : const Color(0xff313b0e),
+  final neo = NeoPalette.forBrightness(brightness);
+  final foreground = dark ? const Color(0xfff1f3f5) : const Color(0xff252c35);
+  final secondary = dark ? const Color(0xffc0c6cf) : const Color(0xff505b68);
+  final accent = dark ? const Color(0xfff3ca68) : const Color(0xff775500);
+  final scheme = ColorScheme.fromSeed(seedColor: const Color(0xffa87920), brightness: brightness).copyWith(
+    primary: accent, onPrimary: dark ? const Color(0xff272016) : Colors.white,
+    primaryContainer: dark ? const Color(0xff463c28) : const Color(0xfff1dfb5),
+    onPrimaryContainer: dark ? const Color(0xffffe3a2) : const Color(0xff4a370d),
+    secondary: secondary, onSecondary: neo.base,
+    secondaryContainer: neo.inset, onSecondaryContainer: foreground,
+    tertiary: accent, onTertiary: neo.base,
+    surface: neo.base, onSurface: foreground, onSurfaceVariant: secondary,
+    surfaceContainerLowest: neo.inset, surfaceContainerLow: neo.raised,
+    surfaceContainer: neo.base, surfaceContainerHigh: neo.raised, surfaceContainerHighest: neo.inset,
+    outline: dark ? const Color(0xff8e98a5) : const Color(0xff677482),
+    outlineVariant: dark ? const Color(0xff454e5b) : const Color(0xffbdc7d1),
+    shadow: neo.shadow,
   );
+  final border = NeoInputBorder(palette: neo, borderSide: BorderSide(color: scheme.outlineVariant));
+  final buttons = neoButtonStyle(primary: true).copyWith(
+    foregroundColor: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.disabled) ? secondary : scheme.onPrimary),
+  );
+  final secondaryButtons = neoButtonStyle().copyWith(
+    foregroundColor: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.disabled) ? secondary.withValues(alpha: .7) : foreground),
+  );
+  final text = Typography.material2021(platform: TargetPlatform.android).black.apply(bodyColor: foreground, displayColor: foreground);
   return ThemeData(
-    useMaterial3: true,
-    colorScheme: scheme,
-    scaffoldBackgroundColor: scheme.surface,
-    appBarTheme: AppBarTheme(backgroundColor: scheme.surface, foregroundColor: scheme.onSurface, centerTitle: false, scrolledUnderElevation: 1),
-    navigationBarTheme: NavigationBarThemeData(backgroundColor: scheme.surface, indicatorColor: scheme.primaryContainer),
-    inputDecorationTheme: InputDecorationTheme(filled: true, fillColor: scheme.surfaceContainerHighest.withValues(alpha: .55), border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none), contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16)),
-    filledButtonTheme: FilledButtonThemeData(style: FilledButton.styleFrom(minimumSize: const Size(48, 52))),
-    outlinedButtonTheme: OutlinedButtonThemeData(style: OutlinedButton.styleFrom(minimumSize: const Size(48, 52))),
-    textButtonTheme: TextButtonThemeData(style: TextButton.styleFrom(minimumSize: const Size(48, 48))),
-    iconButtonTheme: IconButtonThemeData(style: IconButton.styleFrom(minimumSize: const Size(48, 48))),
+    useMaterial3: true, colorScheme: scheme, extensions: [neo],
+    scaffoldBackgroundColor: neo.base, canvasColor: neo.base,
+    appBarTheme: AppBarTheme(backgroundColor: neo.base, foregroundColor: foreground, centerTitle: false, elevation: 0, scrolledUnderElevation: 0, surfaceTintColor: Colors.transparent, titleTextStyle: text.titleLarge?.copyWith(fontWeight: FontWeight.w600)),
+    navigationBarTheme: NavigationBarThemeData(backgroundColor: Colors.transparent, surfaceTintColor: Colors.transparent, elevation: 0, indicatorColor: neo.inset, indicatorShape: NeoInputBorder(palette: neo, borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: scheme.outlineVariant)), labelTextStyle: WidgetStateProperty.resolveWith((states) => text.labelMedium?.copyWith(color: states.contains(WidgetState.selected) ? accent : secondary, fontWeight: states.contains(WidgetState.selected) ? FontWeight.w600 : FontWeight.w400)), iconTheme: WidgetStateProperty.resolveWith((states) => IconThemeData(color: states.contains(WidgetState.selected) ? accent : secondary))),
+    navigationRailTheme: NavigationRailThemeData(backgroundColor: Colors.transparent, indicatorColor: neo.inset, indicatorShape: NeoInputBorder(palette: neo, borderRadius: BorderRadius.circular(16)), selectedIconTheme: IconThemeData(color: accent), unselectedIconTheme: IconThemeData(color: secondary), selectedLabelTextStyle: TextStyle(color: accent)),
+    inputDecorationTheme: InputDecorationTheme(filled: true, fillColor: neo.inset, border: border, enabledBorder: border, disabledBorder: border.copyWith(borderSide: BorderSide(color: scheme.outlineVariant.withValues(alpha: .5))), focusedBorder: border.copyWith(borderSide: BorderSide(color: accent, width: 2)), errorBorder: border.copyWith(borderSide: BorderSide(color: scheme.error)), focusedErrorBorder: border.copyWith(borderSide: BorderSide(color: scheme.error, width: 2)), labelStyle: TextStyle(color: secondary), hintStyle: TextStyle(color: secondary), floatingLabelStyle: TextStyle(color: accent), contentPadding: const EdgeInsets.all(16)),
+    filledButtonTheme: FilledButtonThemeData(style: buttons),
+    outlinedButtonTheme: OutlinedButtonThemeData(style: secondaryButtons),
+    textButtonTheme: TextButtonThemeData(style: TextButton.styleFrom(minimumSize: const Size(48, 48), foregroundColor: accent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))),
+    iconButtonTheme: IconButtonThemeData(style: neoButtonStyle(compact: true).copyWith(foregroundColor: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.disabled) ? secondary.withValues(alpha: .5) : foreground))),
+    chipTheme: ChipThemeData(backgroundColor: neo.raised, selectedColor: neo.inset, disabledColor: neo.base, labelStyle: TextStyle(color: foreground), secondaryLabelStyle: TextStyle(color: accent), checkmarkColor: accent, side: BorderSide(color: scheme.outlineVariant), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8), elevation: 0, pressElevation: 0, showCheckmark: true),
+    listTileTheme: ListTileThemeData(iconColor: secondary, textColor: foreground, selectedColor: accent, selectedTileColor: neo.inset, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), minVerticalPadding: 12),
+    expansionTileTheme: ExpansionTileThemeData(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), collapsedShape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), backgroundColor: neo.inset, collapsedBackgroundColor: neo.raised, iconColor: accent, collapsedIconColor: secondary, textColor: foreground, collapsedTextColor: foreground),
+    dialogTheme: DialogThemeData(backgroundColor: neo.raised, surfaceTintColor: Colors.transparent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24), side: BorderSide(color: scheme.outlineVariant))),
+    bottomSheetTheme: BottomSheetThemeData(backgroundColor: neo.raised, surfaceTintColor: Colors.transparent, shape: RoundedRectangleBorder(borderRadius: const BorderRadius.vertical(top: Radius.circular(24)), side: BorderSide(color: scheme.outlineVariant))),
+    popupMenuTheme: PopupMenuThemeData(color: neo.raised, surfaceTintColor: Colors.transparent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: scheme.outlineVariant))),
+    snackBarTheme: SnackBarThemeData(backgroundColor: foreground, contentTextStyle: TextStyle(color: neo.base), behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
+    textSelectionTheme: TextSelectionThemeData(cursorColor: accent, selectionColor: accent.withValues(alpha: .24), selectionHandleColor: accent),
     dividerTheme: DividerThemeData(color: scheme.outlineVariant.withValues(alpha: .65), space: 1),
-    textTheme: Typography.material2021(platform: TargetPlatform.android).black.apply(bodyColor: scheme.onSurface, displayColor: scheme.onSurface),
+    textTheme: text,
   );
 }
 
@@ -96,7 +120,7 @@ class ConnectionBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final connection = controller.connection;
     final color = Theme.of(context).colorScheme;
-    return Padding(padding: const EdgeInsets.fromLTRB(24, 0, 24, 12), child: Semantics(liveRegion: true, child: Wrap(spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [Icon(connection.connected ? Icons.link_rounded : Icons.link_off_rounded, size: 18, color: connection.connected ? color.primary : color.error), Text(connection.connected ? (connection.serverName.isEmpty ? 'Bilgisayara bağlı' : connection.serverName) : 'Çevrimdışı · kayıtlı görünüm', style: Theme.of(context).textTheme.labelLarge), if (!connection.connected) TextButton(onPressed: () => perform(context, controller.reconnect), child: const Text('Yeniden bağlan'))])));
+    return Padding(padding: const EdgeInsets.fromLTRB(24, 8, 24, 12), child: NeoSurface(depth: NeoDepth.inset, radius: 14, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8), child: Semantics(liveRegion: true, child: Wrap(spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [Icon(connection.connected ? Icons.link_rounded : Icons.link_off_rounded, size: 18, color: connection.connected ? color.primary : color.error), Text(connection.connected ? (connection.serverName.isEmpty ? 'Bilgisayara bağlı' : connection.serverName) : 'Çevrimdışı · kayıtlı görünüm', style: Theme.of(context).textTheme.labelLarge), if (!connection.connected) TextButton(onPressed: () => perform(context, controller.reconnect), child: const Text('Yeniden bağlan'))]))));
   }
 }
 
@@ -105,7 +129,7 @@ class ErrorNotice extends StatelessWidget {
   final String message;
   final VoidCallback? onRetry;
   @override
-  Widget build(BuildContext context) => Padding(padding: const EdgeInsets.all(16), child: Material(color: Theme.of(context).colorScheme.errorContainer, borderRadius: BorderRadius.circular(16), child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(message, style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer)), if (onRetry != null) TextButton(onPressed: onRetry, child: const Text('Yeniden dene'))]))));
+  Widget build(BuildContext context) => Padding(padding: const EdgeInsets.all(16), child: NeoSurface(depth: NeoDepth.inset, radius: 16, color: Theme.of(context).colorScheme.errorContainer, borderColor: Theme.of(context).colorScheme.error.withValues(alpha: .5), padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(message, style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer)), if (onRetry != null) TextButton(onPressed: onRetry, child: const Text('Yeniden dene'))])));
 }
 
 /// Activity refreshes update content, not the position of an existing row.
@@ -225,13 +249,13 @@ class _CopyableCodeState extends State<CopyableCode> {
     final line = widget.initialLine ?? 0;
     final valid = line > 0 && line <= lines.length;
     final style = Theme.of(context).textTheme.bodyMedium?.copyWith(fontFamily: 'monospace', height: 1.5);
-    return Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    return Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: NeoSurface(depth: NeoDepth.inset, radius: 16, padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [Expanded(child: Text(widget.language.isEmpty ? 'Kod / metin' : widget.language, style: Theme.of(context).textTheme.labelMedium)), IconButton(tooltip: 'Kodu kopyala', onPressed: () => copyText(context, widget.text), icon: const Icon(Icons.copy_rounded))]),
       if (!valid) SelectableText(widget.text, style: style) else ...[
         if (line > 1) SelectableText(lines.take(line - 1).join('\n'), style: style),
         Container(key: target, width: double.infinity, color: Theme.of(context).colorScheme.secondaryContainer, child: SelectableText(lines[line - 1], style: style)),
         if (line < lines.length) SelectableText(lines.skip(line).join('\n'), style: style),
       ],
-    ]));
+    ])));
   }
 }

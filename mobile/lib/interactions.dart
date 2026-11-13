@@ -5,6 +5,7 @@ import 'models.dart';
 import 'ui.dart';
 import 'session.dart';
 import 'session_controls.dart';
+import 'neumorphic.dart';
 
 enum _CustomAnswerChoice { custom }
 
@@ -27,7 +28,7 @@ class _InboxScreenState extends State<InboxScreen> {
     return CustomScrollView(slivers: [
       SliverToBoxAdapter(child: ConnectionBanner(widget.controller)),
       SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(24, 12, 24, 12), child: TextField(onChanged: (value) => setState(() => query = value), decoration: const InputDecoration(labelText: 'Karar veya proje ara', prefixIcon: Icon(Icons.search_rounded))))),
-      SliverToBoxAdapter(child: SwitchListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 24), title: const Text('Yanıtlanan ve kapananları göster'), value: history, onChanged: (value) => setState(() => history = value))),
+      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 12), child: NeoSurface(child: SwitchListTile(contentPadding: const EdgeInsets.all(16), title: const Text('Yanıtlanan ve kapananları göster'), value: history, onChanged: (value) => setState(() => history = value))))),
       if (items.isEmpty) SliverToBoxAdapter(child: EmptyState(icon: Icons.mark_email_read_outlined, title: query.isNotEmpty ? 'Eşleşen karar yok.' : history ? 'Kayıtlı karar yok.' : 'Şimdilik senden bir karar beklenmiyor.', message: query.isNotEmpty ? 'Aramayı değiştir veya yanıtlanan ve kapananları da göster.' : 'OMP bir soru, seçim veya izin istediğinde burada görünür. Çevrimdışı görünüm son alınan kayıtları gösterir.')),
       SliverList.builder(itemCount: items.length, itemBuilder: (context, index) => InteractionRow(controller: widget.controller, interaction: items[index])),
       const SliverPadding(padding: EdgeInsets.only(bottom: 40)),
@@ -42,7 +43,7 @@ class InteractionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final pending = interaction.pendingAt(DateTime.now());
-    return ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12), leading: Icon(interaction.method == 'approval' ? Icons.shield_outlined : Icons.question_answer_outlined, color: pending ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurfaceVariant), title: Text(interaction.title, maxLines: 3, overflow: TextOverflow.ellipsis), subtitle: Padding(padding: const EdgeInsets.only(top: 6), child: Text('${controller.snapshot.project(interaction.projectId)?.name ?? 'Proje'} · ${interaction.statusLabel}\n${dateLabel(interaction.createdAt)}')), trailing: const Icon(Icons.chevron_right_rounded), onTap: () => openScreen(context, InteractionScreen(controller: controller, interactionId: interaction.id)));
+    return Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: NeoSurface(child: ListTile(contentPadding: const EdgeInsets.all(16), leading: Icon(interaction.method == 'approval' ? Icons.shield_outlined : Icons.question_answer_outlined, color: pending ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurfaceVariant), title: Text(interaction.title), subtitle: Padding(padding: const EdgeInsets.only(top: 8), child: Text('${controller.snapshot.project(interaction.projectId)?.name ?? 'Proje'} · ${interaction.statusLabel}\n${dateLabel(interaction.createdAt)}')), trailing: const Icon(Icons.chevron_right_rounded), onTap: () => openScreen(context, InteractionScreen(controller: controller, interactionId: interaction.id)))));
   }
 }
 
@@ -150,21 +151,21 @@ class _InteractionScreenState extends State<InteractionScreen> {
       Text('${interaction.statusLabel} · ${dateLabel(interaction.createdAt)}', style: Theme.of(context).textTheme.labelLarge),
       if (interaction.expiresAt != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text('Son yanıt zamanı: ${MaterialLocalizations.of(context).formatTimeOfDay(TimeOfDay.fromDateTime(interaction.expiresAt!.toLocal()), alwaysUse24HourFormat: true)} · ${interaction.expiresAt!.toLocal().day}.${interaction.expiresAt!.toLocal().month}')),
       if (interaction.message?.isNotEmpty == true) ...[const SizedBox(height: 24), LocalMarkdown(data: interaction.message!)],
-      if (!pending) ...[const SizedBox(height: 24), Material(color: Theme.of(context).colorScheme.surfaceContainerHighest, borderRadius: BorderRadius.circular(16), child: const Padding(padding: EdgeInsets.all(20), child: Text('Bu istek kapandı. Yeniden yanıt gönderilemez; masaüstü ve telefon yanıtlarından ilk geçerli olan kabul edilir.')))],
-      if (!pending && (interaction.response ?? acceptedResponse) != null) ...[const SizedBox(height: 16), Text('Kabul edilen yanıt', style: Theme.of(context).textTheme.titleMedium), SelectableText(controlText(interaction.response ?? acceptedResponse))],
+      if (!pending) ...[const SizedBox(height: 24), const NeoSurface(depth: NeoDepth.inset, padding: EdgeInsets.all(20), child: Text('Bu istek kapandı. Yeniden yanıt gönderilemez; masaüstü ve telefon yanıtlarından ilk geçerli olan kabul edilir.'))],
+      if (!pending && (interaction.response ?? acceptedResponse) != null) ...[const SizedBox(height: 16), NeoSurface(depth: NeoDepth.inset, padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [Text('Kabul edilen yanıt', style: Theme.of(context).textTheme.titleMedium), const SizedBox(height: 12), SelectableText(controlText(interaction.response ?? acceptedResponse))]))],
       if (!pending && c.snapshot.pending.where((i) => i.id != interaction.id).isNotEmpty) TextButton.icon(onPressed: () => Navigator.pushReplacement(context, MaterialPageRoute<void>(builder: (_) => InteractionScreen(controller: c, interactionId: c.snapshot.pending.first.id))), icon: const Icon(Icons.arrow_forward_rounded), label: const Text('Sonraki bekleyen karara geç')),
       if (draftLoading) const LinearProgressIndicator(),
       if (draftError != null) ErrorNotice(draftError!),
-      if (!c.connection.connected && pending) const Padding(padding: EdgeInsets.only(top: 20), child: Text('Çevrimdışısın. Yanıt sıraya alınmaz; bağlandığında güncel isteği kontrol edip gönder.')),
+      if (!c.connection.connected && pending) const Padding(padding: EdgeInsets.only(top: 20), child: NeoSurface(depth: NeoDepth.inset, padding: EdgeInsets.all(20), child: Text('Çevrimdışısın. Yanıt sıraya alınmaz; bağlandığında güncel isteği kontrol edip gönder.'))),
       const SizedBox(height: 24),
       if (interaction.method == 'ask') ...[
         for (var index = 0; index < answers.length; index++) _question(context, answers[index], enabled, interaction.supportsNotes),
         FilledButton.icon(onPressed: enabled && answers.isNotEmpty && answers.every((a) => a.valid) ? () => send(interaction, {'answer': {'kind': 'submit', 'results': answers.map((a) => a.toJson(includeNote: interaction.supportsNotes)).toList()}}) : null, icon: const Icon(Icons.send_rounded), label: Text(busy ? 'Gönderiliyor…' : 'Yanıtları gönder')),
       ] else if (interaction.method == 'select') ...[
-        RadioGroup<String>(groupValue: selected, onChanged: (value) { if (enabled) changed(() => selected = value); }, child: Column(children: [for (final option in interaction.options) RadioListTile<String>(contentPadding: EdgeInsets.zero, value: '${option['label'] ?? ''}', enabled: enabled, title: Text('${option['label'] ?? ''}'), subtitle: option['description'] == null ? null : Text('${option['description']}'))])),
+        RadioGroup<String>(groupValue: selected, onChanged: (value) { if (enabled) changed(() => selected = value); }, child: Column(children: [for (final option in interaction.options) Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: NeoSurface(child: RadioListTile<String>(contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), value: '${option['label'] ?? ''}', enabled: enabled, title: Text('${option['label'] ?? ''}'), subtitle: option['description'] == null ? null : Text('${option['description']}'))))])),
         const SizedBox(height: 20), FilledButton(onPressed: enabled && selected != null ? () => send(interaction, {'value': selected}) : null, child: const Text('Seçimi gönder')),
       ] else if (interaction.method == 'confirm' || interaction.method == 'approval') ...[
-        if (interaction.method == 'approval') ...[const Text('Bu izin bilgisayarında bir işlem çalıştırabilir. Yukarıdaki komut / araç bağlamını inceleyerek karar ver.'), const SizedBox(height: 20)],
+        if (interaction.method == 'approval') ...[const NeoSurface(depth: NeoDepth.inset, padding: EdgeInsets.all(20), child: Text('Bu izin bilgisayarında bir işlem çalıştırabilir. Yukarıdaki komut / araç bağlamını inceleyerek karar ver.')), const SizedBox(height: 20)],
         FilledButton.icon(onPressed: enabled ? () => send(interaction, {'confirmed': true}) : null, icon: const Icon(Icons.check_rounded), label: Text(interaction.method == 'approval' ? 'İzin ver' : 'Onayla')), const SizedBox(height: 12), OutlinedButton(onPressed: enabled ? () => send(interaction, {'confirmed': false}) : null, child: Text(interaction.method == 'approval' ? 'İzni reddet' : 'Hayır')),
       ] else ...[
         TextField(controller: input, enabled: enabled, minLines: interaction.method == 'editor' ? 10 : 2, maxLines: interaction.method == 'editor' ? 24 : 8, style: interaction.method == 'editor' ? const TextStyle(fontFamily: 'monospace', height: 1.5) : null, onChanged: (_) => setState(() {}), decoration: InputDecoration(labelText: interaction.method == 'editor' ? 'Düzenlenen içerik' : 'Yanıtın', alignLabelWithHint: true)), const SizedBox(height: 20), FilledButton(onPressed: enabled ? () => send(interaction, {'value': input.text}) : null, child: Text(busy ? 'Gönderiliyor…' : 'Yanıtı gönder')),
@@ -186,7 +187,7 @@ class _InteractionScreenState extends State<InteractionScreen> {
     }), if (answer.allowCustom)
       answer.multi ? CheckboxListTile(contentPadding: EdgeInsets.zero, controlAffinity: ListTileControlAffinity.leading, title: const Text('Özel yanıt'), value: answer.customSelected, onChanged: enabled ? (value) => changed(() => answer.selectCustom(value == true)) : null) : RadioListTile<Object>(contentPadding: EdgeInsets.zero, title: const Text('Özel yanıt'), value: _CustomAnswerChoice.custom, enabled: enabled),
     ]);
-    return Padding(padding: const EdgeInsets.only(bottom: 32), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(answer.title, style: Theme.of(context).textTheme.titleLarge), const SizedBox(height: 8), if (answer.multi) const Text('Birden çok seçenek seçebilirsin.'),
+    return Padding(padding: const EdgeInsets.only(bottom: 24), child: NeoSurface(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [Text(answer.title, style: Theme.of(context).textTheme.titleLarge), const SizedBox(height: 12), if (answer.multi) const Text('Birden çok seçenek seçebilirsin.'),
       if (answer.multi) choices else RadioGroup<Object>(groupValue: answer.customSelected ? _CustomAnswerChoice.custom : answer.selected.firstOrNull, onChanged: (value) {
         if (!enabled) return;
         if (value == _CustomAnswerChoice.custom) {
@@ -197,6 +198,6 @@ class _InteractionScreenState extends State<InteractionScreen> {
       }, child: choices),
       if (answer.allowCustom) ...[const SizedBox(height: 12), TextFormField(key: ValueKey('custom:${answer.id}:$draftGeneration'), initialValue: answer.customInput, enabled: enabled && answer.customSelected, minLines: 1, maxLines: 5, onChanged: (value) => changed(() => answer.customInput = value), decoration: const InputDecoration(labelText: 'Özel yanıtın'))],
       if (supportsNotes) ...[const SizedBox(height: 12), TextFormField(key: ValueKey('note:${answer.id}:$draftGeneration'), initialValue: answer.note, enabled: enabled, minLines: 1, maxLines: 5, onChanged: (value) => changed(() => answer.note = value), decoration: const InputDecoration(labelText: 'Bağlam notu (isteğe bağlı)'))],
-    ]));
+    ])));
   }
 }

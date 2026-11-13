@@ -1,0 +1,49 @@
+{
+  "device": "owned Android 35 x86_64 emulator",
+  "pixels": [
+    720,
+    1280
+  ],
+  "density_dpi": 320,
+  "entrypoint": "temporary native fixture using production SessionScreen",
+  "network_or_model_requests": false,
+  "app_error_read": "empty",
+  "scenarios": [
+    {
+      "text": "",
+      "bounds": "[40,1040][560,1152]",
+      "focused": "false",
+      "enabled": "true",
+      "screenshot": "dark-default-final.png"
+    },
+    {
+      "text": "Neumorphic mesaj denemesi",
+      "bounds": "[40,474][560,626]",
+      "focused": "true",
+      "enabled": "true",
+      "screenshot": "dark-focus-ime-final.png"
+    },
+    {
+      "text": "Buyuk yazi denemesi",
+      "bounds": "[40,474][560,626]",
+      "focused": "true",
+      "enabled": "true",
+      "screenshot": "dark-200-ime-final.png"
+    },
+    {
+      "text": "",
+      "bounds": "[40,920][560,1152]",
+      "focused": "false",
+      "enabled": "true",
+      "screenshot": null,
+      "screenshotRetained": false
+    },
+    {
+      "text": "Acik tema denemesi",
+      "bounds": "[40,474][560,626]",
+      "focused": "true",
+      "enabled": "true",
+      "screenshot": "light-200-ime-final.png"
+    }
+  ]
+}

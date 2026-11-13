@@ -1,0 +1,53 @@
+{
+  "device": "Samsung SM-G990E / Android16",
+  "before": {
+    "versionCode": "8",
+    "versionName": "1.1.4",
+    "firstInstallTime": "2026-10-17 20:01:38",
+    "lastUpdateTime": "2026-11-13 13:14:08"
+  },
+  "after": {
+    "versionCode": "8",
+    "versionName": "1.1.4",
+    "firstInstallTime": "2026-10-17 20:01:38",
+    "lastUpdateTime": "2026-11-13 13:18:05"
+  },
+  "installedApkMatchesStaged": true,
+  "sha256": "df7279dfd2d1c023da2d9ff3d7e1a49ce4430b23edb82e17f4f6e4b5fd9ae736",
+  "firstInstallTimePreserved": true,
+  "uninstallOrDataClear": false,
+  "pairingReplacement": false,
+  "messageOrDecisionSubmission": false,
+  "originalVersion": {
+    "versionCode": "7",
+    "versionName": "1.1.3",
+    "firstInstallTime": "2026-10-17 20:01:38",
+    "lastUpdateTime": "2026-11-04 20:49:24"
+  },
+  "physicalUi": {
+    "cardSelectionAndProjectOpen": true,
+    "workingAvatarVisibleOnConnectedRunningProject": true,
+    "nativeImeShown": true,
+    "inputBoundsBeforeIme": [
+      56,
+      2138,
+      855,
+      2295
+    ],
+    "inputBoundsWithIme": [
+      56,
+      1097,
+      855,
+      1254
+    ],
+    "draftTextBeforeAndAfter": "empty, unchanged",
+    "pidScopedFlutterAndroidRuntimeErrors": "empty",
+    "preferencesPreserved": {
+      "fontScale": 1.0,
+      "nightMode": "yes",
+      "animatorDurationScale": 0.5
+    },
+    "searchFilterAndReducedMotion": "covered by targeted widget tests, not physical matrix",
+    "rawScreenshots": "reviewed privately, not retained in project evidence"
+  }
+}
