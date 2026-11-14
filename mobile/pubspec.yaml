@@ -1,7 +1,7 @@
 name: omputer
 description: Yerel OMP oturumları için Android denetleyicisi.
 publish_to: none
-version: 1.2.11+20
+version: 1.3.0+21
 environment:
   sdk: '>=3.5.0 <4.0.0'
 dependencies:

@@ -9,20 +9,31 @@ import 'package:omputer/ui.dart';
 class InteractionNative implements NativeAdapter {
   final List<Json> commands = [];
   final Map<String, Json> drafts = {};
+  final List<Json> operations = [];
+  final List<String> draftCalls = [];
+  final List<bool> secureCalls = [];
+  Json? snapshot;
+  Json? privateContext;
+  final List<String> contextCalls = [];
+  final List<String> openedUrls = [];
   @override
   Stream<Object?> get events => const Stream.empty();
   @override
   Future<Object?> invoke(String method, [Json? arguments]) async {
+    if (method == 'openExternalUrl') { openedUrls.add('${arguments!['url']}'); return null; }
+    if (method.startsWith('draft')) draftCalls.add(method);
+    if (method == 'secureScreen') { secureCalls.add(arguments!['enabled'] == true); return null; }
     if (method == 'draftSave') { drafts['${arguments!['key']}'] = object(arguments['value']); return null; }
     if (method == 'draftDelete') { drafts.remove(arguments!['key']); return null; }
-    if (method == 'operationSave') return null;
+    if (method == 'operationSave') { operations.add(object(arguments!['operation'])); return null; }
     if (method == 'draftLoad') return drafts[arguments!['key']];
     if (method == 'operationList') return [];
+    if (method == 'request' && arguments!['path'].toString().endsWith('/context')) { contextCalls.add('${arguments['path']}'); return privateContext; }
     if (method == 'request' && arguments!['path'] == '/v1/commands') {
       commands.add(object(arguments['body']));
       return {'success': true};
     }
-    if (method == 'request' && arguments!['path'] == '/v1/snapshot') return {'sequence': 2, 'interactions': [question('resolved')]};
+    if (method == 'request' && arguments!['path'] == '/v1/snapshot') return snapshot ?? {'sequence': 2, 'interactions': [question('resolved')]};
     throw StateError('Unexpected $method $arguments');
   }
 }
@@ -56,6 +67,96 @@ Json submittedResult(InteractionNative native) => objects(object(object(native.c
 
 void main() {
   restoredDecisionDraftTests();
+  testWidgets('private confirm context stays transient and clears on cover and resolution', (tester) async {
+    const url = 'https://provider.invalid/authorize?state=private-state';
+    final native = InteractionNative()..privateContext = {'interactionId': 'private', 'sessionId': 'session', 'title': 'Private authorization', 'message': url};
+    final controller = OmputerController(adapter: native)
+      ..connection = ConnectionState.fromJson({'paired': true, 'connected': true})
+      ..snapshot = Snapshot.fromJson({'sequence': 1, 'interactions': [{'id': 'private', 'sessionId': 'session', 'status': 'pending', 'method': 'confirm', 'sensitiveContext': true, 'title': '[redacted]', 'message': '[redacted]'}]});
+    final nav = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(MaterialApp(navigatorKey: nav, home: InteractionScreen(controller: controller, interactionId: 'private')));
+    await tester.pumpAndSettle();
+    expect(native.secureCalls, [true]);
+    expect(native.contextCalls, ['/v1/interactions/private/context']);
+    expect(find.text('Private authorization'), findsOneWidget);
+    expect(native.draftCalls, isEmpty);
+    expect(native.openedUrls, isEmpty);
+    await tester.ensureVisible(find.text('Giriş bağlantısını aç'));
+    await tester.tap(find.text('Giriş bağlantısını aç')); await tester.pumpAndSettle();
+    expect(native.openedUrls, isEmpty);
+    await tester.tap(find.text('Tarayıcıda aç')); await tester.pumpAndSettle();
+    expect(native.openedUrls, [url]);
+    final contextReadsBeforeCover = native.contextCalls.length;
+    unawaited(nav.currentState!.push(MaterialPageRoute<void>(builder: (_) => const Scaffold(body: Text('Other')))));
+    await tester.pumpAndSettle();
+    expect(find.text('Private authorization', skipOffstage: false), findsNothing);
+    nav.currentState!.pop(); await tester.pumpAndSettle();
+    expect(native.contextCalls, hasLength(contextReadsBeforeCover + 1));
+    controller.snapshot.interaction('private')!.status = 'resolved'; controller.notifyListeners();
+    await tester.pumpAndSettle();
+    expect(find.text('Private authorization'), findsNothing);
+    expect(native.operations.toString(), isNot(contains(url)));
+    expect(native.drafts.toString(), isNot(contains(url)));
+    await tester.pumpWidget(const SizedBox.shrink()); controller.dispose();
+  });
+  testWidgets('secret input is protected single-line and never restores saves or reveals its answer', (tester) async {
+    const value = 'private-test-secret';
+    final pending = <String, dynamic>{'id': 'secret', 'sessionId': 'session', 'method': 'input', 'title': 'API key', 'status': 'pending', 'secret': true, 'prefill': 'unsafe-prefill'};
+    final native = InteractionNative()
+      ..drafts['decision:secret'] = {'text': 'unsafe-draft'}
+      ..snapshot = {'sequence': 2, 'interactions': [{...pending, 'status': 'resolved', 'response': {'value': value}}]};
+    final controller = OmputerController(adapter: native)
+      ..connection = ConnectionState.fromJson({'paired': true, 'connected': true})
+      ..snapshot = Snapshot.fromJson({'sequence': 1, 'interactions': [pending]});
+    await tester.pumpWidget(MaterialApp(home: InteractionScreen(controller: controller, interactionId: 'secret')));
+    await tester.pumpAndSettle();
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.obscureText, isTrue);
+    expect(field.maxLines, 1);
+    expect(field.enableSuggestions, isFalse);
+    expect(field.autocorrect, isFalse);
+    expect(field.enableIMEPersonalizedLearning, isFalse);
+    expect(field.autofillHints, isEmpty);
+    expect(field.controller!.text, isEmpty);
+    expect(native.secureCalls, [true]);
+    await tester.enterText(find.byType(TextField), value);
+    tester.testTextInput.hide();
+    await tester.ensureVisible(find.widgetWithText(FilledButton, 'Yanıtı gönder'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Yanıtı gönder'));
+    await tester.pumpAndSettle();
+    expect(object(native.commands.single['payload'])['value'], value);
+    expect(native.operations.toString(), isNot(contains(value)));
+    expect(native.draftCalls, isEmpty);
+    expect(field.controller!.text, isEmpty);
+    expect(find.text('Kabul edilen yanıt'), findsNothing);
+    expect(find.text(value), findsNothing);
+    expect(controller.snapshot.interaction('secret')!.response.toString(), isNot(contains(value)));
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(native.secureCalls, [true, false]);
+    controller.dispose();
+  });
+
+  testWidgets('secret input clears when its route is covered and when resolved elsewhere', (tester) async {
+    final native = InteractionNative();
+    final controller = OmputerController(adapter: native)
+      ..connection = ConnectionState.fromJson({'paired': true, 'connected': true})
+      ..snapshot = Snapshot.fromJson({'sequence': 1, 'interactions': [{'id': 'secret', 'method': 'input', 'status': 'pending', 'secret': true}]});
+    final nav = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(MaterialApp(navigatorKey: nav, home: InteractionScreen(controller: controller, interactionId: 'secret')));
+    await tester.pumpAndSettle();
+    final input = tester.widget<TextField>(find.byType(TextField)).controller!;
+    await tester.enterText(find.byType(TextField), 'transient');
+    unawaited(nav.currentState!.push(MaterialPageRoute<void>(builder: (_) => const Scaffold(body: Text('Other route')))));
+    await tester.pumpAndSettle();
+    expect(input.text, isEmpty);
+    nav.currentState!.pop(); await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'transient-again');
+    controller.snapshot.interaction('secret')!.status = 'resolved';
+    controller.notifyListeners(); await tester.pumpAndSettle();
+    expect(input.text, isEmpty);
+    expect(native.draftCalls, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink()); controller.dispose();
+  });
   testWidgets('Inbox history remains a named toggle and filters closed decisions without changing them', (tester) async {
     final native = InteractionNative();
     final controller = OmputerController(adapter: native)

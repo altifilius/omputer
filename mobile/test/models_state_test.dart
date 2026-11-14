@@ -2,6 +2,42 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:omputer/models.dart';
 
 void main() {
+  test('secret interaction drops prefill and accepted value at the model boundary', () {
+    final secret = Interaction.fromJson({'id': 'secret', 'secret': true, 'prefill': 'unsafe-prefill', 'response': {'value': 'unsafe-answer'}});
+    expect(secret.secret, isTrue);
+    expect(secret.prefill, isNull);
+    expect(secret.response, isNull);
+    final normal = Interaction.fromJson({'id': 'normal', 'prefill': 'draft', 'response': {'value': 'answer'}});
+    expect(normal.secret, isFalse);
+    expect(normal.prefill, 'draft');
+    expect(normal.response, {'value': 'answer'});
+  });
+  test('private context is never retained in interaction prompt metadata', () {
+    final value = Interaction.fromJson({'id': 'private', 'sensitiveContext': true, 'title': 'private-url-title', 'message': 'private-url-message'});
+    expect(value.sensitiveContext, isTrue);
+    expect(value.secret, isFalse);
+    expect(value.title, 'Korumalı giriş');
+    expect(value.message, isNull);
+  });
+  test('resume eligibility blocks stale resume and exposes explicit relocation', () {
+    final moved = Session.fromJson({
+      'id': 's', 'transport': 'archive', 'status': 'closed',
+      'capabilities': ['session.relocate'],
+      'resumeEligibility': {'eligible': false, 'reason': 'project_missing', 'message': 'Select a registered project', 'canRelocate': true},
+    });
+    expect(moved.canResume, isFalse);
+    expect(moved.canRelocate, isTrue);
+    expect(moved.resumeBlockedReason, 'project_missing');
+    expect(moved.resumeBlockedMessage, 'Select a registered project');
+    final missing = Session.fromJson({
+      'id': 's', 'transport': 'archive', 'status': 'closed',
+      'capabilities': ['session.resume'],
+      'resumeEligibility': {'eligible': false, 'reason': 'source_missing', 'canRelocate': false},
+    });
+    expect(missing.canResume, isFalse);
+    expect(missing.canRelocate, isFalse);
+  });
+
   test('multi permits explicit zero choices while single requires one', () {
     final multi = QuestionAnswer({'id': 'q', 'multi': true, 'options': ['A']});
     expect(multi.valid, isTrue);

@@ -1,5 +1,18 @@
 # Verification record
 
+## November 14 — local controls, queued prompts and safe resume
+
+The user-reported busy prompt rejection is the reproduction. Normal native prompts now carry `streamingBehavior: "steer"`; bridge admission requires `onPromptAdmitted` and rejects dropped input. Pinned OMP 18.20.0 exports actual local controls. A compiled-runtime + Rust daemon + Unix bridge smoke returned 94 commands, with only `share`, `collab`, `join`, `leave` unavailable; a read command, close/resume with the same journal and explicit relocation preserved original bytes without a model request.
+
+Implementation gates passed: Rust archive 11, autodiscovery 4, runtime 28 and secret 4; later overlapping private-context/secret filters and host 6 passed separately. Bridge transport 20/20, private-dialog 13 and asynchronous-flush races 2 passed. Flutter privacy/model/controller 46/46, private-URL gesture 1/1 and admin 4/4 passed after correcting obsolete expectations. Kotlin 38 unit tests passed. OMP local controls 19/19 and inherited lease 2/2 passed; typecheck was clean across 4,963 files. Counts from overlapping filters are not additive unique totals; no full-suite claim.
+
+The implementation PC package passed real embedded-resource extraction: all eight files matched staged hashes and extracted runtime returned `omp/18.20.0`. Android installation preserved its signer, first-install and pairing. On physical Samsung hardware, production Flutter components with a separate network-permission-free memory-only adapter exercised command search/disabled hosted action, explicit session-setting confirmation/readback, normal prompt admission while working, queue promotion, Samsung IME and dark 320 dp administration/queue views. The fixture was removed. This is rendering/gesture acceptance, not production model/network or Android FLAG_SECURE proof.
+
+Concurrent palette/theme sources and local device/report evidence are excluded from this publication. Already-running hosts and the prior PC service remain unchanged; new exports require safe activation and a normal fresh host process. No clean-checkout release rebuild or reproducible-byte claim.
+
+Publication gate on the controls-only staged snapshot: `bun test bridge/dialogs.test.ts bridge/controls.test.ts bridge/lifecycle.test.ts bridge/transport.test.ts` passed 40 tests / 6,307 assertions (6.41 s); analyzer reported no issues for the six changed Dart sources (2.0 s); six targeted Flutter test files passed 80/80 serially. Bounded service completed in 41.788 s, peak 1.5 GiB / 2 MiB swap. This gate used the published 1.3.0 sources without uncommitted palette dependencies; no extra native or provider action was performed for publication.
+
+
 ## November13 Bridge1.1.2 — terminal HTML-form ask delivery
 
 User-reported missing questions were the reproduction. Terminal OMP was18.20.0; bundled RPC runtime18.10.2/PC0.2.1 and Android direct connection were independent. Official18.20.0 AskTool calls `formDialog` when available and otherwise walks fields through `select`/`input`/`editor`; the bridge intercepted only those primitives plus legacy `askDialog`. The connected-terminal getter now selects that canonical walker; offline/teardown restores the original form and managed RPC is unchanged. Whole-form preview and option notes are not provided through this route.

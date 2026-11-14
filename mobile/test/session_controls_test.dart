@@ -215,4 +215,48 @@ void main() {
     }
     await close(tester, c);
   });
+  testWidgets('localAction with typed arguments executes exact host command instead of discarding input', (tester) async {
+    final native = ControlsNative()..catalog = {'catalogRevision': 'r1', 'journalId': 'journal', 'bindingRevision': 'binding', 'commands': [
+      {'id': 'settings-command', 'name': 'settings', 'localAction': 'settings', 'description': 'Change OMP settings', 'risk': 'execute', 'available': true},
+    ]};
+    final c = makeController(native); final local = <String>[];
+    await tester.pumpWidget(MaterialApp(home: CommandPalette(controller: c, sessionId: 'session', initialQuery: 'settings', initialArgs: 'set retry.enabled false', onLocal: (action) async { local.add(action); })));
+    await tester.pumpAndSettle(); await tester.tap(find.text('/settings')); await tester.pumpAndSettle();
+    await tester.tap(find.text('/settings çalıştır')); await tester.pumpAndSettle();
+    expect(native.commands, isEmpty); expect(local, isEmpty);
+    expect(find.textContaining('set retry.enabled false'), findsWidgets);
+    await tester.tap(find.widgetWithText(FilledButton, 'Çalıştır')); await tester.pumpAndSettle();
+    expect(local, isEmpty); expect(native.commands, hasLength(1));
+    expect(object(native.commands.single['payload']), containsPair('args', 'set retry.enabled false'));
+    expect(object(native.commands.single['payload']), containsPair('commandId', 'settings-command'));
+    expect(object(native.commands.single['payload']), containsPair('confirmed', true));
+    await close(tester, c);
+  });
+  testWidgets('localAction without arguments opens selection screen without running a host command', (tester) async {
+    final native = ControlsNative()..catalog = {'catalogRevision': 'r1', 'journalId': 'journal', 'bindingRevision': 'binding', 'commands': [
+      {'id': 'settings-command', 'name': 'settings', 'localAction': 'settings', 'risk': 'execute', 'available': true},
+    ]};
+    final c = makeController(native); final local = <String>[];
+    await tester.pumpWidget(MaterialApp(home: CommandPalette(controller: c, sessionId: 'session', onLocal: (action) async { local.add(action); })));
+    await tester.pumpAndSettle(); await tester.tap(find.text('/settings')); await tester.pumpAndSettle();
+    await tester.tap(find.text('/settings çalıştır')); await tester.pumpAndSettle();
+    expect(local, ['settings']); expect(native.commands, isEmpty);
+    expect(find.byType(AlertDialog), findsNothing); await close(tester, c);
+  });
+  testWidgets('320dp command palette keeps argument editor and execution reachable above IME', (tester) async {
+    tester.view.physicalSize = const Size(320, 640); tester.view.devicePixelRatio = 1;
+    addTearDown(() { tester.view.resetPhysicalSize(); tester.view.resetDevicePixelRatio(); tester.view.resetViewInsets(); });
+    final native = ControlsNative(); final c = makeController(native);
+    await tester.pumpWidget(MaterialApp(home: CommandPalette(controller: c, sessionId: 'session', onLocal: (_) async {})));
+    await tester.pumpAndSettle(); await tester.tap(find.text('/inspect')); await tester.pumpAndSettle();
+    tester.view.viewInsets = const FakeViewPadding(bottom: 280); await tester.pumpAndSettle();
+    final arguments = find.byType(TextField).last;
+    await tester.ensureVisible(arguments); await tester.enterText(arguments, 'target with spaces'); await tester.pumpAndSettle();
+    final execute = find.text('/inspect çalıştır'); await tester.ensureVisible(execute); await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(tester.getRect(execute).bottom, lessThanOrEqualTo(360));
+    await tester.tap(execute); await tester.pumpAndSettle();
+    expect(object(native.commands.single['payload'])['args'], 'target with spaces');
+    expect(tester.takeException(), isNull); await close(tester, c);
+  });
 }

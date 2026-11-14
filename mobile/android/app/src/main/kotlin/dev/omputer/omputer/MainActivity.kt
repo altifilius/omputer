@@ -25,6 +25,7 @@ class MainActivity : FlutterActivity() {
     private var imageIdentity: String? = null
     private var cameraFile: File? = null
     private var cameraUri: Uri? = null
+    private val secureScreenOwners = mutableSetOf<String>()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -61,6 +62,13 @@ class MainActivity : FlutterActivity() {
         }
         try {
             when (call.method) {
+                "secureScreen" -> {
+                    val owner = call.argument<String>("owner") ?: error("Gizli ekran kimliği eksik.")
+                    if (call.argument<Boolean>("enabled") == true) secureScreenOwners.add(owner) else secureScreenOwners.remove(owner)
+                    if (secureScreenOwners.isNotEmpty()) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                    else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                    result.success(null)
+                }
                 "discover" -> result.success(LocalConnection.discover(call.argument<Boolean>("enabled") == true))
                 "pairRequest" -> pairing { LocalConnection.pairRequest(call.argument<String>("computerId") ?: error("Bilgisayar seçilmedi."), call.argument<String>("name") ?: Build.MODEL, call.argument<Boolean>("background") == true) }
                 "pairPoll" -> pairing { LocalConnection.pairPoll() }
@@ -84,6 +92,13 @@ class MainActivity : FlutterActivity() {
                 "removeAttachment" -> local { LocalConnection.removeAttachment(call.argument<String>("id") ?: error("Kimlik eksik.")); null }
                 "sharedImages" -> local { LocalConnection.sharedImages() }
                 "shareExport" -> shareExport(call, result)
+                "openExternalUrl" -> {
+                    val value = call.argument<String>("url") ?: error("Bağlantı eksik.")
+                    val uri = Uri.parse(value)
+                    if (uri.scheme !in listOf("https", "http") || uri.host.isNullOrBlank() || uri.userInfo != null) error("Yalnız kullanıcı bilgisi içermeyen HTTP/HTTPS bağlantıları açılabilir.")
+                    startActivity(Intent(Intent.ACTION_VIEW, uri))
+                    result.success(null)
+                }
                 "request" -> LocalConnection.requestAsync(call.argument<String>("method") ?: "GET", call.argument<String>("path") ?: error("İstek yolu eksik."), call.argument<Map<*, *>>("body")) { value, failure ->
                     if (failure != null) result.error((failure as? ApiFailure)?.code ?: "local_error", failure.message, null)
                     else result.success(value)

@@ -6,6 +6,7 @@ import 'models.dart';
 import 'ui.dart';
 import 'interactions.dart';
 import 'session_controls.dart';
+import 'session_admin.dart';
 import 'session_file_context.dart';
 import 'message_input.dart';
 import 'projects.dart' show FilePreviewScreen;
@@ -189,9 +190,19 @@ class _SessionScreenState extends State<SessionScreen> {
     if (session == null) return;
     switch (name) {
       case 'model' || 'models': await action(session, 'model');
-      case 'resume': await resume();
+      case 'resume': await selectSession();
       case 'thinking' || 'effort': await action(session, 'thinking');
       case 'new': await Navigator.push<void>(context, MaterialPageRoute(builder: (_) => NewSessionScreen(controller: widget.controller, projectId: session.projectId)));
+      case 'settings' || 'login' || 'setup' || 'logout' || 'skills':
+        await Navigator.push<void>(context, MaterialPageRoute(builder: (_) => SessionAdminScreen(controller: widget.controller, sessionId: session.id, view: name)));
+      case 'clipboard':
+        final target = await showDialog<String>(context: context, builder: (context) => SimpleDialog(title: const Text('Neyi kopyalayacaksın?'), children: [for (final item in [('code', 'Son kod bloğu'), ('command', 'Son kabuk/eval komutu'), ('link', 'Son bağlantı')]) SimpleDialogOption(onPressed: () => Navigator.pop(context, item.$1), child: Text(item.$2))]));
+        if (target != null && mounted) await executeLocalCommand('copy', target);
+      case 'open_url': await executeLocalCommand('open', '');
+      case 'export': await action(session, 'export');
+      case 'git':
+        final project = widget.controller.snapshot.project(session.projectId);
+        if (project != null) await Navigator.push<void>(context, MaterialPageRoute(builder: (_) => FilePreviewScreen(controller: widget.controller, project: project)));
       case 'tree' || 'entries' || 'queue' || 'btw' || 'plan' || 'goal' || 'agents' || 'jobs' || 'usage':
         await draftWrites;
         final result = await Navigator.push<Object?>(context, MaterialPageRoute(builder: (_) => SessionControlScreen(controller: widget.controller, sessionId: session.id, view: name, title: controlLabel(name))));
@@ -207,10 +218,14 @@ class _SessionScreenState extends State<SessionScreen> {
     final submittedMode = mode;
     final submitted = composer;
     final fullText = [value, ...objects(submitted['files']).map((file) => '\n--- Seçilen proje dosyası: ${file['path']} (${file['truncated'] == true ? 'kesilmiş' : 'tam'} metin) ---\n${file['text']}\n--- Dosya sonu ---')].join('\n');
-    setState(() => sending = true);
+    setState(() { sending = true; draftError = null; });
     try {
       await draftWrites;
       await widget.controller.submitDraft(current.id, submittedMode, submitted, {'message': fullText, if (objects(submitted['attachments']).isNotEmpty) 'images': objects(submitted['attachments']).map((i) => {'type': 'image', 'mimeType': i['mimeType'], 'data': i['data']}).toList(), 'runCommands': false, 'expandPromptTemplates': false});
+      widget.controller.refreshInBackground();
+      if (mounted && submittedMode == 'session.prompt' && ['running', 'background', 'human_wait', 'queued'].contains(current.workState)) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Mesaj çalışma sırasına alındı')));
+      }
     } on CommandAccepted catch (e) { if (mounted) openOperations(e.id); }
     on CommandUncertain catch (e) { if (mounted) openOperations(e.id); }
     catch (e) { if (mounted) setState(() => draftError = '$e'); }
@@ -226,6 +241,43 @@ class _SessionScreenState extends State<SessionScreen> {
     on CommandUncertain catch (e) { if (mounted) openOperations(e.id); }
     catch (e) { if (mounted) await perform(context, () async { throw e; }); }
     if (mounted) setState(() => sending = false);
+  }
+  Future<void> selectSession() async {
+    final c = widget.controller;
+    final selected = await showModalBottomSheet<Session>(context: context, isScrollControlled: true, showDragHandle: true, builder: (context) => SafeArea(child: ListView(shrinkWrap: true, children: [
+      const ListTile(title: Text('Devam edilecek oturumu seç')),
+      for (final item in c.snapshot.sessions.where((item) => item.canResume || item.canRelocate || item.canSendMessages)) ListTile(title: Text(item.name.isEmpty ? 'Adsız oturum' : item.name), subtitle: Text('${c.snapshot.project(item.projectId)?.name ?? item.cwd}\n${item.statusLabel}'), onTap: () => Navigator.pop(context, item)),
+    ])));
+    if (!mounted || selected == null) return;
+    await Navigator.push<void>(context, MaterialPageRoute(builder: (_) => SessionScreen(controller: c, sessionId: selected.id)));
+  }
+  Future<void> relocate() async {
+    final c = widget.controller;
+    final source = c.snapshot.session(widget.sessionId);
+    if (source == null || !source.canRelocate || sending || !c.connection.connected) return;
+    final target = await showModalBottomSheet<Project>(context: context, isScrollControlled: true, showDragHandle: true, builder: (context) => SafeArea(child: ListView(shrinkWrap: true, children: [
+      const ListTile(title: Text('Projenin yeni konumunu seç'), subtitle: Text('Özgün konuşma dosyası değiştirilmez; geçmiş güvenli bir kopyadan sürdürülür')),
+      for (final project in c.snapshot.projects) ListTile(title: Text(project.name), subtitle: Text(project.path), onTap: () => Navigator.pop(context, project)),
+    ])));
+    if (!mounted || target == null || !await confirm(context, 'Bu projede oturumu sürdür?', 'Oturum: ${source.name}\nÖnceki konum: ${source.cwd}\nYeni konum: ${target.path}\n\nÖzgün geçmiş korunur. Çalışma bundan sonra seçtiğin proje dosyalarına erişir.', action: 'Konumu seç ve sürdür') || !mounted) return;
+    final current = c.snapshot.session(source.id);
+    if (current == null || !current.canRelocate || current.journalId != source.journalId || current.sessionFile != source.sessionFile) return;
+    setState(() => sending = true);
+    try {
+      await c.command('session.resume', sessionId: source.id, payload: {'sessionId': source.id, 'targetProjectId': target.id, 'expectedJournalId': source.journalId, 'expectedSessionFile': source.sessionFile, 'confirmed': true});
+      c.refreshInBackground();
+    } on CommandAccepted catch (accepted) { if (mounted) openOperations(accepted.id); }
+    on CommandUncertain catch (uncertain) { if (mounted) openOperations(uncertain.id); }
+    catch (failure) { if (mounted) await perform(context, () async { throw failure; }); }
+    finally { if (mounted) setState(() => sending = false); }
+  }
+  Future<void> executeLocalCommand(String name, String args) async {
+    final c = widget.controller;
+    final catalog = await c.controls(widget.sessionId, 'commands');
+    final command = objects(catalog['commands']).where((item) => item['name'] == name).firstOrNull;
+    if (command == null) throw ControllerFailure('Komut bu oturumda bulunamadı.');
+    final result = await c.executeCommand(widget.sessionId, '${command['id']}', args, catalogRevision: catalog['catalogRevision'], confirmed: true);
+    if (mounted && result['id'] is String) openOperations(result['id'] as String);
   }
   Future<void> action(Session session, String action) async {
     final c = widget.controller;
@@ -348,9 +400,10 @@ class _SessionScreenState extends State<SessionScreen> {
           ? 'Bu oturum terminalde açık, ancak telefon bağlantısı etkin değil. Konuşmayı burada okuyabilirsin; açık oturum telefondan yeniden başlatılmaz.'
           : session.canResume
             ? 'Geçmiş oturum · yeniden açılana kadar salt okunur.'
-            : 'Bu oturum şu anda telefondan mesaj göndermeyi veya sürdürmeyi desteklemiyor. Konuşma salt okunur.'),
+            : session.resumeBlockedMessage ?? 'Bu oturum şu anda telefondan mesaj göndermeyi veya sürdürmeyi desteklemiyor. Konuşma salt okunur.'),
         if (session.activeUnbridged) ...[const SizedBox(height: 8), const Text('Açık oturumuna terminalden devam et veya bu projede telefondan ayrı, yeni bir oturum başlat. Yeni OMP açılışlarında telefon bağlantısı yüklenir; mevcut terminal oturumu ve konuşması korunur.')],
         if (session.canResume) ...[const SizedBox(height: 10), FilledButton.icon(key: const ValueKey('session-resume'), onPressed: !c.connection.connected || sending ? null : resume, icon: const Icon(Icons.play_arrow_rounded), label: const Text('Oturumu sürdür'))],
+        if (session.canRelocate) ...[const SizedBox(height: 12), OutlinedButton.icon(key: const ValueKey('session-relocate'), onPressed: !c.connection.connected || sending ? null : relocate, icon: const Icon(Icons.drive_file_move_rounded), label: const Text('Yeni proje konumunda sürdür'))],
         if (c.snapshot.project(session.projectId) != null) ...[const SizedBox(height: 10), OutlinedButton.icon(key: const ValueKey('session-new-project'), onPressed: !c.connection.connected || sending ? null : () => openScreen(context, NewSessionScreen(controller: c, projectId: session.projectId)), icon: const Icon(Icons.add_rounded), label: const Text('Bu projede yeni oturum'))],
       ]))),
       // This is a height cap, not a flex allocation: the transcript keeps unused space.
@@ -371,7 +424,7 @@ class _SessionScreenState extends State<SessionScreen> {
       Wrap(spacing: 8, children: [TextButton.icon(onPressed: enabled ? () => addFile(session) : null, icon: const Icon(Icons.attach_file_rounded), label: const Text('Dosya metni ekle')), if (message.text.startsWith('/')) TextButton(onPressed: enabled ? () async { if (await confirm(context, 'Komut değil, düz metin gönder?', 'Başındaki / işareti çalıştırılmaz. Metin aynen modele gönderilir.', action: 'Düz metin gönder')) await send(session, literal: true); } : null, child: const Text('/ metnini aynen gönder'))]),
       for (final file in fileContext) ListTile(title: Text('${file['path']}'), subtitle: Text('${'${file['text']}'.length} karakter · ${file['truncated'] == true ? 'kesilmiş' : 'tam'} metin'), trailing: IconButton(tooltip: 'Dosya bağlamını kaldır', onPressed: enabled ? () { setState(() => fileContext.remove(file)); draftChanged(); } : null, icon: const Icon(Icons.close_rounded))),
       Row(children: [Expanded(child: Semantics(label: 'Mesaj gönderme biçimi', child: DropdownButtonHideUnderline(child: DropdownButton<String>(value: mode, isExpanded: true, itemHeight: null, items: modes.map((m) => DropdownMenuItem(value: m, child: Text(modeLabel(m)))).toList(), onChanged: enabled ? (value) => switchMode(value!) : null)))), if (session.supports('session.abort') && session.status == 'running') IconButton(tooltip: 'Çalışmayı kes', onPressed: enabled ? () => action(session, 'abort') : null, icon: const Icon(Icons.stop_circle_outlined))]),
-      Padding(padding: const EdgeInsets.only(bottom: 8), child: Align(alignment: Alignment.centerLeft, child: Text(switch (mode) { 'session.steer' => 'Devam eden çalışmayı yönlendirir; yeni bir oturum açmaz.', 'session.follow_up' => 'Geçerli turdan sonra ele alınacak takip istemi.', _ => 'Bu konuşmaya yeni bir istem gönder.' }, style: Theme.of(context).textTheme.bodySmall))),
+      Padding(padding: const EdgeInsets.only(bottom: 8), child: Align(alignment: Alignment.centerLeft, child: Text(switch (mode) { 'session.steer' => 'Devam eden çalışmayı yönlendirir; yeni bir oturum açmaz.', 'session.follow_up' => 'Geçerli turdan sonra ele alınacak takip istemi.', _ => 'AI çalışıyorsa mesaj sıraya alınır ve ilk uygun adımda işlenir; boşta ise yeni tur başlar.' }, style: Theme.of(context).textTheme.bodySmall))),
       ]))),
       const SizedBox(height: 8),
       // Only ancillary controls scroll; typing and sending stay above the IME.

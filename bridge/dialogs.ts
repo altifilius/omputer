@@ -62,12 +62,12 @@ export class DialogBridge {
   install(ui: ExtensionUIContext) {
     if (this.installation) return;
     const installation = this.installation = { active: true };
-    for (const method of ['select', 'confirm', 'input', 'editor', 'askDialog']) {
+    for (const method of ['select', 'confirm', 'confirmPrivate', 'input', 'inputSecret', 'editor', 'askDialog']) {
       const original = underlyingMethod(ui, method);
-      if (!original && method !== 'askDialog') continue;
+      if (!original && method !== 'askDialog' && method !== 'inputSecret' && method !== 'confirmPrivate') continue;
       const descriptor = Object.getOwnPropertyDescriptor(ui, method);
       const wrapper = (...args: unknown[]) => installation.active ? this.dialog(method, args, original) :
-        original ? original(...args) : Promise.resolve(method === 'confirm' ? false : undefined);
+        method !== 'inputSecret' && method !== 'confirmPrivate' && original ? original(...args) : Promise.resolve(method === 'confirm' || method === 'confirmPrivate' ? false : undefined);
       Object.defineProperty(ui, method, { value: wrapper, writable: true, configurable: true, enumerable: true });
       this.restore.push(() => {
         if (Object.getOwnPropertyDescriptor(ui, method)?.value !== wrapper) return;
@@ -127,17 +127,21 @@ export class DialogBridge {
     for (const restore of this.restore.splice(0).reverse()) restore();
   }
   private dialog(method: string, args: unknown[], original?: UiMethod): Promise<unknown> {
+    const secret = method === 'inputSecret';
+    const privateConfirm = method === 'confirmPrivate';
     // Arguments originate in OMP's typed in-process UI contract, never from IPC.
     const opts = (args[method === 'askDialog' ? 1 : 2] ?? {}) as DialogOptions;
-    const defaultValue = method === 'confirm' ? false : undefined;
+    const defaultValue = method === 'confirm' || privateConfirm ? false : undefined;
     if (opts.signal?.aborted) return Promise.resolve(defaultValue);
-    if (!this.managed && !this.isReady()) return original ? Promise.resolve(original(...args)) : Promise.resolve(defaultValue);
+    if (!secret && !privateConfirm && !this.managed && !this.isReady()) return original ? Promise.resolve(original(...args)) : Promise.resolve(defaultValue);
     const options = method === 'select' ? args[1] as (string | { label: string; description?: string })[] : undefined;
     const approval = options?.length === 2 && options[0] === 'Approve' && options[1] === 'Deny';
-    const request: Request = { id: randomUUID(), sessionId: this.sessionId(), method: approval ? 'approval' : method === 'askDialog' ? 'ask' : method,
+    const request: Request = { id: randomUUID(), sessionId: this.sessionId(), method: secret ? 'input' : privateConfirm ? 'confirm' : approval ? 'approval' : method === 'askDialog' ? 'ask' : method,
       title: method === 'askDialog' ? 'OMP sorusu' : args[0] as string, createdAt: new Date().toISOString(), status: 'pending' };
     if (options) request.options = options.map(option => typeof option === 'string' ? { label: option } : option);
-    if (method === 'confirm' || method === 'input') request.message = args[1];
+    if (secret) request.secret = true;
+    if (privateConfirm) request.sensitiveContext = true;
+    if (method === 'confirm' || method === 'input' || secret || privateConfirm) request.message = args[1];
     if (method === 'editor') request.prefill = args[1];
     if (method === 'askDialog') request.questions = args[0] as Question[];
     if (typeof opts.timeout === 'number' && opts.timeout > 0) request.expiresAt = new Date(Date.now() + opts.timeout).toISOString();
@@ -159,7 +163,7 @@ export class DialogBridge {
     };
     const pending: PendingDialog = { id: request.id, request, finish, cancel: onAbort, accept: payload => {
       if (payload.cancelled === true) return defaultValue;
-      if (approval || method === 'confirm') {
+      if (approval || method === 'confirm' || privateConfirm) {
         if (typeof payload.confirmed !== 'boolean') return invalid('Confirmation must be a boolean');
         return approval ? payload.confirmed ? 'Approve' : 'Deny' : payload.confirmed;
       }
@@ -185,7 +189,7 @@ export class DialogBridge {
       }, opts.timeout);
       timer.unref?.();
     }
-    if (!this.managed && original) {
+    if (!secret && !privateConfirm && !this.managed && original) {
       const localArgs = [...args];
       localArgs[method === 'askDialog' ? 1 : 2] = { ...opts, timeout: undefined, onTimeout: undefined, signal };
       Promise.resolve().then(() => settled ? undefined : original(...localArgs)).then(

@@ -55,7 +55,7 @@ class InteractionScreen extends StatefulWidget {
   @override
   State<InteractionScreen> createState() => _InteractionScreenState();
 }
-class _InteractionScreenState extends State<InteractionScreen> {
+class _InteractionScreenState extends State<InteractionScreen> with WidgetsBindingObserver {
   final input = TextEditingController();
   List<QuestionAnswer> answers = [];
   String? selected;
@@ -70,7 +70,49 @@ class _InteractionScreenState extends State<InteractionScreen> {
   String? draftError;
   String? identity;
   int draftGeneration = 0;
+  bool draftRequested = false, secureReady = false, secureRequested = false, secretInput = false;
+  Json? privateContext;
+  bool contextLoading = false, contextAttempted = false, foreground = true, privatePrompt = false;
+  int contextGeneration = 0;
+  bool get protected => secret || privatePrompt || widget.controller.snapshot.interaction(widget.interactionId)?.sensitiveContext == true;
+  Future<void> loadPrivateContext(Interaction interaction) async {
+    if (contextLoading || contextAttempted || !secureReady || !foreground || ModalRoute.isCurrentOf(context) == false || !interaction.pendingAt(DateTime.now()) || busy) return;
+    setState(() { contextAttempted = true; contextLoading = true; });
+    final generation = ++contextGeneration;
+    final owner = identity;
+    try {
+      final value = await widget.controller.request('GET', '/v1/interactions/${Uri.encodeComponent(interaction.id)}/context');
+      if (!mounted || owner != identity || generation != contextGeneration || !foreground || ModalRoute.isCurrentOf(context) == false) return;
+      final latest = widget.controller.snapshot.interaction(interaction.id);
+      if (value['interactionId'] != interaction.id || value['sessionId'] != interaction.sessionId || latest?.pendingAt(DateTime.now()) != true) throw StateError('Private context identity changed');
+      setState(() { privateContext = {'title': value['title'], 'message': value['message']}; contextLoading = false; });
+    } catch (_) {
+      if (mounted && generation == contextGeneration) setState(() { contextLoading = false; error = 'Korumalı giriş bağlamı açılamadı. Bağlantıyı kontrol edip ekranı yeniden aç.'; });
+    }
+  }
+  bool get secret => secretInput || widget.controller.snapshot.interaction(widget.interactionId)?.secret == true;
+  String get secureOwner => 'interaction:${identityHashCode(this)}';
+  Future<void> protectSecret() async {
+    if (secureRequested) return;
+    secureRequested = true;
+    try {
+      await widget.controller.native.invoke('secureScreen', {'owner': secureOwner, 'enabled': true});
+      if (mounted) setState(() => secureReady = true);
+    } catch (_) { if (mounted) setState(() => error = 'Gizli giriş ekranı korunamadı. Uygulamayı yeniden aç.'); }
+  }
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    foreground = state == AppLifecycleState.resumed;
+    if (protected && !foreground) {
+      input.clear(); contextGeneration++;
+      setState(() { privateContext = null; contextLoading = false; contextAttempted = false; });
+    } else if (protected && mounted) { setState(() {}); }
+  }
   Future<void> restoreDraft() async {
+    final interaction = widget.controller.snapshot.interaction(widget.interactionId);
+    if (interaction == null) return;
+    draftRequested = true;
+    if (interaction.secret || interaction.sensitiveContext) { secretInput = interaction.secret; setState(() => draftLoading = false); unawaited(protectSecret()); return; }
     try {
       final owner = identity;
       final value = await widget.controller.loadDraft(draftKey);
@@ -80,7 +122,7 @@ class _InteractionScreenState extends State<InteractionScreen> {
   }
   void saveDraft() {
     final owner = identity;
-    if (restoring || draftLoading || owner != widget.controller.localState['identity']?.toString()) return;
+    if (protected || restoring || draftLoading || owner != widget.controller.localState['identity']?.toString()) return;
     final value = <String, dynamic>{'text': input.text, 'selected': selected, 'questions': [for (final answer in answers) {'id': answer.id, 'options': answer.options, 'selected': answer.selected.toList(), 'customSelected': answer.customSelected, 'customInput': answer.customInput, 'note': answer.note}]};
     draftWrites = widget.controller.saveDraft(draftKey, value).catchError((Object e) { if (mounted && owner == widget.controller.localState['identity']?.toString()) setState(() => draftError = 'Yanıt taslağı kaydedilemedi: $e'); });
   }
@@ -94,6 +136,7 @@ class _InteractionScreenState extends State<InteractionScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     identity = widget.controller.localState['identity']?.toString();
     restoreDraft();
     input.addListener(saveDraft);
@@ -104,19 +147,26 @@ class _InteractionScreenState extends State<InteractionScreen> {
     }
   }
   @override
-  void dispose() { input.removeListener(saveDraft); input.dispose(); clock?.cancel(); super.dispose(); }
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    privateContext = null; contextGeneration++;
+    input.removeListener(saveDraft); input.clear(); input.dispose(); clock?.cancel();
+    if (secureRequested) unawaited(widget.controller.native.invoke('secureScreen', {'owner': secureOwner, 'enabled': false}).catchError((Object _) => null));
+    super.dispose();
+  }
   Future<void> send(Interaction interaction, Json response) async {
     if (busy || !mounted) return;
     setState(() { busy = true; error = null; });
+    if (protected) { input.clear(); privateContext = null; contextGeneration++; contextLoading = false; }
     try {
       await draftWrites;
       await widget.controller.respond(interaction, response);
-      acceptedResponse = response;
-      await widget.controller.deleteDraft(draftKey);
+      acceptedResponse = protected ? null : response;
+      if (!protected) await widget.controller.deleteDraft(draftKey);
     }
     on CommandAccepted catch (e) { if (mounted) { setState(() => error = 'Yanıt işlemi kabul edildi; henüz tamamlanmadı. ${e.id}'); openScreen(context, OperationsScreen(controller: widget.controller, sessionId: interaction.sessionId, operationId: e.id)); } }
     on CommandUncertain catch (e) { if (mounted) { setState(() => error = 'Yanıtın durumu belirsiz. Yeniden göndermeden işlem durumunu incele. ${e.id}'); openScreen(context, OperationsScreen(controller: widget.controller, sessionId: interaction.sessionId, operationId: e.id)); } }
-    catch (e) { if (mounted) setState(() => error = '$e'); }
+    catch (e) { if (mounted) setState(() => error = protected ? 'Korumalı yanıt gönderilemedi. Yeniden göndermeden işlem durumunu kontrol et.' : '$e'); }
     finally { if (mounted) setState(() => busy = false); }
   }
   @override
@@ -124,15 +174,28 @@ class _InteractionScreenState extends State<InteractionScreen> {
     final c = widget.controller;
     final currentIdentity = c.localState['identity']?.toString();
     if (identity != currentIdentity) {
-      identity = currentIdentity; restored = null; acceptedResponse = null; initializedId = null; draftLoading = true;
+      identity = currentIdentity; restored = null; acceptedResponse = null; initializedId = null; draftLoading = true; draftRequested = false;
+      privateContext = null; contextGeneration++; contextLoading = false; contextAttempted = false;
+      input.clear();
       WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) restoreDraft(); });
     }
     final interaction = c.snapshot.interaction(widget.interactionId);
-    if (interaction == null) return Scaffold(appBar: AppBar(title: const Text('Karar')), body: refreshing ? const Center(child: CircularProgressIndicator()) : EmptyState(icon: Icons.event_busy_outlined, title: 'Bu istek artık görünmüyor.', message: error ?? 'Bağlantıyı yenile. İstek başka bir cihazdan yanıtlanmış, iptal edilmiş veya kayıt dışına çıkmış olabilir.', action: OutlinedButton(onPressed: () => perform(context, c.refresh), child: const Text('Yenile'))));
+    if (interaction == null) {
+      privateContext = null; contextGeneration++; contextLoading = false;
+      if (secret) input.clear();
+      return Scaffold(appBar: AppBar(title: const Text('Karar')), body: refreshing ? const Center(child: CircularProgressIndicator()) : EmptyState(icon: Icons.event_busy_outlined, title: 'Bu istek artık görünmüyor.', message: error ?? 'Bağlantıyı yenile. İstek başka bir cihazdan yanıtlanmış, iptal edilmiş veya kayıt dışına çıkmış olabilir.', action: OutlinedButton(onPressed: () => perform(context, c.refresh), child: const Text('Yenile'))));
+    }
+    if (interaction.secret) secretInput = true;
+    if (interaction.sensitiveContext) privatePrompt = true;
+    if (!draftRequested) {
+      draftRequested = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) restoreDraft(); });
+    }
+    if (protected && !secureRequested) unawaited(protectSecret());
     if (initializedId != interaction.id) {
       initializedId = interaction.id;
       restoring = true;
-      input.text = '${restored?['text'] ?? interaction.prefill ?? ''}';
+      input.text = interaction.secret ? '' : '${restored?['text'] ?? interaction.prefill ?? ''}';
       selected = strings(interaction.options.map((o) => o['label']).toList()).contains(restored?['selected']) ? (restored?['selected'] as String?) : null;
       answers = interaction.questions.map(QuestionAnswer.new).toList();
       for (final answer in answers) {
@@ -146,17 +209,35 @@ class _InteractionScreenState extends State<InteractionScreen> {
       restoring = false;
     }
     final pending = interaction.pendingAt(DateTime.now());
-    final enabled = pending && c.connection.connected && !busy && !draftLoading;
+    final visible = foreground && ModalRoute.isCurrentOf(context) != false;
+    if (protected && (!pending || !visible)) {
+      input.clear();
+      if (privateContext != null || contextLoading) { privateContext = null; contextGeneration++; contextLoading = false; contextAttempted = false; }
+    }
+    if (interaction.sensitiveContext && pending && visible && secureReady && !busy && !contextAttempted && c.connection.connected) {
+      WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) unawaited(loadPrivateContext(interaction)); });
+    }
+    final enabled = pending && c.connection.connected && !busy && !draftLoading && (!protected || secureReady && visible) && (!interaction.sensitiveContext || privateContext != null);
+    final linkMatch = RegExp(r'''https?://[^\s<>"'\)\]]+''').firstMatch('${privateContext?['message'] ?? ''}');
+    final loginUrl = linkMatch == null ? null : Uri.tryParse(linkMatch.group(0)!);
     return Scaffold(appBar: AppBar(title: const Text('Bekleyen karar'), actions: [IconButton(tooltip: 'Kaynak konuşmayı aç', onPressed: () => openScreen(context, SessionScreen(controller: c, sessionId: interaction.sessionId)), icon: const Icon(Icons.chat_bubble_outline_rounded))]), body: SafeArea(top: false, child: ListView(padding: const EdgeInsets.fromLTRB(24, 12, 24, 40), children: [
       Text(c.snapshot.project(interaction.projectId)?.name ?? 'Proje', style: Theme.of(context).textTheme.titleSmall?.copyWith(color: Theme.of(context).colorScheme.primary)), const SizedBox(height: 16),
-      Text(interaction.title, style: Theme.of(context).textTheme.headlineSmall), const SizedBox(height: 12),
+      Text('${privateContext?['title'] ?? interaction.title}', style: Theme.of(context).textTheme.headlineSmall), const SizedBox(height: 12),
       Text('${interaction.statusLabel} · ${dateLabel(interaction.createdAt)}', style: Theme.of(context).textTheme.labelLarge),
       if (interaction.expiresAt != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text('Son yanıt zamanı: ${MaterialLocalizations.of(context).formatTimeOfDay(TimeOfDay.fromDateTime(interaction.expiresAt!.toLocal()), alwaysUse24HourFormat: true)} · ${interaction.expiresAt!.toLocal().day}.${interaction.expiresAt!.toLocal().month}')),
-      if (interaction.message?.isNotEmpty == true) ...[const SizedBox(height: 24), LocalMarkdown(data: interaction.message!)],
+      if (privateContext?['message']?.toString().isNotEmpty == true) ...[const SizedBox(height: 24), Text('${privateContext!['message']}')]
+      else if (interaction.message?.isNotEmpty == true) ...[const SizedBox(height: 24), LocalMarkdown(data: interaction.message!)],
+      if (loginUrl != null && loginUrl.host.isNotEmpty && loginUrl.userInfo.isEmpty) TextButton.icon(onPressed: enabled ? () async {
+        final url = loginUrl.toString();
+        if (!await confirm(context, 'Giriş bağlantısını aç?', 'Bu adres varsayılan tarayıcıda açılacak:\n$url', action: 'Tarayıcıda aç') || !mounted) return;
+        if (!c.connection.connected || c.snapshot.interaction(interaction.id)?.pendingAt(DateTime.now()) != true) return;
+        try { await c.openExternalUrl(url); }
+        catch (_) { if (mounted) setState(() => error = 'Giriş bağlantısı açılamadı. Varsayılan tarayıcıyı kontrol et.'); }
+      } : null, icon: const Icon(Icons.open_in_new_rounded), label: const Text('Giriş bağlantısını aç')),
       if (!pending) ...[const SizedBox(height: 24), const NeoSurface(depth: NeoDepth.inset, padding: EdgeInsets.all(20), child: Text('Bu istek kapandı. Yeniden yanıt gönderilemez; masaüstü ve telefon yanıtlarından ilk geçerli olan kabul edilir.'))],
-      if (!pending && (interaction.response ?? acceptedResponse) != null) ...[const SizedBox(height: 16), NeoSurface(depth: NeoDepth.inset, padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [Text('Kabul edilen yanıt', style: Theme.of(context).textTheme.titleMedium), const SizedBox(height: 12), SelectableText(controlText(interaction.response ?? acceptedResponse))]))],
+      if (!pending && !protected && (interaction.response ?? acceptedResponse) != null) ...[const SizedBox(height: 16), NeoSurface(depth: NeoDepth.inset, padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [Text('Kabul edilen yanıt', style: Theme.of(context).textTheme.titleMedium), const SizedBox(height: 12), SelectableText(controlText(interaction.response ?? acceptedResponse))]))],
       if (!pending && c.snapshot.pending.where((i) => i.id != interaction.id).isNotEmpty) TextButton.icon(onPressed: () => Navigator.pushReplacement(context, MaterialPageRoute<void>(builder: (_) => InteractionScreen(controller: c, interactionId: c.snapshot.pending.first.id))), icon: const Icon(Icons.arrow_forward_rounded), label: const Text('Sonraki bekleyen karara geç')),
-      if (draftLoading) const LinearProgressIndicator(),
+      if (draftLoading || contextLoading) const LinearProgressIndicator(),
       if (draftError != null) ErrorNotice(draftError!),
       if (!c.connection.connected && pending) const Padding(padding: EdgeInsets.only(top: 20), child: NeoSurface(depth: NeoDepth.inset, padding: EdgeInsets.all(20), child: Text('Çevrimdışısın. Yanıt sıraya alınmaz; bağlandığında güncel isteği kontrol edip gönder.'))),
       const SizedBox(height: 24),
@@ -170,10 +251,10 @@ class _InteractionScreenState extends State<InteractionScreen> {
         if (interaction.method == 'approval') ...[const NeoSurface(depth: NeoDepth.inset, padding: EdgeInsets.all(20), child: Text('Bu izin bilgisayarında bir işlem çalıştırabilir. Yukarıdaki komut / araç bağlamını inceleyerek karar ver.')), const SizedBox(height: 20)],
         FilledButton.icon(onPressed: enabled ? () => send(interaction, {'confirmed': true}) : null, icon: const Icon(Icons.check_rounded), label: Text(interaction.method == 'approval' ? 'İzin ver' : 'Onayla')), const SizedBox(height: 12), OutlinedButton(onPressed: enabled ? () => send(interaction, {'confirmed': false}) : null, child: Text(interaction.method == 'approval' ? 'İzni reddet' : 'Hayır')),
       ] else ...[
-        TextField(controller: input, enabled: enabled, minLines: interaction.method == 'editor' ? 10 : 2, maxLines: interaction.method == 'editor' ? 24 : 8, style: interaction.method == 'editor' ? const TextStyle(fontFamily: 'monospace', height: 1.5) : null, onChanged: (_) => setState(() {}), decoration: InputDecoration(labelText: interaction.method == 'editor' ? 'Düzenlenen içerik' : 'Yanıtın', alignLabelWithHint: true)), const SizedBox(height: 20), FilledButton(onPressed: enabled ? () => send(interaction, {'value': input.text}) : null, child: Text(busy ? 'Gönderiliyor…' : 'Yanıtı gönder')),
+        TextField(controller: input, enabled: enabled, obscureText: interaction.secret, enableSuggestions: !interaction.secret, autocorrect: !interaction.secret, autofillHints: interaction.secret ? const <String>[] : null, enableIMEPersonalizedLearning: !interaction.secret, enableInteractiveSelection: !interaction.secret, keyboardType: interaction.secret ? TextInputType.visiblePassword : TextInputType.multiline, minLines: interaction.secret ? 1 : interaction.method == 'editor' ? 10 : 2, maxLines: interaction.secret ? 1 : interaction.method == 'editor' ? 24 : 8, style: interaction.method == 'editor' ? const TextStyle(fontFamily: 'monospace', height: 1.5) : null, onChanged: (_) => setState(() {}), decoration: InputDecoration(labelText: interaction.secret ? 'Gizli yanıtın' : interaction.method == 'editor' ? 'Düzenlenen içerik' : 'Yanıtın', alignLabelWithHint: true)), const SizedBox(height: 20), FilledButton(onPressed: enabled ? () => send(interaction, {'value': input.text}) : null, child: Text(busy ? 'Gönderiliyor…' : 'Yanıtı gönder')),
       ],
       if (pending) Padding(padding: const EdgeInsets.only(top: 12), child: TextButton(onPressed: enabled ? () async { if (await confirm(context, 'İsteği iptal et?', 'Bu istek OMP’ye iptal olarak döner.', action: 'İptal et') && mounted) { await send(interaction, {'cancelled': true}); } } : null, child: const Text('İsteği iptal et'))),
-      if (pending) TextButton.icon(onPressed: enabled ? discard : null, icon: const Icon(Icons.delete_outline_rounded), label: const Text('Yanıt taslağını sil')),
+      if (pending && !protected) TextButton.icon(onPressed: enabled ? discard : null, icon: const Icon(Icons.delete_outline_rounded), label: const Text('Yanıt taslağını sil')),
       if (error != null) ErrorNotice(error!),
     ])));
   });

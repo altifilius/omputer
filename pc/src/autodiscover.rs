@@ -219,6 +219,11 @@ impl ArchiveScanner {
         self.scan_roots(store, session_roots())
     }
     fn scan_roots(&self, store: &Store, roots: Vec<PathBuf>) -> Value {
+        // Discovery only visits files that still exist. Eligibility must also
+        // refresh vanished sources and roots without replacing cached history.
+        for session in store.list("session").unwrap_or_default().into_iter().filter(|session| session["transport"] == "archive") {
+            let _ = store.refresh_archive_status(&session);
+        }
         let mut pending = Vec::new();
         let mut missing = Vec::new();
         for root in &roots {
@@ -349,19 +354,6 @@ impl ArchiveScanner {
                         .is_some_and(|source| source["signature"] == signature))
             {
                 stamps.insert(path.clone(), signature);
-                if let Some(id) = tracked
-                    .as_ref()
-                    .and_then(|source| source["sessionId"].as_str())
-                    && let Ok(session) = store.get("session", id)
-                    && session["transport"] == "archive"
-                {
-                    let native_id = session["journalId"]
-                        .as_str()
-                        .or(session["runtimeSessionId"].as_str())
-                        .unwrap_or(id);
-                    let active = archive::ensure_source_inactive(native_id, path).is_err();
-                    let _ = store.refresh_archive_status(&session, active);
-                }
                 unchanged += 1;
                 continue;
             }
@@ -415,6 +407,30 @@ impl ArchiveScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refreshes_vanished_sources_and_project_roots_without_reimport() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("old-project");
+        fs::create_dir(&root).unwrap();
+        let source = temporary.path().join("source.jsonl");
+        let native = uuid::Uuid::new_v4().to_string();
+        let header = json!({"type":"session","id":native,"cwd":root});
+        fs::write(&source, format!("{header}\n")).unwrap();
+        let store = Store::open(Path::new(":memory:"), "test".into()).unwrap();
+        let scanner = ArchiveScanner::new();
+        scanner.scan_roots(&store, vec![temporary.path().to_path_buf()]);
+        assert_eq!(store.get("session", &native).unwrap()["resumeEligibility"]["reason"], "ready");
+        fs::remove_dir(&root).unwrap();
+        scanner.scan_roots(&store, vec![temporary.path().to_path_buf()]);
+        let moved = store.get("session", &native).unwrap();
+        assert_eq!(moved["resumeEligibility"]["reason"], "project_missing");
+        assert_eq!(moved["capabilities"], json!(["session.relocate"]));
+        fs::remove_file(&source).unwrap();
+        scanner.scan_roots(&store, vec![temporary.path().to_path_buf()]);
+        let missing = store.get("session", &native).unwrap();
+        assert_eq!(missing["resumeEligibility"]["reason"], "source_missing");
+        assert_eq!(missing["capabilities"], json!([]));
+    }
     #[test]
     fn unchanged_live_source_is_materialized_after_owner_disconnects() {
         let temporary = tempfile::tempdir().unwrap();

@@ -88,7 +88,7 @@ internal object LocalNotifications {
                 if (remaining <= 0) return
                 builder.setTimeoutAfter(remaining)
             }
-            if (request.optString("method") in listOf("input", "editor")) {
+            if (!request.optBoolean("secret") && request.optString("method") in listOf("input", "editor")) {
                 val intent = Intent(context, NotificationActionReceiver::class.java).setAction("omputer.reply")
                     .putExtra("interactionId", interaction).putExtra("sessionId", session)
                     .putExtra("deviceId", LocalConnection.notificationIdentity()).putExtra("commandId", UUID.randomUUID().toString())
@@ -150,6 +150,7 @@ class NotificationActionReceiver : BroadcastReceiver() {
         try {
             if (intent.getStringExtra("deviceId") != LocalConnection.notificationIdentity()) throw ApiFailure("connection_changed", "Bilgisayar eşleştirmesi değişti. Uygulamadan güncel soruyu aç.")
             LocalConnection.requirePendingInteraction(interaction)
+            if (LocalConnection.pendingInteraction(interaction)?.optBoolean("secret") == true) throw ApiFailure("secret_requires_app", "Gizli yanıtı yalnızca uygulamadaki korumalı ekrandan gönder.")
         } catch (error: Exception) { LocalNotifications.cancelInteraction(context, interaction); failed(error); return }
         val pending = goAsync()
         LocalConnection.notificationReply(mapOf(

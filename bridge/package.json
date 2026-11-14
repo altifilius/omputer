@@ -1,8 +1,8 @@
 {
   "name": "omputer-omp-bridge",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
-  "description": "Local-only Omputer integration for bundled OMP 18.10.2 and HTML-form terminal OMP",
+  "description": "Local-only Omputer controls, protected administration and queued prompts for OMP 18.20.0",
   "engines": { "bun": ">=1.4.2" }
 }

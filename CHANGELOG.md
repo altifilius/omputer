@@ -1,5 +1,16 @@
 # Changelog
 
+## PC 0.3.0 / Android 1.3.0 (21) / bridge 1.2.0 — local controls and queued prompts
+
+- Queue normal phone prompts through terminal-compatible streaming admission; preserve images and literal text. Reject dropped prompts instead of reporting false acceptance.
+- Export actual local administration, modes and lifecycle controls from pinned OMP 18.20.0. Keep hosted sharing/collaboration unavailable.
+- Add typed phone settings/account/skill screens, preserve command arguments, and require exact catalog/writer identity plus explicit mutation confirmation.
+- Keep protected input and private authorization context outside durable drafts, operations and journals; require a visible gesture for browser opening.
+- Report missing resume roots/sources honestly. Relocate only to an explicitly selected registered project, preserving original journal bytes and single-writer ownership.
+- Pin the compiled Bun template to private 1.4.4, validate all bootstrap targets before merging, and verify resource archives before promotion.
+
+Scoped runtime/bridge/Rust/Flutter/Kotlin gates and a compiled-runtime integration smoke passed during implementation. Physical-device rendering/gesture acceptance used a separate memory-only adapter; it does not certify production model/networking or Android FLAG_SECURE. PC activation remains a separate safe-update step; existing hosts are never hot-patched or force-closed. Concurrent palette/theme work, local reports, screenshots and generated packages are not part of this source commit.
+
 ## Bridge 1.1.2 — HTML-form questions from terminal OMP
 
 - Route modern terminal `formDialog` asks through OMP's canonical field walker while the local bridge is connected, using existing Inbox select/input/editor interactions. Preserve original form behavior offline and leave managed RPC unchanged.

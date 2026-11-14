@@ -85,6 +85,56 @@ Json liveSession({String journal = 'journal', String binding = 'binding'}) => {
 };
 
 void main() {
+  for (final fails in [false, true]) {
+    test('secret response only persists metadata, including errors (fails=$fails)', () async {
+      const secret = 'never-persist-this-answer';
+      final native = DurableNative()..data = {'sequence': 1, 'interactions': [{'id': 'secret', 'sessionId': 'session', 'status': 'pending', 'method': 'input', 'secret': true}]};
+      native.requestHandler = (request) async {
+        if (request['path'] == '/v1/snapshot') return native.data;
+        final body = object(request['body']);
+        if (request['method'] == 'POST') {
+          expect(object(body['payload'])['value'], secret);
+          expect(native.pending.values.toString(), isNot(contains(secret)));
+          expect(object(object(native.pending.values.single['request'])['payload']), {'interactionId': 'secret', 'cancelled': false, 'secret': true});
+          if (fails) throw PlatformException(code: 'timeout', message: 'Unsafe transport error $secret');
+          return {'id': body['id'], 'success': true, 'data': {'value': secret}};
+        }
+        return {'id': request['path'].toString().split('/').last, 'status': 'unknown'};
+      };
+      final controller = OmputerController(adapter: native);
+      await controller.initialize();
+      if (fails) {
+        await expectLater(controller.respond(controller.snapshot.interaction('secret')!, {'value': secret}), throwsA(isA<CommandUncertain>().having((e) => e.toString(), 'redacted error', isNot(contains(secret)))));
+      } else {
+        await controller.respond(controller.snapshot.interaction('secret')!, {'value': secret});
+        expect(controller.snapshot.interaction('secret')!.response.toString(), isNot(contains(secret)));
+      }
+      expect(native.pending.values.toString(), isNot(contains(secret)));
+      expect(controller.operations.toString(), isNot(contains(secret)));
+      expect(native.drafts, isEmpty);
+      expect(native.requests.where((request) => request['method'] == 'POST'), hasLength(1));
+      controller.dispose(); await native.stream.close();
+    });
+  }
+  test('credential admin arguments only reach transient POST body', () async {
+    final native = DurableNative();
+    native.requestHandler = (request) async {
+      final body = object(request['body']);
+      expect(object(body['payload'])['args'], 'set credential private-inline-token');
+      expect(native.pending.values.toString(), isNot(contains('private-inline-token')));
+      return {'id': body['id'], 'success': true, 'data': {'value': 'private-inline-token'}};
+    };
+    final controller = OmputerController(adapter: native);
+    await controller.initialize();
+    for (final name in ['settings', 'login', 'setup', 'logout']) {
+      final result = await controller.command('session.command', payload: {'commandId': 'builtin:$name', 'args': 'set credential private-inline-token'});
+      expect(result.toString(), isNot(contains('private-inline-token')));
+    }
+    expect(controller.operations.toString(), isNot(contains('private-inline-token')));
+    expect(native.pending.values.toString(), isNot(contains('private-inline-token')));
+    expect(object(object(controller.operations.first['request'])['payload'])['args'], '[korumalı yönetim argümanları]');
+    controller.dispose(); await native.stream.close();
+  });
   test('cached projects and drafts are usable while startup outcome reconciliation is pending', () async {
     final native = DurableNative()
       ..data = {'sequence': 7, 'projects': [{'id': 'project', 'name': 'Cached project'}]};

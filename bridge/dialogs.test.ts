@@ -27,6 +27,56 @@ function fixture() {
 }
 
 describe('DialogBridge ownership and first answer', () => {
+  test('managed private confirmation uses bridge context without invoking terminal confirm', async () => {
+    const frames: WireFrame[] = [];
+    let local = 0;
+    const ui = { confirm: async () => { local++; return false; } } as unknown as ExtensionUIContext & { confirmPrivate: (title: string, message: string) => Promise<boolean> };
+    const bridge = new DialogBridge(() => 'session', frame => { frames.push(frame); return true; }, () => true, true, () => {});
+    bridge.install(ui);
+    const result = ui.confirmPrivate('Private authorization', 'https://provider.invalid?state=private');
+    const request = frames[0].request as WireFrame;
+    expect(request.method).toBe('confirm'); expect(request.sensitiveContext).toBe(true);
+    expect(request.message).toBe('https://provider.invalid?state=private');
+    bridge.respond({ interactionId: request.id, confirmed: true });
+    expect(await result).toBe(true); expect(local).toBe(0);
+    bridge.close(); expect('confirmPrivate' in ui).toBe(false);
+  });
+  for (const managed of [false, true]) {
+    test(`secret input stays on the bridge without racing native input (managed=${managed})`, async () => {
+      const frames: WireFrame[] = [];
+      let localCalls = 0;
+      const original = async () => { localCalls++; return 'terminal-secret'; };
+      const ui = { input: original, inputSecret: original } as unknown as ExtensionUIContext & { inputSecret: (title: string, placeholder?: string) => Promise<string | undefined> };
+      const bridge = new DialogBridge(() => 'session', frame => { frames.push(frame); return true; }, () => false, managed, () => {});
+      const descriptor = Object.getOwnPropertyDescriptor(ui, 'inputSecret');
+      bridge.install(ui);
+      try {
+        const result = ui.inputSecret('API key', 'Key');
+        await Promise.resolve();
+        expect(localCalls).toBe(0);
+        const request = frames[0].request as WireFrame;
+        expect(request.method).toBe('input');
+        expect(request.secret).toBe(true);
+        bridge.reconnect();
+        expect((frames[1].request as WireFrame).id).toBe(request.id);
+        expect(bridge.respond({ interactionId: request.id, value: 'phone-secret' })).toEqual({ interactionId: request.id, status: 'resolved' });
+        expect(await result).toBe('phone-secret');
+        expect(JSON.stringify(frames)).not.toContain('phone-secret');
+        expect(JSON.stringify(frames)).not.toContain('terminal-secret');
+      } finally { bridge.close(); }
+      expect(Object.getOwnPropertyDescriptor(ui, 'inputSecret')).toEqual(descriptor);
+    });
+  }
+  test('legacy hosts expose phone secret input and retained wrappers cannot reopen it after close', async () => {
+    const f = fixture();
+    const ui = f.ui as ExtensionUIContext & { inputSecret: (title: string) => Promise<string | undefined> };
+    const retained = ui.inputSecret;
+    const result = retained('Password');
+    f.bridge.close();
+    expect(await result).toBeUndefined();
+    expect(await retained('Closed')).toBeUndefined();
+    expect('inputSecret' in ui).toBe(false);
+  });
   test('one ask advertises one interaction and phone answer resolves the desktop promise once', async () => {
     const f = fixture();
     try {

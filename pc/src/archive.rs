@@ -4,8 +4,8 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fs,
-    io::{BufRead, BufReader, Read},
-    os::unix::fs::OpenOptionsExt,
+    io::{BufRead, BufReader, Read, Write},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
@@ -47,6 +47,271 @@ pub fn files(root: &Path) -> Result<Vec<PathBuf>> {
     paths.sort();
     Ok(paths)
 }
+const MAX_HEADER_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Resume identity inspection is independent of the full-history import cap.
+/// Only the bounded title slot and header are read from a regular non-symlink file.
+pub fn source_header(path: &Path) -> Result<Value> {
+    let mut reader = BufReader::new(open_source(path)?.take(MAX_HEADER_BYTES + 1));
+    read_header(&mut reader).map(|(_, header)| header)
+}
+
+fn open_source(path: &Path) -> Result<fs::File> {
+    let metadata = fs::symlink_metadata(path).context("Saved session source is missing or inaccessible")?;
+    if !metadata.is_file() {
+        bail!("Saved session source must be a regular file, not a symlink");
+    }
+    let file = fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
+        bail!("Saved session source changed while opening");
+    }
+    Ok(file)
+}
+
+fn read_header(reader: &mut impl BufRead) -> Result<(Vec<u8>, Value)> {
+    let mut prefix = Vec::new();
+    loop {
+        let mut line = Vec::new();
+        loop {
+            let buffer = reader.fill_buf()?;
+            if buffer.is_empty() { bail!("Saved session header is incomplete"); }
+            let count = buffer.iter().position(|byte| *byte == b'\n').map_or(buffer.len(), |index| index + 1);
+            if prefix.len() + line.len() + count > MAX_HEADER_BYTES as usize {
+                bail!("Saved session title and header exceed 4 MiB");
+            }
+            line.extend_from_slice(&buffer[..count]);
+            let complete = buffer[count - 1] == b'\n';
+            reader.consume(count);
+            if complete { break; }
+        }
+        let header: Value = serde_json::from_slice(&line).context("Saved session header is invalid")?;
+        if prefix.is_empty() && header["type"] == "title" {
+            prefix = line;
+            continue;
+        }
+        if header["type"] != "session" || header["id"].as_str().is_none_or(str::is_empty)
+            || header["cwd"].as_str().is_none_or(str::is_empty) {
+            bail!("Saved source has no valid session identity and project header");
+        }
+        return Ok((prefix, header));
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResumeEligibility {
+    pub reason: &'static str,
+    pub message: String,
+    pub can_relocate: bool,
+}
+impl ResumeEligibility {
+    fn blocked(reason: &'static str, message: impl Into<String>, can_relocate: bool) -> Self {
+        Self { reason, message: message.into(), can_relocate }
+    }
+    pub fn eligible(&self) -> bool { self.reason == "ready" }
+    pub fn apply(&self, session: &mut Value) {
+        session["resumeEligibility"] = json!({"eligible":self.eligible(),"reason":self.reason,"message":self.message,"canRelocate":self.can_relocate});
+        session["capabilities"] = if self.eligible() { json!(["session.resume"]) }
+            else if self.can_relocate { json!(["session.relocate"]) } else { json!([]) };
+        if session["transport"] == "archive" {
+            session["status"] = json!(if self.reason == "active_owner" { "active-unbridged" } else { "closed" });
+        }
+    }
+}
+
+fn identity_source(session: &Value) -> Result<(PathBuf, Value, String)> {
+    let path = PathBuf::from(session["sessionFile"].as_str().context("Saved source path missing")?);
+    let header = source_header(&path)?;
+    let canonical = path.canonicalize()?;
+    if path != canonical { bail!("Saved source path is no longer canonical"); }
+    let id = header["id"].as_str().context("Saved journal identity missing")?;
+    let expected = session["journalId"].as_str().or(session["runtimeSessionId"].as_str())
+        .or_else(|| (session["transport"] == "archive").then(|| session["id"].as_str()).flatten())
+        .context("Expected journal identity missing")?;
+    if expected != id { bail!("Saved session identity changed; refusing ambiguous resume"); }
+    let id = id.to_owned();
+    Ok((canonical, header, id))
+}
+
+pub fn resume_eligibility(store: &Store, session: &Value) -> ResumeEligibility {
+    resume_eligibility_inner(store, session, None)
+}
+
+/// Runtime cleanup has already removed its link/child, but has not persisted
+/// the disconnected snapshot yet. Trust that snapshot for this visible id
+/// only; every other live writer and the native lease remain authoritative.
+pub fn resume_eligibility_after_disconnect(store: &Store, session: &Value) -> ResumeEligibility {
+    if session["writerConnected"] != false || !matches!(session["status"].as_str(), Some("disconnected" | "closed" | "failed")) {
+        return ResumeEligibility::blocked("active_owner", "Session has not disconnected", false);
+    }
+    resume_eligibility_inner(store, session, session["id"].as_str())
+}
+
+fn resume_eligibility_inner(store: &Store, session: &Value, disconnected_id: Option<&str>) -> ResumeEligibility {
+    let path = session["sessionFile"].as_str().map(Path::new);
+    if path.is_none() || path.is_some_and(|path| matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)) {
+        return ResumeEligibility::blocked("source_missing", "Saved journal is missing; materialized messages cannot safely reconstruct it", false);
+    }
+    let (path, header, native_id) = match identity_source(session) {
+        Ok(source) => source,
+        Err(error) => return ResumeEligibility::blocked("identity_invalid", error.to_string(), false),
+    };
+    if let Err(error) = ensure_inactive_except(store, &native_id, &path, disconnected_id) {
+        return ResumeEligibility::blocked("active_owner", error.to_string(), false);
+    }
+    let project = session["projectId"].as_str().and_then(|id| store.get("project", id).ok());
+    let Some(project) = project else {
+        return ResumeEligibility::blocked("project_missing", "Registered project is missing; select an existing registered project", true);
+    };
+    let roots = [session["cwd"].as_str(), project["path"].as_str(), header["cwd"].as_str()];
+    let canonical: Option<Vec<PathBuf>> = roots.iter().map(|root| root.and_then(|root| {
+        let path = Path::new(root);
+        path.canonicalize().ok().filter(|canonical| canonical.is_dir() && canonical == path)
+    })).collect();
+    match canonical {
+        None => ResumeEligibility::blocked("project_missing", "Original project root is missing or changed; select an existing registered project", true),
+        Some(roots) if roots[0] != roots[1] || roots[0] != roots[2] => ResumeEligibility::blocked("project_mismatch", "Saved journal root differs from its registered project; explicit relocation is required", true),
+        Some(_) => ResumeEligibility { reason: "ready", message: String::new(), can_relocate: true },
+    }
+}
+
+/// A staged source and its native writer lease. Drop removes only an
+/// uncommitted managed copy. The original journal is never written or removed.
+pub struct PreparedResume {
+    pub file: PathBuf,
+    pub journal_id: String,
+    pub project: Value,
+    pub session: Value,
+    original: Value,
+    lease: std::os::unix::net::UnixDatagram,
+    staged: bool,
+    staged_temporary: Option<PathBuf>,
+}
+impl PreparedResume {
+    /// Parent passes this descriptor via pre_exec (clearing CLOEXEC in the
+    /// child only). Native OMP must validate and adopt its exact abstract
+    /// socket before loading the journal; never drop then reacquire the lease.
+    pub fn lease_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.lease.as_raw_fd()
+    }
+    /// Commit after native startup validates the inherited lease and source.
+    /// Does not replace message history. Keep this guard until cutover ends.
+    pub fn commit(&mut self, store: &Store) -> Result<()> {
+        let header = source_header(&self.file)?;
+        if header["id"] != self.journal_id || header["cwd"] != self.project["path"]
+            || self.session["journalId"] != self.journal_id || self.session["cwd"] != self.project["path"]
+            || self.session["sessionFile"].as_str() != self.file.to_str()
+            || self.file.canonicalize()? != self.file {
+            bail!("Prepared source identity or project changed before cutover");
+        }
+        let root = Path::new(self.project["path"].as_str().context("Prepared project path missing")?);
+        if !root.is_dir() || root.canonicalize()? != root { bail!("Prepared project root changed before cutover"); }
+        store.commit_resume_source(&self.original, &self.session, &self.project)?;
+        self.staged = false;
+        Ok(())
+    }
+}
+impl Drop for PreparedResume {
+    fn drop(&mut self) {
+        if self.staged { let _ = fs::remove_file(&self.file); }
+        if let Some(path) = &self.staged_temporary { let _ = fs::remove_file(path); }
+    }
+}
+
+/// `target_project_id` is an explicitly selected registered project, never an
+/// inferred same-basename mapping. `None` requires the original canonical root.
+/// `managed_root` must be the daemon's private state directory, not user input.
+pub fn prepare_resume(store: &Store, session: &Value, target_project_id: Option<&str>, managed_root: &Path) -> Result<PreparedResume> {
+    let (source, mut header, journal_id) = identity_source(session)?;
+    ensure_inactive(store, &journal_id, &source)?;
+    let lease = lease_source(&journal_id, &source)?;
+    // Inspect again under the retained lease rather than trusting a probe.
+    let (locked_source, locked_header, locked_id) = identity_source(session)?;
+    if locked_source != source || locked_header != header || locked_id != journal_id {
+        bail!("Saved source changed during lease acquisition");
+    }
+    let project_id = target_project_id.or(session["projectId"].as_str()).context("Registered target project is required")?;
+    let project = store.get("project", project_id)?;
+    let root = PathBuf::from(project["path"].as_str().context("Registered project path missing")?);
+    if !root.is_absolute() || !root.is_dir() || root.canonicalize()? != root {
+        bail!("Target must be an existing canonical registered project directory");
+    }
+    let root_text = root.to_str().context("Registered project path is not UTF-8")?;
+    if target_project_id.is_none() {
+        if session["cwd"] != root_text || header["cwd"] != root_text {
+            bail!("Original project root changed; explicitly select a registered relocation target");
+        }
+    }
+    let relocate = session["projectId"] != project_id || session["cwd"] != root_text || header["cwd"] != root_text;
+    let mut replacement = session.clone();
+    replacement["journalId"] = json!(journal_id);
+    replacement["projectId"] = project["id"].clone();
+    replacement["cwd"] = json!(root_text);
+    replacement["writerConnected"] = json!(false);
+    replacement["workState"] = json!("disconnected");
+    replacement["status"] = json!("closed");
+    replacement["capabilities"] = json!([]);
+    replacement["resumeEligibility"] = json!({"eligible":false,"reason":"preparing","message":"Native writer handoff is in progress","canRelocate":false});
+    let mut prepared = PreparedResume { file: source.clone(), journal_id, project, session: replacement, original: session.clone(), lease, staged: false, staged_temporary: None };
+    if relocate {
+        let managed_root = managed_root.canonicalize().context("Private managed state directory missing")?;
+        let directory = managed_root.join("relocated-sessions");
+        match fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(error) => return Err(error.into()),
+        }
+        let metadata = fs::symlink_metadata(&directory)?;
+        if !metadata.is_dir() || metadata.mode() & 0o077 != 0 || directory.canonicalize()? != directory {
+            bail!("Managed relocation directory must be private and not a symlink");
+        }
+        let token = uuid::Uuid::new_v4();
+        let temporary = directory.join(format!(".{token}.tmp"));
+        let destination = directory.join(format!("{token}.jsonl"));
+        let mut output = fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW).open(&temporary)?;
+        prepared.file = temporary.clone();
+        prepared.staged = true;
+        prepared.staged_temporary = Some(temporary.clone());
+        let input = open_source(&source)?;
+        let before = input.metadata()?;
+        const MAX_RELOCATION_BYTES: u64 = 1024 * 1024 * 1024;
+        if before.len() > MAX_RELOCATION_BYTES { bail!("Saved source exceeds the 1 GiB relocation limit"); }
+        let mut reader = BufReader::new(input);
+        let (prefix, copied_header) = read_header(&mut reader)?;
+        if copied_header != header { bail!("Saved header changed before copying"); }
+        output.write_all(&prefix)?;
+        header["cwd"] = json!(root_text);
+        serde_json::to_writer(&mut output, &header)?;
+        output.write_all(b"\n")?;
+        let copied = std::io::copy(&mut reader.by_ref().take(MAX_RELOCATION_BYTES + 1), &mut output)?;
+        if copied > MAX_RELOCATION_BYTES { bail!("Saved source grew beyond relocation limit"); }
+        let after = reader.get_ref().metadata()?;
+        let current = fs::symlink_metadata(&source)?;
+        if after.len() != before.len() || after.mtime() != before.mtime() || after.mtime_nsec() != before.mtime_nsec()
+            || current.dev() != before.dev() || current.ino() != before.ino() {
+            bail!("Saved source changed while copying; no relocation was committed");
+        }
+        output.sync_all()?;
+        // link + unlink publishes atomically without ever overwriting a file.
+        fs::hard_link(&temporary, &destination)?;
+        prepared.file = destination.clone();
+        fs::remove_file(&temporary)?;
+        prepared.staged_temporary = None;
+        fs::File::open(&directory)?.sync_all()?;
+        prepared.session["sessionFile"] = json!(destination);
+        if prepared.session["originalSessionFile"].is_null() {
+            prepared.session["originalSessionFile"] = json!(source);
+        }
+        let mut references = prepared.session["sourceReferences"].as_array().cloned().unwrap_or_default();
+        if !references.contains(&json!(source)) { references.push(json!(source)); }
+        prepared.session["sourceReferences"] = json!(references);
+    }
+    Ok(prepared)
+}
+
 pub fn load(path: &Path) -> Result<(Value, Vec<Value>)> {
     let file = fs::OpenOptions::new()
         .read(true)
@@ -103,6 +368,9 @@ pub fn load(path: &Path) -> Result<(Value, Vec<Value>)> {
             }
         };
         if value["type"] == "session" {
+            if header.is_some() || records.len() > 1 || records.iter().any(|record: &Value| record["type"] != "title") {
+                bail!("Session header must follow only the optional title slot and be the only identity record");
+            }
             header = Some(value.clone());
         }
         if value["type"] == "title" {
@@ -147,6 +415,15 @@ pub fn import(store: &Store, path: &Path) -> Result<String> {
     let (header, records) = load(&path)?;
     let native_id = header["id"].as_str().context("Session header missing id")?;
     let sessions = store.list("session")?;
+    // An immutable original remains discoverable after relocation. It is
+    // provenance, not a second archive and must never replace the new source.
+    if let Some(existing) = sessions.iter().find(|session| {
+        session["journalId"] == native_id && session["sessionFile"].as_str() != path.to_str()
+            && (session["originalSessionFile"].as_str() == path.to_str()
+                || session["sourceReferences"].as_array().is_some_and(|references| references.iter().any(|reference| reference.as_str() == path.to_str())))
+    }) {
+        return Ok(existing["id"].as_str().context("Relocated session id missing")?.to_owned());
+    }
     let same_source: Vec<_> = sessions
         .iter()
         .filter(|session| {
@@ -201,11 +478,11 @@ pub fn import(store: &Store, path: &Path) -> Result<String> {
             .as_str()
             .context("Session header missing cwd")?,
     );
-    let project = store.register_project(&root, None)?;
-    let active = ensure_inactive(store, native_id, &path).is_err();
-    let mut session = json!({"id":id,"journalId":native_id,"providerSessionId":null,"bindingRevision":null,"writerConnected":false,"workState":"disconnected","turnError":null,"projectId":project["id"],"name":header["name"],"cwd":project["path"],"transport":"archive","status":if active {"active-unbridged"} else {"closed"},"updatedAt":header["timestamp"],"sessionFile":path,"todos":[],"subagents":[],"capabilities":if active {json!([])} else {json!(["session.resume"])}});
+    let project = store.register_archive_project(&root)?;
+    let mut session = json!({"id":id,"journalId":native_id,"providerSessionId":null,"bindingRevision":null,"writerConnected":false,"workState":"disconnected","turnError":null,"projectId":project["id"],"name":header["name"],"cwd":project["path"],"transport":"archive","status":"closed","updatedAt":header["timestamp"],"sessionFile":path,"todos":[],"subagents":[],"capabilities":[]});
+    resume_eligibility(store, &session).apply(&mut session);
     if let Some(previous) = previous {
-        for key in ["model", "thinkingLevel", "lastError"] {
+        for key in ["model", "thinkingLevel", "lastError", "originalSessionFile", "sourceReferences"] {
             if !previous[key].is_null() {
                 session[key] = previous[key].clone();
             }
@@ -306,14 +583,18 @@ pub fn assistant_text(message: &Value) -> String {
 /// Probe the exact Linux abstract lease used by OMP 18.10.2. The runtime
 /// acquires this same lease again when resuming, closing the probe/spawn race.
 pub fn ensure_inactive(store: &Store, id: &str, path: &Path) -> Result<()> {
+    ensure_inactive_except(store, id, path, None)
+}
+
+fn ensure_inactive_except(store: &Store, id: &str, path: &Path, disconnected_id: Option<&str>) -> Result<()> {
     if store.list("session")?.iter().any(|s| {
-        s["transport"] != "archive"
+        !disconnected_id.is_some_and(|ignored| s["id"] == ignored) && s["transport"] != "archive"
             && (s["writerConnected"] == true
                 || !matches!(
                     s["status"].as_str(),
                     Some("disconnected" | "closed" | "failed")
                 ))
-            && (s["id"] == id
+            && (s["id"] == id || s["journalId"] == id || s["runtimeSessionId"] == id
                 || s["sessionFile"]
                     .as_str()
                     .and_then(|p| Path::new(p).canonicalize().ok())
@@ -439,6 +720,150 @@ fn session_owners_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn relocation_fixture() -> (tempfile::TempDir, Store, Value, Value, Vec<u8>) {
+        let temporary = tempfile::tempdir().unwrap();
+        let old = temporary.path().join("old");
+        let target = temporary.path().join("new");
+        fs::create_dir(&old).unwrap();
+        fs::create_dir(&target).unwrap();
+        let source = temporary.path().join("source.jsonl");
+        let id = uuid::Uuid::new_v4().to_string();
+        let header = json!({"type":"session","id":id,"cwd":old,"extra":{"kept":true}});
+        let bytes = format!("{header}\n{{\"type\":\"message\",\"id\":\"a\",\"parentId\":null,\"message\":{{\"role\":\"user\",\"content\":\"entire history\"}}}}\n{{\"type\":\"message\"").into_bytes();
+        fs::write(&source, &bytes).unwrap();
+        let store = Store::open(Path::new(":memory:"), "PC".into()).unwrap();
+        import(&store, &source).unwrap();
+        let session = store.get("session", &id).unwrap();
+        let project = store.register_project(&target, None).unwrap();
+        fs::remove_dir(&old).unwrap();
+        (temporary, store, session, project, bytes)
+    }
+    #[test]
+    fn disconnected_snapshot_ignores_only_its_own_persisted_owner() {
+        let (temporary, store, mut session, _, _) = relocation_fixture();
+        fs::create_dir(temporary.path().join("old")).unwrap();
+        session["transport"] = json!("rpc");
+        session["status"] = json!("running");
+        session["writerConnected"] = json!(true);
+        let id = session["id"].as_str().unwrap().to_owned();
+        store.put("session", &id, &session, None).unwrap();
+        assert_eq!(resume_eligibility_after_disconnect(&store, &session).reason, "active_owner");
+        session["status"] = json!("disconnected");
+        session["writerConnected"] = json!(false);
+        assert_eq!(resume_eligibility(&store, &session).reason, "active_owner");
+        assert_eq!(resume_eligibility_after_disconnect(&store, &session).reason, "ready");
+        let mut other = session.clone();
+        other["id"] = json!("other-writer");
+        other["status"] = json!("running");
+        other["writerConnected"] = json!(true);
+        store.put("session", "other-writer", &other, None).unwrap();
+        assert_eq!(resume_eligibility_after_disconnect(&store, &session).reason, "active_owner");
+    }
+
+
+    #[test]
+    fn moved_project_relocation_preserves_original_and_every_tail_byte() {
+        let (temporary, store, session, target, bytes) = relocation_fixture();
+        let eligibility = resume_eligibility(&store, &session);
+        assert_eq!(eligibility.reason, "project_missing");
+        assert!(eligibility.can_relocate);
+        assert!(prepare_resume(&store, &session, None, temporary.path()).is_err());
+        let mut prepared = prepare_resume(&store, &session, target["id"].as_str(), temporary.path()).unwrap();
+        let copied = fs::read(&prepared.file).unwrap();
+        let original_tail = bytes.iter().position(|byte| *byte == b'\n').unwrap() + 1;
+        let copied_tail = copied.iter().position(|byte| *byte == b'\n').unwrap() + 1;
+        assert_eq!(&copied[copied_tail..], &bytes[original_tail..]);
+        let mut original_header: Value = serde_json::from_slice(&bytes[..original_tail]).unwrap();
+        original_header["cwd"] = target["path"].clone();
+        assert_eq!(source_header(&prepared.file).unwrap(), original_header);
+        assert_eq!(fs::read(session["sessionFile"].as_str().unwrap()).unwrap(), bytes);
+        assert!(lease_source(&prepared.journal_id, &prepared.file).is_err());
+        let file = prepared.file.clone();
+        prepared.commit(&store).unwrap();
+        drop(prepared);
+        assert!(file.is_file());
+        let saved = store.get("session", session["id"].as_str().unwrap()).unwrap();
+        assert_eq!(saved["originalSessionFile"], session["sessionFile"]);
+        assert_eq!(saved["projectId"], target["id"]);
+        assert_eq!(store.messages(session["id"].as_str().unwrap(), i64::MAX, 50).unwrap()["messages"][0]["id"], "a");
+        assert_eq!(resume_eligibility(&store, &saved).reason, "ready");
+    }
+
+    #[test]
+    fn preparation_rejects_missing_source_changed_identity_and_active_lease() {
+        let (temporary, store, session, target, bytes) = relocation_fixture();
+        let source = Path::new(session["sessionFile"].as_str().unwrap());
+        let lease = lease_source(session["journalId"].as_str().unwrap(), source).unwrap();
+        assert_eq!(resume_eligibility(&store, &session).reason, "active_owner");
+        assert!(prepare_resume(&store, &session, target["id"].as_str(), temporary.path()).is_err());
+        drop(lease);
+        let mut header = source_header(source).unwrap();
+        header["id"] = json!(uuid::Uuid::new_v4().to_string());
+        fs::write(source, format!("{header}\n")).unwrap();
+        assert_eq!(resume_eligibility(&store, &session).reason, "identity_invalid");
+        assert!(prepare_resume(&store, &session, target["id"].as_str(), temporary.path()).is_err());
+        fs::write(source, &bytes).unwrap();
+        fs::remove_file(source).unwrap();
+        assert_eq!(resume_eligibility(&store, &session).reason, "source_missing");
+        assert!(prepare_resume(&store, &session, target["id"].as_str(), temporary.path()).is_err());
+    }
+
+    #[test]
+    fn abandoned_or_stale_preparation_removes_only_staged_copy() {
+        let (temporary, store, session, target, bytes) = relocation_fixture();
+        let mut prepared = prepare_resume(&store, &session, target["id"].as_str(), temporary.path()).unwrap();
+        let file = prepared.file.clone();
+        let mut edited = session.clone();
+        edited["name"] = json!("User edit wins");
+        store.put("session", session["id"].as_str().unwrap(), &edited, None).unwrap();
+        assert!(prepared.commit(&store).is_err());
+        drop(prepared);
+        assert!(!file.exists());
+        assert_eq!(fs::read(session["sessionFile"].as_str().unwrap()).unwrap(), bytes);
+        assert_eq!(store.get("session", session["id"].as_str().unwrap()).unwrap(), edited);
+    }
+
+    #[test]
+    fn header_inspection_and_streaming_copy_are_independent_of_import_limit() {
+        let (temporary, store, session, target, _) = relocation_fixture();
+        let source = Path::new(session["sessionFile"].as_str().unwrap());
+        fs::OpenOptions::new().write(true).open(source).unwrap().set_len(65 * 1024 * 1024).unwrap();
+        assert!(source_header(source).is_ok());
+        assert!(load(source).is_err());
+        let prepared = prepare_resume(&store, &session, target["id"].as_str(), temporary.path()).unwrap();
+        assert!(fs::metadata(&prepared.file).unwrap().len() > 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn native_title_prefix_is_preserved_and_original_reimport_does_not_undo_relocation() {
+        let (temporary, store, session, target, bytes) = relocation_fixture();
+        let title = b"{\"type\":\"title\", \"title\":\"Original title\", \"padding\":\"  \"}\n";
+        let with_title = [title.as_slice(), bytes.as_slice()].concat();
+        let source = Path::new(session["sessionFile"].as_str().unwrap());
+        fs::write(source, &with_title).unwrap();
+        assert_eq!(source_header(source).unwrap()["id"], session["journalId"]);
+        assert!(load(source).is_ok());
+        let mut prepared = prepare_resume(&store, &session, target["id"].as_str(), temporary.path()).unwrap();
+        assert!(fs::read(&prepared.file).unwrap().starts_with(title));
+        assert_eq!(fs::read(source).unwrap(), with_title);
+        prepared.commit(&store).unwrap();
+        let committed = store.get("session", session["id"].as_str().unwrap()).unwrap();
+        assert_eq!(import(&store, source).unwrap(), session["id"].as_str().unwrap());
+        assert_eq!(store.get("session", session["id"].as_str().unwrap()).unwrap(), committed);
+    }
+
+    #[test]
+    fn import_keeps_history_when_original_project_is_already_missing() {
+        let (temporary, _, session, _, _) = relocation_fixture();
+        let store = Store::open(Path::new(":memory:"), "PC".into()).unwrap();
+        let id = import(&store, Path::new(session["sessionFile"].as_str().unwrap())).unwrap();
+        let saved = store.get("session", &id).unwrap();
+        assert_eq!(saved["resumeEligibility"]["reason"], "project_missing");
+        assert_eq!(saved["capabilities"], json!(["session.relocate"]));
+        assert_eq!(store.messages(&id, i64::MAX, 50).unwrap()["messages"][0]["id"], "a");
+        assert!(temporary.path().is_dir());
+    }
+
     #[test]
     fn saved_managed_session_import_keeps_visible_id_and_rejects_identity_replacement() {
         let temporary = tempfile::tempdir().unwrap();

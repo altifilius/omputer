@@ -309,6 +309,21 @@ impl Store {
     pub fn put(&self, kind: &str, id: &str, body: &Value, event_type: Option<&str>) -> Result<()> {
         let mut db = self.db.lock();
         let tx = db.transaction()?;
+        let mut redacted;
+        let body = if kind == "interaction" && (body["secret"] == true || body["sensitiveContext"] == true) {
+            redacted = body.clone();
+            let fields = redacted.as_object_mut().context("Interaction must be an object")?;
+            if body["sensitiveContext"] == true {
+                fields.insert("title".into(), json!("Korumalı giriş"));
+                fields.insert("message".into(), json!("[korumalı giriş bağlamı]"));
+            }
+            fields.remove("prefill");
+            if let Some(response) = fields.get("response") {
+                let cancelled = response["cancelled"] == true;
+                fields.insert("response".into(), json!({"secret":true,"cancelled":cancelled}));
+            }
+            &redacted
+        } else { body };
         tx.execute("INSERT INTO objects(kind,id,body) VALUES(?1,?2,?3) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body", params![kind,id,body.to_string()])?;
         if let Some(ty) = event_type {
             Self::append(
@@ -348,6 +363,24 @@ impl Store {
         }
         let id = Uuid::new_v4().to_string();
         let project = json!({"id":id,"name":name.unwrap_or_else(||root.file_name().unwrap_or_default().to_string_lossy().to_string()),"path":text,"goal":"","summary":"","nextStep":"","decisions":[],"memoryRevision":0,"updatedAt":now(),"sessionCount":0,"pendingCount":0});
+        self.put("project", &id, &project, Some("project.updated"))?;
+        Ok(project)
+    }
+    /// Keep imported history visible when its former project has moved. This
+    /// records the original absolute root; it never guesses a replacement.
+    pub(crate) fn register_archive_project(&self, path: &Path) -> Result<Value> {
+        if path.exists() {
+            return self.register_project(path, None);
+        }
+        if !path.is_absolute() || path.components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::CurDir)) {
+            bail!("Archived project root must be an absolute, normalized path");
+        }
+        let text = path.to_str().context("Archived project path is not UTF-8")?;
+        if let Some(project) = self.list("project")?.into_iter().find(|project| project["path"] == text) {
+            return Ok(project);
+        }
+        let id = Uuid::new_v4().to_string();
+        let project = json!({"id":id,"name":path.file_name().unwrap_or_default().to_string_lossy(),"path":text,"goal":"","summary":"","nextStep":"","decisions":[],"memoryRevision":0,"updatedAt":now(),"sessionCount":0,"pendingCount":0});
         self.put("project", &id, &project, Some("project.updated"))?;
         Ok(project)
     }
@@ -781,7 +814,8 @@ impl Store {
         }
         Ok(())
     }
-    pub(crate) fn refresh_archive_status(&self, expected: &Value, active: bool) -> Result<()> {
+    pub(crate) fn refresh_archive_status(&self, expected: &Value) -> Result<()> {
+        let eligibility = crate::archive::resume_eligibility(self, expected);
         let id = expected["id"]
             .as_str()
             .context("Archive session id missing")?;
@@ -796,23 +830,17 @@ impl Store {
             .optional()?;
         let Some(body) = body else { return Ok(()) };
         let mut session: Value = serde_json::from_str(&body)?;
-        let status = if active { "active-unbridged" } else { "closed" };
-        if session != *expected || session["transport"] != "archive" || session["status"] == status
-        {
+        if session != *expected || session["transport"] != "archive" {
             return Ok(());
         }
-        session["status"] = json!(status);
+        eligibility.apply(&mut session);
         session["writerConnected"] = json!(false);
         session["workState"] = json!("disconnected");
         if !session["journalId"].is_string() {
             session["journalId"] = session["runtimeSessionId"].clone();
         }
         session.as_object_mut().unwrap().remove("runtimeSessionId");
-        session["capabilities"] = if active {
-            json!([])
-        } else {
-            json!(["session.resume"])
-        };
+        if session == *expected { return Ok(()); }
         tx.execute(
             "UPDATE objects SET body=?2 WHERE kind='session' AND id=?1",
             params![id, session.to_string()],
@@ -824,6 +852,38 @@ impl Store {
             session["projectId"].as_str(),
             &session,
         )?;
+        Self::refresh_projects(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Atomically replace source metadata without touching materialized history.
+    /// The caller holds the native journal lease throughout this cutover.
+    pub(crate) fn commit_resume_source(&self, expected: &Value, replacement: &Value, project: &Value) -> Result<()> {
+        let id = expected["id"].as_str().context("Session id missing")?;
+        if replacement["id"] != expected["id"] { bail!("Resume cannot change visible session identity"); }
+        let mut db = self.db.lock();
+        let tx = db.transaction()?;
+        let body: String = tx.query_row("SELECT body FROM objects WHERE kind='session' AND id=?1", [id], |row| row.get(0))?;
+        let current: Value = serde_json::from_str(&body)?;
+        if current != *expected { bail!("Saved session changed during resume preparation; refresh before retrying"); }
+        let journal = replacement["journalId"].as_str().context("Prepared journal id missing")?;
+        if expected["journalId"].as_str().or(expected["runtimeSessionId"].as_str()).unwrap_or(id) != journal {
+            bail!("Resume cannot change native journal identity");
+        }
+        let project_id = project["id"].as_str().context("Prepared project id missing")?;
+        let project_body: String = tx.query_row("SELECT body FROM objects WHERE kind='project' AND id=?1", [project_id], |row| row.get(0))?;
+        let current_project: Value = serde_json::from_str(&project_body)?;
+        if current_project["path"] != project["path"] || replacement["projectId"] != project_id || replacement["cwd"] != project["path"] {
+            bail!("Registered target project changed during resume preparation");
+        }
+        if Self::objects(&tx, "session")?.iter().any(|other| {
+            other["id"] != id && other["transport"] != "archive"
+                && (other["writerConnected"] == true || !matches!(other["status"].as_str(), Some("closed" | "failed" | "disconnected")))
+                && (other["journalId"] == journal || other["runtimeSessionId"] == journal || other["id"] == journal
+                    || other["sessionFile"] == replacement["sessionFile"] || other["sessionFile"] == expected["sessionFile"])
+        }) { bail!("Another live session owns this journal"); }
+        tx.execute("UPDATE objects SET body=?2 WHERE kind='session' AND id=?1", params![id, replacement.to_string()])?;
+        Self::append(&tx, "session.updated", Some(id), replacement["projectId"].as_str(), replacement)?;
         Self::refresh_projects(&tx)?;
         tx.commit()?;
         Ok(())
@@ -1001,6 +1061,15 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    fn secret_response_db(db: &Connection, request: &Value) -> Result<bool> {
+        if request["action"] != "interaction.respond" { return Ok(false); }
+        let Some(id) = request["payload"]["interactionId"].as_str() else { return Ok(false) };
+        let raw: Option<String> = db.query_row("SELECT body FROM objects WHERE kind='interaction' AND id=?1", [id], |r| r.get(0)).optional()?;
+        Ok(raw.map(|raw| serde_json::from_str::<Value>(&raw)).transpose()?.is_some_and(|interaction| interaction["secret"] == true))
+    }
+    pub fn secret_response(&self, request: &Value) -> Result<bool> {
+        Self::secret_response_db(&self.db.lock(), request)
+    }
     pub fn begin_command(&self, id: &str, request: &Value) -> Result<Option<Value>> {
         Uuid::parse_str(id).context("Command id must be a UUID")?;
         let action = request["action"]
@@ -1009,10 +1078,22 @@ impl Store {
         let hash = security::hash(&request.to_string());
         let mut db = self.db.lock();
         let tx = db.transaction()?;
+        let mut stored = request.clone();
+        let fields = stored.as_object_mut().context("Command request must be an object")?;
+        fields.remove("_secretResponse");
+        fields.remove("_protectedAdmin");
+        if Self::secret_response_db(&tx, request)? {
+            stored["payload"] = json!({"interactionId":request["payload"]["interactionId"],"cancelled":request["payload"]["cancelled"] == true,"secret":true});
+            stored["_secretResponse"] = json!(true);
+        }
+        if action == "session.command" && matches!(request["payload"]["commandId"].as_str(), Some("builtin:settings" | "builtin:login" | "builtin:setup" | "builtin:logout")) {
+            stored["payload"]["args"] = json!("[korumalı yönetim argümanları]");
+            stored["_protectedAdmin"] = json!(true);
+        }
         let stamp = now();
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO commands(id,request_hash,request,session_id,action,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'running',?6,?6)",
-            params![id, hash, request.to_string(), request["sessionId"].as_str(), action, stamp],
+            params![id, hash, stored.to_string(), request["sessionId"].as_str(), action, stamp],
         )?;
         if inserted == 1 {
             Self::append(
@@ -1047,6 +1128,10 @@ impl Store {
         let mut db = self.db.lock();
         let tx = db.transaction()?;
         let mut result = result.clone();
+        let stored: Option<String> = tx.query_row("SELECT request FROM commands WHERE id=?1", [id], |r| r.get(0))?;
+        if stored.map(|raw| serde_json::from_str::<Value>(&raw)).transpose()?.is_some_and(|request| request["_secretResponse"] == true || request["_protectedAdmin"] == true) {
+            result = json!({"id":id,"success":result["success"],"status":result["status"],"accepted":result["accepted"],"data":{"secret":true},"error":if result["error"].is_null() { Value::Null } else { json!({"code":result["error"]["code"],"message":"Secret response could not be confirmed; inspect the operation status"}) }});
+        }
         let status =
             if result["error"]["code"] == "outcome_unknown" || result["status"] == "unknown" {
                 result["success"] = json!(false);
@@ -1162,6 +1247,10 @@ impl Store {
         let mut db = self.db.lock();
         let tx = db.transaction()?;
         let operation = Self::command_status_db(&tx, id)?;
+        let stored: Option<String> = tx.query_row("SELECT request FROM commands WHERE id=?1", [id], |r| r.get(0))?;
+        if stored.map(|raw| serde_json::from_str::<Value>(&raw)).transpose()?.is_some_and(|request| request["_secretResponse"] == true || request["_protectedAdmin"] == true) {
+            return Ok(());
+        }
         tx.execute(
             "INSERT OR IGNORE INTO command_output_limits(command_id) VALUES(?1)",
             [id],
@@ -1336,6 +1425,10 @@ impl Store {
             {
                 value["status"] = json!(status);
                 value.as_object_mut().unwrap().remove("cancellationReason");
+                if value["secret"] == true {
+                    value["response"] = json!({"secret":true,"cancelled":status == "cancelled"});
+                    value.as_object_mut().unwrap().remove("prefill");
+                }
                 tx.execute(
                     "UPDATE objects SET body=?2 WHERE kind='interaction' AND id=?1",
                     params![id, value.to_string()],
@@ -1525,6 +1618,54 @@ mod tests {
         )
         .unwrap();
         assert!(s.claim_interaction("expired", "d").is_err());
+    }
+    #[test]
+    fn credential_admin_arguments_remain_transient_while_uuid_hash_uses_full_request() {
+        let s = store();
+        for name in ["settings", "login", "setup", "logout"] {
+            let id = Uuid::new_v4().to_string();
+            let request = json!({"id":id,"action":"session.command","payload":{"commandId":format!("builtin:{name}"),"args":"credential set unsafe-inline-token"}});
+            s.begin_command(&id, &request).unwrap();
+            let saved: String = s.db.lock().query_row("SELECT request FROM commands WHERE id=?1", [&id], |r| r.get(0)).unwrap();
+            let saved: Value = serde_json::from_str(&saved).unwrap();
+            assert_eq!(saved["payload"]["commandId"], request["payload"]["commandId"]);
+            assert_eq!(saved["payload"]["args"], "[korumalı yönetim argümanları]");
+            s.command_output(&id, "stdout", "unsafe-inline-token").unwrap();
+            s.finish_command(&id, &json!({"id":id,"success":false,"error":{"code":"invalid_argument","message":"unsafe-inline-token"}})).unwrap();
+            let mut different = request.clone(); different["payload"]["args"] = json!("other-token");
+            assert!(s.begin_command(&id, &different).is_err());
+            assert!(!s.command_status(&id).unwrap().to_string().contains("unsafe-inline-token"));
+        }
+        assert!(!serde_json::to_string(&s.journal(0, 100).unwrap()).unwrap().contains("unsafe-inline-token"));
+    }
+    #[test]
+    fn secret_commands_hash_full_request_but_never_store_secret_values_or_output() {
+        let s = store();
+        s.put("interaction", "secret", &json!({"id":"secret","sessionId":"s","status":"pending","method":"input","secret":true,"prefill":"unsafe-prefill","response":{"value":"unsafe-response"}}), Some("interaction.pending")).unwrap();
+        let id = Uuid::new_v4().to_string();
+        let request = json!({"id":id,"action":"interaction.respond","sessionId":"s","payload":{"interactionId":"secret","value":"private-api-token","secret":false}});
+        assert!(s.secret_response(&request).unwrap());
+        assert!(s.begin_command(&id, &request).unwrap().is_none());
+        let stored: String = s.db.lock().query_row("SELECT request FROM commands WHERE id=?1", [&id], |r| r.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&stored).unwrap()["payload"], json!({"interactionId":"secret","cancelled":false,"secret":true}));
+        s.command_output(&id, "stdout", "private-api-token").unwrap();
+        s.finish_command(&id, &json!({"id":id,"success":false,"error":{"code":"invalid_answer","message":"private-api-token"},"data":{"value":"private-api-token"}})).unwrap();
+        assert!(!s.begin_command(&id, &request).unwrap().unwrap().to_string().contains("private-api-token"));
+        let mut different = request.clone(); different["payload"]["value"] = json!("different-token");
+        assert!(s.begin_command(&id, &different).is_err());
+        s.end_interaction("secret", "resolved").unwrap();
+        assert_eq!(s.get("interaction", "secret").unwrap()["response"], json!({"secret":true,"cancelled":false}));
+        assert_eq!(s.command_output_page(&id, 0, 10).unwrap()["items"], json!([]));
+        let journal = serde_json::to_string(&s.journal(0, 100).unwrap()).unwrap();
+        for forbidden in ["private-api-token", "unsafe-prefill", "unsafe-response"] { assert!(!journal.contains(forbidden)); }
+        assert!(!s.command_status(&id).unwrap().to_string().contains("private-api-token"));
+        let normal = json!({"id":Uuid::new_v4().to_string(),"action":"interaction.respond","payload":{"interactionId":"normal","value":"durable-answer","secret":true}});
+        assert!(!s.secret_response(&normal).unwrap());
+        s.begin_command(normal["id"].as_str().unwrap(), &normal).unwrap();
+        let saved: String = s.db.lock().query_row("SELECT request FROM commands WHERE id=?1", [normal["id"].as_str().unwrap()], |r| r.get(0)).unwrap();
+        assert!(saved.contains("durable-answer"));
+        s.finish_command(normal["id"].as_str().unwrap(), &json!({"success":true,"data":{"value":"durable-answer"}})).unwrap();
+        assert_eq!(s.command_status(normal["id"].as_str().unwrap()).unwrap()["result"]["data"]["value"], "durable-answer");
     }
     #[test]
     fn commands_deduplicate_even_before_completion() {
@@ -1722,13 +1863,14 @@ mod tests {
         let store = store();
         let archive = json!({"id":"s","transport":"archive","status":"closed","journalId":"native","sessionFile":"/saved/session.jsonl","capabilities":["session.resume"]});
         store.put("session", "s", &archive, None).unwrap();
-        store.refresh_archive_status(&archive, true).unwrap();
-        let active = store.get("session", "s").unwrap();
-        assert_eq!(active["status"], "active-unbridged");
-        assert_eq!(active["capabilities"], json!([]));
+        store.refresh_archive_status(&archive).unwrap();
+        let inactive = store.get("session", "s").unwrap();
+        assert_eq!(inactive["status"], "closed");
+        assert_eq!(inactive["capabilities"], json!([]));
+        assert_eq!(inactive["resumeEligibility"]["reason"], "source_missing");
         let live = json!({"id":"s","transport":"rpc","status":"failed","writerConnected":true,"sessionFile":"/saved/session.jsonl"});
         store.put("session", "s", &live, None).unwrap();
-        store.refresh_archive_status(&active, false).unwrap();
+        store.refresh_archive_status(&inactive).unwrap();
         assert_eq!(store.get("session", "s").unwrap(), live);
     }
     #[test]

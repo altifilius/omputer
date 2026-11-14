@@ -194,6 +194,9 @@ internal object LocalConnection {
         submit(replies, complete) {
             val scope = synchronized(this) {
                 if (identity != notificationDeviceId) throw ApiFailure("connection_changed", "Eşleştirme değişti; eski cevap gönderilmedi.")
+                val payload = body["payload"] as? Map<*, *>
+                val interaction = payload?.get("interactionId") as? String
+                if (interaction?.let(::pendingInteraction)?.optBoolean("secret") == true) throw ApiFailure("secret_requires_app", "Gizli yanıtı yalnızca uygulamadaki korumalı ekrandan gönder.")
                 localIdentity()
             }
             val id = body["id"] as String

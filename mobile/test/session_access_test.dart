@@ -163,4 +163,65 @@ void main() {
     await disposeScreen(tester, controller);
   });
 
+  testWidgets('missing source requires explicit relocation project and confirmation without automatic mapping', (tester) async {
+    final source = {...sessionData('inactive', ['session.resume', 'session.relocate']), 'cwd': '/missing/original', 'journalId': 'source-journal', 'sessionFile': '/saved/source.jsonl', 'resumeEligibility': {'eligible': false, 'canRelocate': true, 'reason': 'missing_cwd', 'message': 'Original project directory is missing'}};
+    final native = SessionAccessNative(snapshotData(source)); final controller = controllerFor(native);
+    await tester.pumpWidget(MaterialApp(home: SessionScreen(controller: controller, sessionId: 'session'))); await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('session-resume')), findsNothing); expect(native.commands, isEmpty);
+    final relocate = find.byKey(const ValueKey('session-relocate')); await tester.ensureVisible(relocate); await tester.tap(relocate); await tester.pumpAndSettle();
+    expect(find.text('Projenin yeni konumunu seç'), findsOneWidget); expect(native.commands, isEmpty);
+    await tester.tap(find.text('Other project')); await tester.pumpAndSettle();
+    expect(find.textContaining('/work/other'), findsWidgets); expect(find.textContaining('/missing/original'), findsWidgets); expect(native.commands, isEmpty);
+    await tester.tap(find.widgetWithText(FilledButton, 'Konumu seç ve sürdür')); await tester.pumpAndSettle();
+    expect(native.commands, hasLength(1)); expect(native.commands.single['action'], 'session.resume'); expect(native.commands.single['sessionId'], 'session');
+    expect(object(native.commands.single['payload']), {'sessionId': 'session', 'targetProjectId': 'other-project', 'expectedJournalId': 'source-journal', 'expectedSessionFile': '/saved/source.jsonl', 'confirmed': true});
+    await disposeScreen(tester, controller);
+  });
+  testWidgets('relocation cancellation and changed journal never dispatch the selected target', (tester) async {
+    final source = {...sessionData('inactive', ['session.resume']), 'cwd': '/missing/original', 'journalId': 'source-journal', 'sessionFile': '/saved/source.jsonl', 'resumeEligibility': {'eligible': false, 'canRelocate': true}};
+    final native = SessionAccessNative(snapshotData(source)); final controller = controllerFor(native);
+    await tester.pumpWidget(MaterialApp(home: SessionScreen(controller: controller, sessionId: 'session'))); await tester.pumpAndSettle();
+    final relocate = find.byKey(const ValueKey('session-relocate')); await tester.ensureVisible(relocate); await tester.tap(relocate); await tester.pumpAndSettle();
+    await tester.tap(find.text('Other project')); await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Vazgeç')); await tester.pumpAndSettle(); expect(native.commands, isEmpty);
+    await tester.ensureVisible(relocate); await tester.tap(relocate); await tester.pumpAndSettle(); await tester.tap(find.text('Other project')); await tester.pumpAndSettle();
+    controller.snapshot = Snapshot.fromJson(snapshotData({...source, 'journalId': 'different-journal'}));
+    await tester.tap(find.widgetWithText(FilledButton, 'Konumu seç ve sürdür')); await tester.pumpAndSettle(); expect(native.commands, isEmpty);
+    await disposeScreen(tester, controller);
+  });
+  testWidgets('normal prompt during running work sends literal draft once without changing delivery mode', (tester) async {
+    final native = SessionAccessNative(snapshotData({...sessionData('running', ['session.prompt', 'session.steer', 'session.follow_up'], transport: 'rpc'), 'writerConnected': true}));
+    final controller = controllerFor(native);
+    await tester.pumpWidget(MaterialApp(home: SessionScreen(controller: controller, sessionId: 'session'))); await tester.pumpAndSettle();
+    expect(find.textContaining('AI çalışıyorsa mesaj sıraya alınır'), findsOneWidget);
+    expect(tester.widget<DropdownButton<String>>(find.byType(DropdownButton<String>)).value, 'session.prompt');
+    const draft = 'Next step: {{literal}} and /not-a-command';
+    await tester.enterText(find.byType(TextField), draft); await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text, draft); expect(native.commands, isEmpty);
+    await tester.tap(find.widgetWithIcon(IconButton, Icons.arrow_upward_rounded)); await tester.pumpAndSettle();
+    expect(native.commands, hasLength(1)); expect(native.commands.single['action'], 'session.prompt');
+    expect(object(native.commands.single['payload']), containsPair('message', draft));
+    expect(object(native.commands.single['payload']), containsPair('runCommands', false));
+    expect(object(native.commands.single['payload']), containsPair('expandPromptTemplates', false));
+    expect(find.text('Mesaj çalışma sırasına alındı'), findsOneWidget);
+    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text, isEmpty);
+    expect(tester.widget<DropdownButton<String>>(find.byType(DropdownButton<String>)).value, 'session.prompt');
+    await disposeScreen(tester, controller);
+  });
+  testWidgets('restored slash draft queues literally only after explicit plain text confirmation', (tester) async {
+    const draft = '/deploy {{keep this literal}}';
+    final native = SessionAccessNative(snapshotData({...sessionData('running', ['session.prompt'], transport: 'rpc'), 'writerConnected': true}))
+      ..drafts['session:session:session.prompt'] = {'text': draft, 'attachments': [], 'files': []};
+    final controller = controllerFor(native);
+    await tester.pumpWidget(MaterialApp(home: SessionScreen(controller: controller, sessionId: 'session'))); await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text, draft); expect(native.commands, isEmpty);
+    final literal = find.text('/ metnini aynen gönder'); await tester.ensureVisible(literal); await tester.tap(literal); await tester.pumpAndSettle();
+    expect(native.commands, isEmpty); expect(find.text('Komut değil, düz metin gönder?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Düz metin gönder')); await tester.pumpAndSettle();
+    expect(native.commands, hasLength(1)); expect(native.commands.single['action'], 'session.prompt');
+    expect(object(native.commands.single['payload']), {'message': draft, 'runCommands': false, 'expandPromptTemplates': false});
+    expect(find.text('Mesaj çalışma sırasına alındı'), findsOneWidget);
+    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text, isEmpty);
+    await disposeScreen(tester, controller);
+  });
 }

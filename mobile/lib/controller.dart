@@ -485,10 +485,30 @@ class OmputerController extends ChangeNotifier {
     return {...value, 'status': 'unknown', 'result': {...result, 'status': 'unknown'}};
   }
 
+  Json _secretOperation(Json value) {
+    final request = object(value['request']);
+    final payload = object(request['payload']);
+    final admin = (value['action'] ?? request['action']) == 'session.command' && const ['builtin:settings', 'builtin:login', 'builtin:setup', 'builtin:logout'].contains(payload['commandId']);
+    if (admin) {
+      final result = object(value['result']);
+      final failure = object(result['error']);
+      return {...value, 'request': {...request, 'payload': {...payload, 'args': '[korumalı yönetim argümanları]'}},
+        if (value.containsKey('lastError')) 'lastError': 'Yönetim işleminin durumu doğrulanamadı.',
+        if (value.containsKey('result')) 'result': {'id': result['id'], 'success': result['success'], 'status': result['status'], 'accepted': result['accepted'],
+          if (failure.isNotEmpty) 'error': {'code': failure['code'], 'message': 'Yönetim işleminin durumu doğrulanamadı.'}}};
+    }
+    if ((value['action'] ?? request['action']) != 'interaction.respond' || !(payload['secret'] == true || snapshot.interaction('${payload['interactionId']}')?.secret == true)) return value;
+    final result = object(value['result']);
+    final failure = object(result['error']);
+    return {...value, 'request': {...request, 'payload': {'interactionId': payload['interactionId'], 'cancelled': payload['cancelled'] == true, 'secret': true}},
+      if (value.containsKey('lastError')) 'lastError': 'Gizli yanıtın durumu doğrulanamadı.',
+      if (value.containsKey('result')) 'result': {'id': result['id'], 'success': result['success'], 'status': result['status'], 'accepted': result['accepted'],
+        if (failure.isNotEmpty) 'error': {'code': failure['code'], 'message': 'Gizli yanıtın durumu doğrulanamadı.'}, 'data': {'secret': true}}};
+  }
   Json _mergeOperation(Json incoming) {
-    incoming = _normalizeOperation(incoming);
     final saved = _operations['${incoming['id']}'];
-    final current = saved == null ? null : _normalizeOperation(saved);
+    incoming = _secretOperation(_normalizeOperation({...incoming, if (incoming['request'] == null && saved?['request'] != null) 'request': saved!['request']}));
+    final current = saved == null ? null : _secretOperation(_normalizeOperation(saved));
     if (current == null) return {...incoming};
     if (_finalOperation(current)) return {...incoming, ...current};
     if (_finalOperation(incoming)) return {...current, ...incoming};
@@ -530,7 +550,7 @@ class OmputerController extends ChangeNotifier {
     if (interactionId == null) return;
     final status = payload['cancelled'] == true ? 'cancelled' : 'resolved';
     _acceptedResponses[interactionId] = status;
-    final response = {...payload}..remove('interactionId');
+    final response = payload['secret'] == true || snapshot.interaction(interactionId)?.secret == true ? <String, dynamic>{'secret': true, 'cancelled': payload['cancelled'] == true} : ({...payload}..remove('interactionId'));
     _acceptedAnswers[interactionId] = response;
     _acceptedAt[interactionId] = instant(operation['updatedAt']);
     final current = snapshot.interaction(interactionId);
@@ -845,6 +865,10 @@ class OmputerController extends ChangeNotifier {
     if (identity != _identityRevision || _switchingPair) throw ControllerFailure('Bilgisayar değişti; dal işlemi gönderilmedi.', 'connection_changed');
     return command('session.control', sessionId: sessionId, payload: {'control': control, 'arguments': arguments, ..._expectedIdentity(session), 'confirmed': confirmed}, branchRestore: control == 'branch' ? {'key': key, 'expectedRevision': expected?['_revision']} : null);
   }
+  Future<Json> hostAction(String sessionId, String operation) {
+    final session = _controlSession(sessionId);
+    return command('session.host', sessionId: sessionId, payload: {'operation': operation, ..._expectedIdentity(session), 'confirmed': true});
+  }
 
   Future<Json> executeCommand(String sessionId, String commandId, String args, {Object? catalogRevision, bool confirmed = false}) async {
     final session = _controlSession(sessionId, action: 'session.command');
@@ -854,7 +878,6 @@ class OmputerController extends ChangeNotifier {
     if (catalogRevision != null && catalogRevision != catalog['catalogRevision']) throw ControllerFailure('Komut listesi değişti. Yenileyip yeniden seç.', 'stale_catalog');
     final entry = objects(catalog['commands']).where((entry) => entry['id'] == commandId).firstOrNull;
     if (entry == null || entry['available'] != true) throw ControllerFailure('${entry?['unavailableReason'] ?? 'Bu komut kullanılamıyor.'}', 'unsupported_command');
-    if (entry['requiresIdle'] == true && ['running', 'human_wait', 'queued', 'background'].contains(session.workState)) throw ControllerFailure('Bu komut için oturumun boşta olması gerekir.', 'session_busy');
     if (['execute', 'destructive', 'provider'].contains(entry['risk']) && !confirmed) throw ControllerFailure('Bu komut açık onay gerektirir.', 'confirmation_required');
     return command('session.command', sessionId: sessionId, payload: {'commandId': commandId, 'args': args, 'catalogRevision': catalog['catalogRevision'], ..._expectedIdentity(session), 'confirmed': confirmed});
   }
@@ -934,12 +957,14 @@ class OmputerController extends ChangeNotifier {
   Future<Json> search(String query, {String? projectId, String? sessionId, Object? cursor, int limit = 50}) => request('GET', _query('/v1/search', {'query': query, 'projectId': projectId, 'sessionId': sessionId, 'cursor': cursor, 'limit': limit}));
   Future<Json> exportSession(String sessionId, {String format = 'markdown'}) => request('GET', _query('/v1/sessions/${Uri.encodeComponent(sessionId)}/export', {'format': format}));
   Future<void> shareExport(Json exported) async { await _localCall('shareExport', {'filename': exported['filename'], 'mimeType': exported['mimeType'], 'text': exported['text']}); }
+  Future<void> openExternalUrl(String url) async { await _localCall('openExternalUrl', {'url': url}); }
 
   Future<Json> command(String action, {String? sessionId, Json payload = const {}, Json? draftSubmission, Json? branchRestore}) async {
     if (!connection.connected) throw ControllerFailure('Bilgisayar çevrimdışı. İşlem gönderilmedi; Ayarlar’dan yeniden bağlanın.', 'offline');
     final identity = _identityRevision;
     final id = _uuid.v4();
     final requestBody = object(jsonDecode(jsonEncode({'id': id, if (sessionId != null) 'sessionId': sessionId, 'action': action, 'payload': payload})));
+    final secret = action == 'interaction.respond' && (payload['secret'] == true || snapshot.interaction('${payload['interactionId']}')?.secret == true) || action == 'session.command' && const ['builtin:settings', 'builtin:login', 'builtin:setup', 'builtin:logout'].contains(payload['commandId']);
     final now = DateTime.now().toUtc().toIso8601String();
     await _saveOperation({'id': id, 'action': action, if (sessionId != null) 'sessionId': sessionId, 'request': requestBody, 'status': 'unknown', 'createdAt': now, 'updatedAt': now, if (snapshot.journalEpoch != null) 'journalEpoch': snapshot.journalEpoch, if (localState['identity'] != null) 'identity': localState['identity'], if (draftSubmission != null) 'draftSubmission': draftSubmission, if (branchRestore != null) 'branchRestore': branchRestore});
     if (identity != _identityRevision || _switchingPair) throw ControllerFailure('Bilgisayar değişti; işlem gönderilmedi.', 'connection_changed');
@@ -948,33 +973,34 @@ class OmputerController extends ChangeNotifier {
       result = await request('POST', '/v1/commands', requestBody);
     } catch (failure) {
       if (identity != _identityRevision || _switchingPair) rethrow;
-      final uncertain = {..._operations[id]!, 'status': 'unknown', 'lastError': '$failure', 'updatedAt': DateTime.now().toUtc().toIso8601String()};
+      final safeFailure = secret ? 'Gizli yanıtın durumu doğrulanamadı.' : '$failure';
+      final uncertain = {..._operations[id]!, 'status': 'unknown', 'lastError': safeFailure, 'updatedAt': DateTime.now().toUtc().toIso8601String()};
       try { await _saveOperation(uncertain); }
       catch (storageFailure) {
         if (identity != _identityRevision || _switchingPair) rethrow;
         _operations[id] = _mergeOperation(uncertain);
         notifyListeners();
-        throw CommandUncertain(_operations[id]!, '$failure; Yerel sonuç kaydı da yazılamadı: $storageFailure');
+        throw CommandUncertain(_operations[id]!, secret ? safeFailure : '$failure; Yerel sonuç kaydı da yazılamadı: $storageFailure');
       }
-      throw CommandUncertain(_operations[id]!, failure);
+      throw CommandUncertain(_operations[id]!, safeFailure);
     }
     final status = result['status'] == 'unknown' || object(result['error'])['code'] == 'outcome_unknown' ? 'unknown' :
         result['status'] == 'running' ? 'running' :
         result['success'] == false || result['accepted'] == false || result['error'] != null || result['status'] == 'failed' ? 'failed' :
         result['accepted'] == true ? 'running' : result['success'] != true ? 'unknown' : 'succeeded';
-    final completed = {..._operations[id]!, 'status': status, 'result': result, 'updatedAt': DateTime.now().toUtc().toIso8601String()};
+    final completed = _secretOperation({..._operations[id]!, 'status': status, 'result': result, 'updatedAt': DateTime.now().toUtc().toIso8601String()});
     try { await _saveOperation(completed, applyBranch: status == 'succeeded'); }
     catch (failure) {
       if (identity != _identityRevision || _switchingPair) rethrow;
       _operations[id] = _mergeOperation(completed);
       _applyOperationDecision(_operations[id]!);
       notifyListeners();
-      throw CommandUncertain(_operations[id]!, 'Yanıt alındı fakat yerel kalıcı kayda yazılamadı: $failure');
+      throw CommandUncertain(_operations[id]!, secret ? 'Gizli yanıtın yerel sonuç kaydı yazılamadı.' : 'Yanıt alındı fakat yerel kalıcı kayda yazılamadı: $failure');
     }
     if (status == 'running') throw CommandAccepted(_operations[id]!);
     if (status == 'unknown') throw CommandUncertain(_operations[id]!, 'Bilgisayar henüz kesin sonuç bildirmedi.');
-    if (status == 'failed') throw ControllerFailure('${object(result['error'])['message'] ?? 'Bilgisayar komutu reddetti.'}', '${object(result['error'])['code'] ?? 'command_failed'}');
-    return result;
+    if (status == 'failed') throw ControllerFailure(secret ? 'Gizli yanıtın durumu doğrulanamadı.' : '${object(result['error'])['message'] ?? 'Bilgisayar komutu reddetti.'}', '${object(result['error'])['code'] ?? 'command_failed'}');
+    return secret ? object(completed['result']) : result;
   }
 
   Future<void> respond(Interaction interaction, Json answer) async {
@@ -986,7 +1012,7 @@ class OmputerController extends ChangeNotifier {
     final identity = _identityRevision;
     _responding.add(current.id);
     try {
-      await command('interaction.respond', sessionId: current.sessionId, payload: {...answer, 'interactionId': current.id});
+      await command('interaction.respond', sessionId: current.sessionId, payload: {...answer, 'interactionId': current.id, if (current.secret) 'secret': true});
       if (_disposed || identity != _identityRevision) return;
       final latest = snapshot.interaction(current.id);
       final status = answer['cancelled'] == true ? 'cancelled' : 'resolved';

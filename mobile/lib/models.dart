@@ -68,6 +68,7 @@ class Session {
         thinkingLevel = j['thinkingLevel'] as String?,
         updatedAt = instant(j['updatedAt']),
         sessionFile = j['sessionFile'] as String?,
+        resumeEligibility = object(j['resumeEligibility']),
         journalId = j['journalId'] as String?,
         providerSessionId = j['providerSessionId'] as String?,
         bindingRevision = j['bindingRevision'] as String?,
@@ -92,10 +93,15 @@ class Session {
   final DateTime? updatedAt;
   final List<Json> todos, subagents, asyncJobs, queuedMessages;
   final Json contextUsage;
+  final Json resumeEligibility;
   final List<String> capabilities;
   bool get archived => !writerConnected && (transport == 'archive' || ['closed', 'disconnected', 'failed', 'inactive'].contains(status));
   bool get activeUnbridged => status == 'active-unbridged';
-  bool get canResume => archived && !activeUnbridged && supports('session.resume');
+  String? get resumeBlockedReason => resumeEligibility['reason'] as String?;
+  String? get resumeBlockedMessage => resumeEligibility['message'] as String?;
+  bool get canRelocate => archived && !activeUnbridged && resumeEligibility['canRelocate'] == true &&
+      (supports('session.relocate') || supports('session.resume'));
+  bool get canResume => archived && !activeUnbridged && resumeEligibility['eligible'] != false && supports('session.resume');
   bool get canSendMessages => writerConnected && !activeUnbridged && ['session.prompt', 'session.steer', 'session.follow_up'].any(supports);
   bool get hasPendingAsyncWork => pendingAsyncWork || [...asyncJobs, ...subagents].any((job) => ['running', 'pending', 'queued', 'waiting', 'starting'].contains(job['status']));
   String get workState {
@@ -134,22 +140,24 @@ class Interaction {
         sessionId = j['sessionId'] as String? ?? '',
         projectId = j['projectId'] as String? ?? '',
         method = j['method'] as String? ?? 'input',
-        title = j['title'] as String? ?? '',
-        message = j['message'] as String?,
+        title = j['sensitiveContext'] == true ? 'Korumalı giriş' : j['title'] as String? ?? '',
+        message = j['sensitiveContext'] == true ? null : j['message'] as String?,
         options = objects(j['options']),
         questions = objects(j['questions']),
-        prefill = j['prefill'] as String?,
+        prefill = j['secret'] == true ? null : j['prefill'] as String?,
         createdAt = instant(j['createdAt']),
         supportsNotes = j['supportsNotes'] != false,
+        secret = j['secret'] == true,
+        sensitiveContext = j['sensitiveContext'] == true,
         expiresAt = instant(j['expiresAt']),
-        response = j['response'] is Map ? object(j['response']) : null,
+        response = j['secret'] == true ? null : j['response'] is Map ? object(j['response']) : null,
         respondedAt = instant(j['respondedAt'] ?? j['resolvedAt']),
         status = j['status'] as String? ?? 'pending';
   final String id, sessionId, projectId, method, title;
   String status;
   final String? message, prefill;
   final List<Json> options, questions;
-  final bool supportsNotes;
+  final bool supportsNotes, secret, sensitiveContext;
   final DateTime? createdAt, expiresAt;
   Json? response;
   DateTime? respondedAt;

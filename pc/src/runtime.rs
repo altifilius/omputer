@@ -77,6 +77,7 @@ pub struct App {
     pub local: std::sync::OnceLock<Arc<crate::discovery::LocalState>>,
     links: Mutex<HashMap<String, Links>>,
     responses: Mutex<HashMap<String, PendingResponse>>,
+    private_interaction_context: Mutex<HashMap<String, Value>>,
     models: Mutex<Vec<Value>>,
     revisions: Mutex<HashMap<String, u64>>,
     notifications: Mutex<HashMap<String, (bool, std::time::Instant)>>,
@@ -95,6 +96,7 @@ impl App {
             local: std::sync::OnceLock::new(),
             links: Mutex::new(HashMap::new()),
             responses: Mutex::new(HashMap::new()),
+            private_interaction_context: Mutex::new(HashMap::new()),
             models: Mutex::new(Vec::new()),
             revisions: Mutex::new(HashMap::new()),
             notifications: Mutex::new(HashMap::new()),
@@ -144,7 +146,7 @@ impl App {
     }
     fn saved_source(&self, session: &Value) -> Result<(PathBuf, String)> {
         let file = PathBuf::from(required(session, "sessionFile")?).canonicalize()?;
-        let (header, _) = archive::load(&file)?;
+        let header = archive::source_header(&file)?;
         let native_id = required(&header, "id")?;
         if session["journalId"]
             .as_str()
@@ -173,37 +175,16 @@ impl App {
         if !connected {
             session["workState"] = json!("disconnected");
         }
-        let resumable = !connected
-            && !self.managed_children.lock().contains(&id)
-            && self.saved_source(session).is_ok_and(|(file, native_id)| {
-                // This object's persisted status can still be the pre-disconnect snapshot.
-                let others_live = self
-                    .store
-                    .list("session")
-                    .map(|sessions| {
-                        sessions.iter().any(|other| {
-                            other["id"] != id
-                                && other["transport"] != "archive"
-                                && !matches!(
-                                    other["status"].as_str(),
-                                    Some("closed" | "failed" | "disconnected")
-                                )
-                                && (other["id"] == native_id
-                                    || other["sessionFile"]
-                                        .as_str()
-                                        .and_then(|path| Path::new(path).canonicalize().ok())
-                                        .as_ref()
-                                        == Some(&file))
-                        })
-                    })
-                    .unwrap_or(true);
-                !others_live && archive::ensure_source_inactive(&native_id, &file).is_ok()
-            });
-        session["capabilities"] = if resumable {
-            json!(["session.resume"])
-        } else {
-            json!([])
-        };
+        if connected || self.managed_children.lock().contains(&id) {
+            session["capabilities"] = json!([]);
+            session["resumeEligibility"] = json!({"eligible":false,"reason":"active_owner","message":"A native writer still owns this session","canRelocate":false});
+            return;
+        }
+        // Evaluate the supplied disconnected snapshot, not its stale persisted liveness.
+        let mut inactive = session.clone();
+        inactive["status"] = json!("disconnected");
+        inactive["writerConnected"] = json!(false);
+        archive::resume_eligibility_after_disconnect(&self.store, &inactive).apply(session);
     }
     pub fn managed_rpc_sessions(&self) -> usize {
         self.managed_children.lock().len()
@@ -361,12 +342,13 @@ impl App {
         sender: mpsc::Sender<Value>,
         mut frame: Value,
     ) -> Result<Value> {
-        let control_snapshot = matches!(
-            frame["action"].as_str(),
-            Some("session.command" | "session.control")
-        )
-        .then(|| self.store.get("session", session_id))
-        .transpose()?;
+        let control_snapshot = if matches!(frame["action"].as_str(), Some("session.command" | "session.control")) {
+            let mut snapshot = self.store.get("session", session_id)?;
+            snapshot["_allowProjectTransition"] = json!(frame["action"] == "session.command"
+                && frame["payload"]["confirmed"] == true
+                && matches!(frame["payload"]["commandId"].as_str(), Some("builtin:move" | "builtin:wt")));
+            Some(snapshot)
+        } else { None };
         let durable_control = control_snapshot.is_some();
         let id = Uuid::new_v4().to_string();
         let bridge = frame["type"] == "command";
@@ -415,8 +397,9 @@ impl App {
         Ok(reply["data"].clone())
     }
     fn cancel_transport_interactions(&self, session: &str, native: bool) -> Result<()> {
-        self.store
-            .cancel_transport_interactions(session, Some(native))
+        self.store.cancel_transport_interactions(session, Some(native))?;
+        self.clear_session_interaction_context(session);
+        Ok(())
     }
     fn fail_pending(&self, session: &str, bridge: bool) {
         self.responses
@@ -475,6 +458,9 @@ impl App {
                 | "models"
                 | "effort"
                 | "usage"
+                | "settings" | "login" | "setup" | "logout" | "skills" | "vibe"
+                | "loop" | "pause" | "modes" | "extensions" | "hotkeys" | "debug"
+                | "record" | "source"
         ) || !args.is_object()
         {
             return Err(command_error(
@@ -554,10 +540,7 @@ impl App {
                 .as_str()
                 .or(request["sessionId"].as_str())
                 .context("sessionId is required")?;
-            let session = self.store.get("session", id)?;
-            let (file, _) = self.saved_source(&session)?;
-            let payload = json!({"projectId":session["projectId"],"name":session["name"]});
-            return self.start(&payload, Some((id.to_owned(), file))).await;
+            return self.start(payload, Some(id.to_owned())).await;
         }
         if action == "interaction.respond" {
             let interaction_id = payload["interactionId"]
@@ -605,6 +588,7 @@ impl App {
                             "resolved"
                         },
                     )?;
+                    self.discard_interaction_context(interaction_id);
                     return Ok(data);
                 }
                 Err(e) => {
@@ -631,6 +615,45 @@ impl App {
         if session["transport"] == "archive" {
             bail!("Archive is read-only; resume it before issuing commands");
         }
+        if action == "session.host" {
+            validate_control_identity(&session, payload)?;
+            if payload["confirmed"] != true {
+                return Err(command_error("confirmation_required", "Confirm the exact host lifecycle action"));
+            }
+            let operation = required(payload, "operation")?;
+            if !matches!(operation, "close" | "restart") {
+                return Err(command_error("invalid_command", "Host lifecycle action must be close or restart"));
+            }
+            if !self.managed_children.lock().contains(id) {
+                let channel = self.bridge_link(id)?;
+                let result = self.exchange(id, channel.clone(), json!({"type":"command","action":"session.host","payload":payload})).await?;
+                if result["closeRequested"] != true {
+                    return Err(command_error("command_rejected", "Terminal host did not accept lifecycle action"));
+                }
+                channel.send(json!({"type":"host_action_ack","id":result["requestId"]})).await
+                    .map_err(|_| command_error("outcome_unknown", "Terminal host acknowledgement was not delivered"))?;
+                tokio::time::timeout(Duration::from_secs(20), async {
+                    while self.links.lock().get(id).is_some_and(|link| link.bridge.is_some()) {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                }).await.map_err(|_| command_error("outcome_unknown", "Terminal host has not closed; do not repeat it"))?;
+                if operation == "restart" { return self.start(&json!({}), Some(id.to_owned())).await; }
+                return Ok(json!({"closed":true,"sessionId":id}));
+            }
+            self.bridge_command(id, "session.flush", json!({})).await?;
+            let stop = self.child_shutdown.lock().get(id).cloned()
+                .context("Managed host no longer owns this session")?;
+            stop.send(()).map_err(|_| command_error("session_disconnected", "Managed host already exited"))?;
+            tokio::time::timeout(Duration::from_secs(20), async {
+                while self.managed_children.lock().contains(id) {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }).await.map_err(|_| command_error("outcome_unknown", "Host close has not completed; do not repeat it"))?;
+            if operation == "restart" {
+                return self.start(&json!({}), Some(id.to_owned())).await;
+            }
+            return Ok(json!({"closed":true,"sessionId":id}));
+        }
         if matches!(action, "session.command" | "session.control") {
             validate_control_identity(&session, payload)?;
             let mut result = self.exchange(id, self.bridge_link(id)?, json!({"type":"command","action":action,"payload":payload,"operationId":required(request,"id")?})).await?;
@@ -654,7 +677,12 @@ impl App {
         let frame = match action {
             "session.prompt" | "session.steer" | "session.follow_up" => {
                 let message = payload["message"].as_str().context("message is required")?;
-                json!({"type":action.trim_start_matches("session."),"message":message,"images":payload["images"].as_array().cloned().unwrap_or_default(),"runCommands":payload["runCommands"].as_bool().unwrap_or(false),"expandPromptTemplates":payload["expandPromptTemplates"].as_bool().unwrap_or(false)})
+                let mut frame = json!({"type":action.trim_start_matches("session."),"message":message,"images":payload["images"].as_array().cloned().unwrap_or_default(),"runCommands":payload["runCommands"].as_bool().unwrap_or(false),"expandPromptTemplates":payload["expandPromptTemplates"].as_bool().unwrap_or(false)});
+                if action == "session.prompt" {
+                    // Match terminal Enter, including a turn starting during prompt preprocessing.
+                    frame["streamingBehavior"] = json!("steer");
+                }
+                frame
             }
             "session.abort" => json!({"type":"abort"}),
             "session.model" => {
@@ -687,7 +715,7 @@ impl App {
     async fn start(
         self: &Arc<Self>,
         payload: &Value,
-        resume: Option<(String, PathBuf)>,
+        resume: Option<String>,
     ) -> Result<Value> {
         let _guard = self.starting.lock().await;
         if self.update_pending.load(Ordering::SeqCst) {
@@ -696,7 +724,28 @@ impl App {
                 "A local update is prepared; finish or cancel it before starting a session",
             ));
         }
-        let project = self.store.get("project", required(payload, "projectId")?)?;
+        let mut prepared = if let Some(id) = &resume {
+            if self.managed_children.lock().contains(id)
+                || self.links.lock().get(id).is_some_and(|l| l.rpc.is_some() || l.bridge.is_some()) {
+                bail!("Session already has a native owner; wait for its exit");
+            }
+            let session = self.store.get("session", id)?;
+            let target = payload.get("targetProjectId").map(|value| value.as_str().context("targetProjectId must be a registered project id")).transpose()?;
+            if target.is_some() {
+                if payload["confirmed"] != true { bail!("Explicit relocation target confirmation is required"); }
+                if payload["expectedJournalId"] != session["journalId"]
+                    || payload["expectedSessionFile"] != session["sessionFile"]
+                    || !payload["expectedJournalId"].is_string()
+                    || !payload["expectedSessionFile"].is_string() {
+                    bail!("Saved session binding changed; refresh before confirming relocation");
+                }
+            }
+            Some(archive::prepare_resume(&self.store, &session, target, &self.config.state_dir)?)
+        } else { None };
+        let project = match &prepared {
+            Some(prepared) => prepared.project.clone(),
+            None => self.store.get("project", required(payload, "projectId")?)?,
+        };
         let root = PathBuf::from(project["path"].as_str().context("Project root missing")?);
         if root.canonicalize()? != root {
             bail!("Registered project root changed; register its current canonical path locally");
@@ -707,29 +756,7 @@ impl App {
                 self.config.bridge.display()
             );
         }
-        let id = resume
-            .as_ref()
-            .map(|(id, _)| id.clone())
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        if let Some((_, file)) = &resume {
-            let session = self.store.get("session", &id)?;
-            let (saved, native_id) = self.saved_source(&session)?;
-            if saved != *file {
-                bail!("Saved session source changed before resume");
-            }
-            archive::ensure_inactive(&self.store, &native_id, file)?;
-            if self.managed_children.lock().contains(&id) {
-                bail!("The previous managed process still owns this session; wait for its exit");
-            }
-            if self
-                .links
-                .lock()
-                .get(&id)
-                .is_some_and(|l| l.rpc.is_some() || l.bridge.is_some())
-            {
-                bail!("Session is already connected; a second process will not be started");
-            }
-        }
+        let id = resume.unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut command = Command::new(&self.config.omp);
         command
             .args(["--mode", "rpc-ui", "--no-ui", "--no-title"])
@@ -740,13 +767,28 @@ impl App {
             .env("OMPUTER_STATE_DIR", &self.config.state_dir)
             .env("OMPUTER_RPC_MANAGED", "1")
             .env("OMPUTER_SESSION_ID", &id)
+            .env_remove("OMPUTER_SESSION_LEASE_FD")
+            .env_remove("OMPUTER_SESSION_LEASE_ID")
             .current_dir(&root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(false);
-        if let Some((_, file)) = &resume {
-            command.arg("--resume").arg(file);
+        if let Some(prepared) = &prepared {
+            command.arg("--resume").arg(&prepared.file);
+            let fd = prepared.lease_fd();
+            command.env("OMPUTER_SESSION_LEASE_FD", fd.to_string())
+                .env("OMPUTER_SESSION_LEASE_ID", &prepared.journal_id);
+            // Only the forked child clears CLOEXEC; no unrelated daemon spawn may inherit it.
+            unsafe {
+                command.pre_exec(move || {
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         } else {
             let session_dir = self.config.state_dir.join("sessions").join(&id);
             std::fs::create_dir_all(&session_dir)?;
@@ -759,8 +801,8 @@ impl App {
             command.arg("--model").arg(format!("{provider}/{model}"));
         }
         let (tx, rx) = mpsc::channel(256);
-        let mut session = if resume.is_some() {
-            self.store.get("session", &id)?
+        let mut session = if let Some(prepared) = &prepared {
+            prepared.session.clone()
         } else {
             json!({"id":id,"projectId":project["id"],"name":payload["name"].as_str().unwrap_or("OMP"),"cwd":root,"todos":[],"subagents":[]})
         };
@@ -775,11 +817,18 @@ impl App {
         session["workState"] = json!("settled");
         session["turnError"] = Value::Null;
         session["lastError"] = Value::Null;
-        self.store
-            .put("session", &id, &session, Some("session.updated"))?;
+        if let Some(prepared) = &mut prepared {
+            prepared.session = session.clone();
+            // Commit the source binding while retaining its lease. Spawn failure keeps the
+            // durable managed copy rather than rolling the binding back over later updates.
+            prepared.commit(&self.store)?;
+        } else {
+            self.store.put("session", &id, &session, Some("session.updated"))?;
+        }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
+                drop(prepared.take());
                 session["status"] = json!("failed");
                 session["lastError"] = json!("Cannot launch the configured local OMP runtime");
                 self.set_inactive_capabilities(&mut session);
@@ -790,9 +839,19 @@ impl App {
                 });
             }
         };
-        let stdin = child.stdin.take().context("OMP stdin unavailable")?;
-        let stdout = child.stdout.take().context("OMP stdout unavailable")?;
-        let stderr = child.stderr.take().context("OMP stderr unavailable")?;
+        let (stdin, stdout, stderr) = match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
+            (Some(stdin), Some(stdout), Some(stderr)) => (stdin, stdout, stderr),
+            _ => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                drop(prepared.take());
+                session["status"] = json!("failed");
+                session["lastError"] = json!("Native runtime standard streams unavailable");
+                self.set_inactive_capabilities(&mut session);
+                self.store.put("session", &id, &session, Some("session.updated"))?;
+                bail!("Native runtime standard streams unavailable");
+            }
+        };
         self.managed_children.lock().insert(id.clone());
         self.links.lock().entry(id.clone()).or_default().rpc = Some(tx);
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -847,11 +906,21 @@ impl App {
             let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
         });
         let app = self.clone();
+        let expected_handoff = prepared.as_ref().map(|p| json!({"journalId":p.journal_id,"source":p.file}));
+        let (handoff_tx, handoff_rx) = oneshot::channel::<()>();
         let sid = id.clone();
         tokio::spawn(async move {
-            let status = tokio::select! {
-                status = child.wait() => status,
-                _ = failure_rx.recv() => {
+            // Cancellation or startup failure must not release the guard while the child
+            // can still write. The supervisor owns it until acceptance or exact-child exit.
+            let mut lease_guard = prepared;
+            let mut handoff_rx = handoff_rx;
+            let status = loop { tokio::select! {
+                accepted = &mut handoff_rx, if lease_guard.is_some() => {
+                    if accepted.is_ok() { lease_guard.take(); }
+                    else { break { let _ = child.start_kill(); child.wait().await }; }
+                }
+                status = child.wait() => break status,
+                _ = failure_rx.recv() => break {
                     // stdin EOF is OMP's durable dispose path. Only our exact spawned child
                     // may be terminated, and only after bounded graceful teardown fails.
                     if let Some(link) = app.links.lock().get_mut(&sid) { link.rpc = None; }
@@ -862,7 +931,8 @@ impl App {
                         Err(_) => { let _ = child.start_kill(); child.wait().await }
                     }
                 }
-            };
+            }};
+            drop(lease_guard);
             if tokio::time::timeout(Duration::from_secs(2), &mut stdout_reader)
                 .await
                 .is_err()
@@ -909,6 +979,10 @@ impl App {
                 ));
             }
         };
+        if expected_handoff.as_ref().is_some_and(|expected| ready["sessionLeaseHandoff"] != *expected) {
+            let _ = failure_tx.send(());
+            return Err(command_error("unsupported_runtime", "Native runtime did not accept the exact inherited session lease and source"));
+        }
         if !ready["supportedProtocolVersions"]
             .as_array()
             .is_some_and(|a| a.iter().any(|v| v == 2))
@@ -921,6 +995,7 @@ impl App {
                 "Native OMP must advertise RPC v2, 1 MiB frames and 64 MiB reassembly; update the local OMP runtime",
             ));
         }
+        let _ = handoff_tx.send(());
         let negotiated = match self
             .native(
                 &id,
@@ -954,6 +1029,19 @@ impl App {
                     .await?;
             }
             self.refresh(&id).await?;
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let state = self.store.get("session", &id)?;
+                    let controls = state["capabilities"].as_array().is_some_and(|caps| caps.iter().any(|cap| cap == "session.controls"));
+                    if state["writerConnected"] == true && state["bindingRevision"].is_string() && state["journalId"].is_string() && controls {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                    if !self.managed_children.lock().contains(&id) {
+                        return Err(command_error("session_disconnected", "Native writer exited before bridge controls became ready"));
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }).await.map_err(|_| command_error("unsupported_runtime", "Native writer did not expose the matching bridge controls within 15 seconds"))??;
             if let Some(prompt) = payload["prompt"].as_str().filter(|p| !p.is_empty()) {
                 self.native(&id, json!({"type":"prompt","message":prompt}))
                     .await?;
@@ -1079,11 +1167,12 @@ impl App {
         }
         let journal = required(state, "journalId")?;
         let file = PathBuf::from(required(state, "sessionFile")?).canonicalize()?;
-        let (header, _) = archive::load(&file)?;
-        let root = PathBuf::from(required(&current, "cwd")?).canonicalize()?;
-        if header["id"] != journal
-            || Path::new(required(&header, "cwd")?).canonicalize()? != root
-            || Path::new(required(state, "cwd")?).canonicalize()? != root
+        let header = archive::source_header(&file)?;
+        let root = PathBuf::from(required(state, "cwd")?);
+        let previous_root = PathBuf::from(required(&current, "cwd")?);
+        if !root.is_dir() || root.canonicalize()? != root || header["id"] != journal
+            || header["cwd"].as_str() != root.to_str()
+            || (root != previous_root && previous["_allowProjectTransition"] != true)
         {
             return Err(command_error(
                 "source_mismatch",
@@ -1107,6 +1196,11 @@ impl App {
             }
         }
         let mut next = current;
+        if root != previous_root {
+            let project = self.store.register_project(&root, None)?;
+            next["projectId"] = project["id"].clone();
+            next["cwd"] = json!(root);
+        }
         if next["journalId"] != journal || next["sessionFile"].as_str() != file.to_str() {
             if next["originalSource"].is_null() {
                 next["originalSource"] = json!({"journalId":previous["journalId"],"sessionFile":previous["sessionFile"]});
@@ -1464,6 +1558,7 @@ impl App {
                     {
                         self.store
                             .end_interaction(id, required(&frame, "status")?)?;
+                        self.discard_interaction_context(id);
                     }
                     return Ok(());
                 }
@@ -1480,6 +1575,7 @@ impl App {
                         .is_ok_and(|request| request["sessionId"] == session)
                 {
                     self.store.end_interaction(id, "cancelled")?;
+                    self.discard_interaction_context(id);
                 }
                 return Ok(());
             }
@@ -1708,12 +1804,23 @@ impl App {
     fn interaction(&self, id: &str, request: &Value, native: bool) -> Result<()> {
         let session = self.store.get("session", id)?;
         let rid = required(request, "id")?;
+        let sensitive = request["sensitiveContext"] == true || request["secret"] == true;
+        if sensitive {
+            let mut contexts = self.private_interaction_context.lock();
+            contexts.retain(|key, _| self.store.get("interaction", key).is_ok_and(|value| value["status"] == "pending"));
+            let existing = self.store.get("interaction", rid).ok();
+            if existing.as_ref().is_none_or(|value| value["sessionId"] == id && (value["status"] == "pending" || value["status"] == "cancelled" && value["cancellationReason"] == "disconnect")) {
+                contexts.insert(rid.to_owned(), json!({"interactionId":rid,"sessionId":id,"title":request["title"],"message":request["message"]}));
+            }
+        }
         if self.store.reconcile_pending_replay(rid, id, native)? {
             return Ok(());
         }
         let mut interaction = json!({"id":rid,"sessionId":id,"projectId":session["projectId"],"method":request["method"],"title":request["title"].as_str().unwrap_or("OMP question"),"createdAt":request["createdAt"].as_str().unwrap_or(&now()),"status":"pending"});
         interaction["responseTransport"] = json!(if native { "rpc" } else { "bridge" });
         interaction["supportsNotes"] = json!(!native);
+        interaction["secret"] = json!(request["secret"] == true);
+        interaction["sensitiveContext"] = json!(sensitive);
         for key in ["message", "options", "questions", "prefill", "expiresAt"] {
             if let Some(value) = request.get(key) {
                 interaction[key] = value.clone();
@@ -1737,6 +1844,11 @@ impl App {
             interaction["expiresAt"] =
                 json!((chrono::Utc::now() + chrono::Duration::milliseconds(ms)).to_rfc3339());
         }
+        if sensitive {
+            interaction["title"] = json!("Korumalı giriş");
+            interaction["message"] = json!("[korumalı giriş bağlamı]");
+            interaction.as_object_mut().unwrap().remove("prefill");
+        }
         self.store.put(
             "interaction",
             rid,
@@ -1758,6 +1870,24 @@ impl App {
             Some(rid),
         )?;
         Ok(())
+    }
+    pub fn discard_interaction_context(&self, id: &str) {
+        self.private_interaction_context.lock().remove(id);
+    }
+    pub fn clear_session_interaction_context(&self, session: &str) {
+        self.private_interaction_context.lock().retain(|_, value| value["sessionId"] != session);
+    }
+    pub fn interaction_context(&self, id: &str) -> Result<Value> {
+        let interaction = self.store.get("interaction", id).map_err(|_| command_error("stale_interaction", "Private interaction is unavailable"))?;
+        if interaction["status"] != "pending" || interaction["sensitiveContext"] != true || interaction["expiresAt"].as_str().is_some_and(|expiry| expiry <= now().as_str()) {
+            self.private_interaction_context.lock().remove(id);
+            return Err(command_error("stale_interaction", "Private interaction is no longer pending"));
+        }
+        let session = required(&interaction, "sessionId")?;
+        let links = self.links.lock();
+        let writer = links.get(session).is_some_and(|link| if interaction["responseTransport"] == "rpc" { link.rpc.as_ref().is_some_and(|sender| !sender.is_closed()) } else { link.bridge.as_ref().is_some_and(|sender| !sender.is_closed()) });
+        if !writer { return Err(command_error("session_disconnected", "Private interaction writer is disconnected")); }
+        self.private_interaction_context.lock().get(id).filter(|value| value["interactionId"] == id && value["sessionId"] == session).cloned().ok_or_else(|| command_error("private_context_unavailable", "Private context is not retained after a daemon restart"))
     }
     fn notify(
         &self,
@@ -1908,7 +2038,7 @@ impl App {
             .as_str()
             .and_then(|file| Path::new(file).canonicalize().ok());
         if let Some(file) = &source {
-            let (header, _) = archive::load(file)?;
+            let header = archive::source_header(file)?;
             if header["id"] != raw["journalId"].as_str().unwrap_or(&id)
                 || Path::new(required(&header, "cwd")?).canonicalize()? != root
             {
@@ -2471,8 +2601,87 @@ mod tests {
     fn ask() -> Value {
         json!({"id":"q","method":"ask","title":"Choose","questions":[{"id":"one","question":"First?","options":[{"label":"A"},{"label":"B"}],"multi":false}]})
     }
+    #[tokio::test]
+    async fn secret_and_private_flags_survive_bridge_requests_without_persisting_prompt_context() {
+        let app = app();
+        let (tx, _rx) = mpsc::channel(8);
+        app.links.lock().entry("s".into()).or_default().bridge = Some(tx);
+        for (id, secret, method) in [("secret", true, "input"), ("private", false, "confirm")] {
+            let request = json!({"id":id,"method":method,"secret":secret,"sensitiveContext":!secret,"title":"Private provider authorization","message":"https://provider.invalid/authorize?state=never-persist","prefill":"never-prefill"});
+            app.interaction("s", &request, false).unwrap();
+            let stored = app.store.get("interaction", id).unwrap();
+            assert_eq!(stored["secret"], secret);
+            assert_eq!(stored["sensitiveContext"], true);
+            assert_eq!(stored["method"], method);
+            assert_eq!(stored["title"], "Korumalı giriş");
+            assert_eq!(stored["message"], "[korumalı giriş bağlamı]");
+            assert!(stored.get("prefill").is_none());
+            let context = app.interaction_context(id).unwrap();
+            assert_eq!(context["interactionId"], id);
+            assert_eq!(context["sessionId"], "s");
+            assert_eq!(context["message"], request["message"]);
+        }
+        assert!(app.interaction_context("other").is_err());
+        let serialized = serde_json::to_string(&app.store.journal(0, 100).unwrap()).unwrap();
+        assert!(!serialized.contains("never-persist")); assert!(!serialized.contains("Private provider authorization"));
+        app.frame("s", json!({"type":"interaction_end","id":"private","status":"resolved"}), true).await.unwrap();
+        assert!(app.interaction_context("private").is_err());
+        assert!(!app.private_interaction_context.lock().contains_key("private"));
+        app.cancel_transport_interactions("s", false).unwrap();
+        assert!(app.private_interaction_context.lock().is_empty());
+        assert!(app.interaction_context("secret").is_err());
+        let request = json!({"id":"secret","method":"input","secret":true,"title":"Replayed private title","message":"replayed-private-context"});
+        app.interaction("s", &request, false).unwrap();
+        assert_eq!(app.interaction_context("secret").unwrap()["message"], "replayed-private-context");
+        app.links.lock().entry("s".into()).or_default().bridge = None;
+        assert!(app.interaction_context("secret").is_err());
+    }
     fn submitted() -> Value {
         json!({"interactionId":"q","answer":{"kind":"submit","results":[{"id":"one","selectedOptions":["A"]}]}})
+    }
+    #[tokio::test]
+    async fn native_prompt_always_steers_without_state_probe_or_retry() {
+        let app = app();
+        let (tx, mut rx) = mpsc::channel(8);
+        app.links.lock().entry("s".into()).or_default().rpc = Some(tx);
+        let images = json!([{"type":"image","mimeType":"image/png","data":"literal-image-data"}]);
+        for (status, action, reject) in [
+            ("running", "session.prompt", false),
+            ("idle", "session.prompt", false),
+            ("running", "session.steer", false),
+            ("running", "session.follow_up", false),
+            ("idle", "session.prompt", true),
+        ] {
+            let mut session = app.store.get("session", "s").unwrap();
+            session["transport"] = json!("rpc");
+            session["status"] = json!(status);
+            app.store.put("session", "s", &session, None).unwrap();
+            let worker = app.clone();
+            let payload = json!({"message":"/deploy {{literal}}","images":images});
+            let call = tokio::spawn(async move {
+                worker.command(&json!({"id":Uuid::new_v4().to_string(),"sessionId":"s","action":action,"payload":payload})).await
+            });
+            let frame = rx.recv().await.unwrap();
+            let mut expected = json!({"id":frame["id"],"type":action.trim_start_matches("session."),"message":"/deploy {{literal}}","images":images,"runCommands":false,"expandPromptTemplates":false});
+            if action == "session.prompt" {
+                expected["streamingBehavior"] = json!("steer");
+            }
+            assert_eq!(frame, expected);
+            // The idle snapshot can already be stale when RPC admits this frame.
+            // No get_state round trip or retry may stand between send and queueing.
+            app.frame("s", if reject {
+                json!({"type":"response","id":frame["id"],"success":false,"error":"Host rejected the prompt"})
+            } else {
+                json!({"type":"response","id":frame["id"],"success":true,"data":{"accepted":true}})
+            }, false).await.unwrap();
+            let result = call.await.unwrap();
+            if reject {
+                assert_eq!(error_code(&result.unwrap_err()), "command_rejected");
+            } else {
+                assert_eq!(result.unwrap(), json!({"accepted":true}));
+            }
+            assert!(rx.try_recv().is_err(), "Prompt must be forwarded exactly once");
+        }
     }
     #[tokio::test]
     async fn malformed_ask_does_not_claim_or_cancel_and_correct_answer_succeeds() {
@@ -3090,5 +3299,187 @@ mod tests {
             .unwrap_err();
         assert_eq!(error_code(&error), "source_mismatch");
         assert_eq!(app.store.get("session", "s").unwrap(), saved);
+    }
+    #[tokio::test]
+    async fn resume_spawn_failure_keeps_relocated_source_and_messages() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let target = root.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let original_root = root.join("gone");
+        let source = root.join("saved.jsonl");
+        let native_id = Uuid::new_v4().to_string();
+        let original = format!("{}\n{}\n", json!({"type":"session","id":native_id,"cwd":original_root}), json!({"type":"message","id":"history","message":{"role":"user","content":"preserve queued history"}}));
+        std::fs::write(&source, &original).unwrap();
+        let bridge = root.join("bridge.ts");
+        std::fs::write(&bridge, "export default () => {};").unwrap();
+        let store = Arc::new(Store::open(Path::new(":memory:"), "test".into()).unwrap());
+        store.put("project", "target", &json!({"id":"target","path":target}), None).unwrap();
+        let saved = json!({"id":"s","projectId":"missing","cwd":original_root,"journalId":native_id,"sessionFile":source,"transport":"archive","status":"closed"});
+        store.put("session", "s", &saved, None).unwrap();
+        let app = App::new(store.clone(), RuntimeConfig { state_dir: root.clone(), omp: root.join("absent-omp"), bridge });
+        let request = json!({"action":"session.resume","payload":{"sessionId":"s","targetProjectId":"target","confirmed":true,"expectedJournalId":native_id,"expectedSessionFile":source}});
+        let mut stale = request.clone();
+        stale["payload"]["expectedJournalId"] = json!("stale");
+        assert!(app.command(&stale).await.is_err());
+        assert_eq!(store.get("session", "s").unwrap(), saved);
+        let mut unconfirmed = request.clone();
+        unconfirmed["payload"]["confirmed"] = json!(false);
+        assert!(app.command(&unconfirmed).await.is_err());
+        assert!(app.command(&request).await.is_err());
+        let failed = store.get("session", "s").unwrap();
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["writerConnected"], false);
+        assert_eq!(failed["projectId"], "target");
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+        let relocated = Path::new(failed["sessionFile"].as_str().unwrap());
+        assert_ne!(relocated, source);
+        assert_eq!(archive::source_header(relocated).unwrap()["cwd"], json!(target));
+        assert!(std::fs::read_to_string(relocated).unwrap().contains("preserve queued history"));
+        assert!(archive::ensure_source_inactive(&native_id, relocated).is_ok());
+        assert_eq!(failed["resumeEligibility"]["eligible"], true);
+    }
+    #[test]
+    fn project_control_transition_requires_correlated_explicit_move() {
+        let app = app();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let target = root.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let source = root.join("moved.jsonl");
+        std::fs::write(&source, format!("{}\n", json!({"type":"session","id":"journal","cwd":target}))).unwrap();
+        let saved = json!({"id":"s","projectId":"p","cwd":root,"journalId":"journal","bindingRevision":"generation","transport":"bridge"});
+        app.store.put("session", "s", &saved, None).unwrap();
+        let state = json!({"journalId":"journal","sessionFile":source,"cwd":target});
+        assert!(app.apply_control_state("s", &saved, &state).is_err());
+        assert_eq!(app.store.get("session", "s").unwrap(), saved);
+        let mut authorized = saved.clone();
+        authorized["_allowProjectTransition"] = json!(true);
+        app.apply_control_state("s", &authorized, &state).unwrap();
+        let updated = app.store.get("session", "s").unwrap();
+        assert_eq!(updated["cwd"], json!(target));
+        let project = app.store.get("project", updated["projectId"].as_str().unwrap()).unwrap();
+        assert_eq!(project["path"], json!(target));
+    }
+    fn host_request(operation: &str) -> Value {
+        json!({"action":"session.host","sessionId":"s","payload":{"operation":operation,"confirmed":true,"expectedJournalId":"journal","expectedBindingRevision":"generation"}})
+    }
+    fn bind_host_identity(app: &App) {
+        let mut session = app.store.get("session", "s").unwrap();
+        session["journalId"] = json!("journal");
+        session["bindingRevision"] = json!("generation");
+        app.store.put("session", "s", &session, None).unwrap();
+    }
+    #[tokio::test]
+    async fn host_lifecycle_requires_current_binding_and_confirmation_before_dispatch() {
+        let app = app();
+        bind_host_identity(&app);
+        let (tx, mut frames) = mpsc::channel(8);
+        app.links.lock().entry("s".into()).or_default().bridge = Some(tx);
+        let mut stale = host_request("close");
+        stale["payload"]["expectedBindingRevision"] = json!("previous");
+        assert_eq!(error_code(&app.command(&stale).await.unwrap_err()), "stale_identity");
+        let mut unconfirmed = host_request("restart");
+        unconfirmed["payload"]["confirmed"] = json!(false);
+        assert_eq!(error_code(&app.command(&unconfirmed).await.unwrap_err()), "confirmation_required");
+        assert!(frames.try_recv().is_err());
+    }
+    #[tokio::test]
+    async fn host_managed_close_flushes_before_signalling_and_waits_for_owned_exit() {
+        let app = app();
+        bind_host_identity(&app);
+        let (tx, mut frames) = mpsc::channel(8);
+        app.links.lock().entry("s".into()).or_default().bridge = Some(tx);
+        app.managed_children.lock().insert("s".into());
+        let (stop, mut stops) = mpsc::unbounded_channel();
+        app.child_shutdown.lock().insert("s".into(), stop);
+        let worker = app.clone();
+        let call = tokio::spawn(async move { worker.command(&host_request("close")).await });
+        let flush = frames.recv().await.unwrap();
+        assert_eq!(flush["action"], "session.flush");
+        assert!(stops.try_recv().is_err());
+        app.frame("s", json!({"type":"response","id":flush["id"],"success":true,"data":{"flushed":true}}), true).await.unwrap();
+        stops.recv().await.unwrap();
+        assert!(!call.is_finished());
+        app.managed_children.lock().remove("s");
+        app.child_shutdown.lock().remove("s");
+        app.links.lock().get_mut("s").unwrap().bridge = None;
+        let result = tokio::time::timeout(Duration::from_secs(1), call).await.unwrap().unwrap().unwrap();
+        assert_eq!(result, json!({"closed":true,"sessionId":"s"}));
+        assert!(frames.try_recv().is_err());
+    }
+    #[tokio::test]
+    async fn host_managed_restart_attempts_resume_only_after_previous_owner_releases() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("restart.jsonl");
+        let journal_id = Uuid::new_v4().to_string();
+        std::fs::write(&source, format!("{}\n", json!({"type":"session","id":journal_id,"cwd":root}))).unwrap();
+        let bridge = root.join("bridge.ts");
+        std::fs::write(&bridge, "export default () => {};").unwrap();
+        let store = Arc::new(Store::open(Path::new(":memory:"), "test".into()).unwrap());
+        store.put("project", "p", &json!({"id":"p","path":root}), None).unwrap();
+        store.put("session", "s", &json!({"id":"s","projectId":"p","cwd":root,"journalId":journal_id,"bindingRevision":"generation","sessionFile":source,"transport":"rpc","status":"idle"}), None).unwrap();
+        let app = App::new(store, RuntimeConfig { state_dir:root.clone(), omp:root.join("absent-runtime"), bridge });
+        let (tx, mut frames) = mpsc::channel(8);
+        app.links.lock().entry("s".into()).or_default().bridge = Some(tx);
+        app.managed_children.lock().insert("s".into());
+        let (stop, mut stops) = mpsc::unbounded_channel();
+        app.child_shutdown.lock().insert("s".into(), stop);
+        let worker = app.clone();
+        let mut request = host_request("restart");
+        request["payload"]["expectedJournalId"] = json!(journal_id);
+        let call = tokio::spawn(async move { worker.command(&request).await });
+        let flush = frames.recv().await.unwrap();
+        app.frame("s", json!({"type":"response","id":flush["id"],"success":true,"data":{"flushed":true}}), true).await.unwrap();
+        stops.recv().await.unwrap();
+        assert!(!call.is_finished());
+        assert_eq!(app.store.get("session", "s").unwrap()["status"], "idle");
+        app.links.lock().get_mut("s").unwrap().bridge = None;
+        app.child_shutdown.lock().remove("s");
+        let mut closed = app.store.get("session", "s").unwrap();
+        closed["status"] = json!("closed");
+        closed["writerConnected"] = json!(false);
+        app.store.put("session", "s", &closed, None).unwrap();
+        app.managed_children.lock().remove("s");
+        let error = tokio::time::timeout(Duration::from_secs(1), call).await.unwrap().unwrap().unwrap_err();
+        assert!(error.to_string().contains("Cannot launch"));
+        let failed = app.store.get("session", "s").unwrap();
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["sessionFile"], json!(source));
+        assert!(archive::ensure_source_inactive(&journal_id, &source).is_ok());
+        assert!(frames.try_recv().is_err());
+    }
+    #[tokio::test]
+    async fn host_terminal_close_acknowledges_exact_request_once_before_disconnect() {
+        let app = app();
+        bind_host_identity(&app);
+        let (tx, mut frames) = mpsc::channel(8);
+        app.links.lock().entry("s".into()).or_default().bridge = Some(tx);
+        let worker = app.clone();
+        let call = tokio::spawn(async move { worker.command(&host_request("close")).await });
+        let request = frames.recv().await.unwrap();
+        assert_eq!(request["action"], "session.host");
+        app.frame("s", json!({"type":"response","id":request["id"],"success":true,"data":{"closeRequested":true,"requestId":"shutdown-token"}}), true).await.unwrap();
+        assert_eq!(frames.recv().await.unwrap(), json!({"type":"host_action_ack","id":"shutdown-token"}));
+        assert!(!call.is_finished());
+        app.links.lock().get_mut("s").unwrap().bridge = None;
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1), call).await.unwrap().unwrap().unwrap()["closed"], true);
+        assert!(frames.try_recv().is_err());
+    }
+    #[tokio::test]
+    async fn host_terminal_rejection_does_not_acknowledge_or_retry_context() {
+        let app = app();
+        bind_host_identity(&app);
+        let (tx, mut frames) = mpsc::channel(8);
+        app.links.lock().entry("s".into()).or_default().bridge = Some(tx);
+        let worker = app.clone();
+        let call = tokio::spawn(async move { worker.command(&host_request("close")).await });
+        let request = frames.recv().await.unwrap();
+        app.frame("s", json!({"type":"response","id":request["id"],"success":false,"error":{"code":"command_rejected","message":"Context changed; no shutdown performed"}}), true).await.unwrap();
+        let error = call.await.unwrap().unwrap_err();
+        assert_eq!(error_code(&error), "command_rejected");
+        assert!(frames.try_recv().is_err());
+        assert!(app.links.lock().get("s").unwrap().bridge.is_some());
     }
 }

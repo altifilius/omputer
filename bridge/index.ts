@@ -36,6 +36,7 @@ export default function omputer(pi: ExtensionAPI) {
   let sendingOutcomes = false;
   let completingControls = 0;
   let memoryRevision: number | undefined;
+  const hostClosures = new Map<string, { journalId: string; bindingRevision?: string }>();
   const output = new Map<string, WireFrame>();
   const managed = process.env.OMPUTER_RPC_MANAGED === '1';
   const managedSessionId = process.env.OMPUTER_SESSION_ID;
@@ -154,13 +155,16 @@ export default function omputer(pi: ExtensionAPI) {
       sendState();
     } catch (error) { report(error); }
   };
-  const admit = async (session: AgentSession, message: string, images?: Parameters<AgentSession['prompt']>[1], asAgent = false) => {
+  const admit = async (session: AgentSession, message: string, options?: Parameters<AgentSession['prompt']>[1], asAgent = false) => {
     const admitted = Promise.withResolvers<void>();
     let accepted = false;
-    const turn = session.prompt(message, { ...images, streamingBehavior: 'steer', onPromptAdmitted: () => {
+    const turn = session.prompt(message, { ...options, streamingBehavior: 'steer', throwOnDrop: true, onPromptAdmitted: () => {
       accepted = true; admitted.resolve();
     } });
-    void turn.then(() => admitted.resolve(), error => {
+    void turn.then(() => {
+      // A pre-admission abort can resolve normally without ever queueing the message.
+      if (!accepted) admitted.reject(Object.assign(new Error('Prompt settled before admission; message was not accepted'), { code: 'prompt_not_admitted' }));
+    }, error => {
       if (!accepted) admitted.reject(error);
       else forward({ type: 'omputer_command_error', error: error instanceof Error ? error.message : String(error), subagent: asAgent });
     });
@@ -170,6 +174,16 @@ export default function omputer(pi: ExtensionAPI) {
   const execute = async (command: Command): Promise<unknown> => {
     if (!ctx || !dialogs) throw new Error('Session not initialized');
     const payload = command.payload;
+    if (command.action === 'session.host') {
+      if (managed || !live) throw Object.assign(new Error('Host lifecycle belongs to the managed supervisor'), { code: 'unsupported' });
+      if (payload.confirmed !== true || payload.expectedJournalId !== ctx.sessionManager.getSessionId() || payload.expectedBindingRevision !== bindingRevision) throw Object.assign(new Error('Host lifecycle target changed or confirmation is missing'), { code: 'stale_identity' });
+      if (!['close', 'restart'].includes(String(payload.operation))) throw Object.assign(new Error('Unknown host lifecycle action'), { code: 'invalid_command' });
+      if (live.isStreaming || live.isCompacting || live.hasPendingAsyncWork() || ctx.hasPendingMessages() || dialogs.waiting) throw Object.assign(new Error('Wait for this host to settle before closing it'), { code: 'session_busy' });
+      await live.sessionManager.ensureOnDisk(); await live.sessionManager.flush();
+      if (payload.expectedJournalId !== ctx.sessionManager.getSessionId() || payload.expectedBindingRevision !== bindingRevision || live.isStreaming || live.isCompacting || live.hasPendingAsyncWork() || ctx.hasPendingMessages() || dialogs.waiting) throw Object.assign(new Error('Host target changed while saving; nothing was closed'), { code: 'stale_identity' });
+      hostClosures.set(command.id, { journalId: ctx.sessionManager.getSessionId(), bindingRevision });
+      return { requestId: command.id, closeRequested: true, restartRequested: payload.operation === 'restart', journalId: ctx.sessionManager.getSessionId(), sessionFile: ctx.sessionManager.getSessionFile() };
+    }
     if (command.action === 'session.flush') {
       if (!managed || !live) throw Object.assign(new Error('Only a managed writer can be saved and closed'), { code: 'unsupported' });
       if (live.isStreaming || live.isCompacting || live.hasPendingAsyncWork() || ctx.hasPendingMessages() || dialogs.waiting) throw Object.assign(new Error('Managed writer is no longer settled'), { code: 'session_busy' });
@@ -178,7 +192,9 @@ export default function omputer(pi: ExtensionAPI) {
     }
     if (['session.controls', 'session.command', 'session.control'].includes(command.action)) {
       const readOnly = command.action === 'session.controls';
-      const cancel = command.action === 'session.control' && payload.control === 'btw.cancel';
+      const cancelName = typeof payload.commandId === 'string' ? payload.commandId.replace(/^builtin:/, '') : '';
+      const cancelArgs = typeof payload.args === 'string' ? payload.args.trim() : '';
+      const cancel = command.action === 'session.control' && payload.control === 'btw.cancel' || command.action === 'session.command' && (['cleanse', 'omfg'].includes(cancelName) && cancelArgs === 'cancel' || cancelName === 'loop' && ['off', 'cancel', 'pause'].includes(cancelArgs));
       if (controlling && !readOnly && !cancel) throw Object.assign(new Error('Another session control is executing'), { code: 'session_busy' });
       if (!readOnly) controlling++;
       const changesIdentity = command.action === 'session.command' || (command.action === 'session.control' && ['branch', 'fork', 'tree.navigate'].includes(String(payload.control)));
@@ -276,6 +292,14 @@ export default function omputer(pi: ExtensionAPI) {
     }
   };
   const receive = (frame: WireFrame) => {
+    if (frame.type === 'host_action_ack' && typeof frame.id === 'string') {
+      const target = hostClosures.get(frame.id);
+      if (target && ctx && target.journalId === ctx.sessionManager.getSessionId() && target.bindingRevision === bindingRevision) {
+        hostClosures.delete(frame.id);
+        ctx.shutdown();
+      }
+      return;
+    }
     if (frame.type === 'registered' && typeof frame.sessionId === 'string') {
       memoryRevision = typeof frame.memoryRevision === 'number' ? frame.memoryRevision : undefined;
       bindingRevision = typeof frame.bindingRevision === 'string' ? frame.bindingRevision : undefined;
@@ -315,7 +339,9 @@ export default function omputer(pi: ExtensionAPI) {
           code: 'outcome_unknown', message: error instanceof Error ? error.message : String(error),
         }, ...(current ? { _omputerState: { journalId: current.journalId, sessionFile: current.sessionFile, cwd: current.cwd, leafId: current.leafId } } : {}) });
       }
-      outcome.pending = true; void sendOutcomes(); sendState(true);
+      outcome.pending = true;
+      void sendOutcomes();
+      sendState(true);
     }).catch(report);
   };
   const teardown = () => {

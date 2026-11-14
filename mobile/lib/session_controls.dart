@@ -36,12 +36,14 @@ class _CommandPaletteState extends State<CommandPalette> {
     final command = selected;
     if (command == null || busy || command['available'] != true) return;
     final risk = '${command['risk'] ?? 'execute'}';
-    final needsConsent = !['read'].contains(risk) && command['localAction'] == null;
-    if (needsConsent && !await confirm(context, '/${command['name']} çalıştır?', '${command['description'] ?? ''}\n\nKaynak: ${command['source']} · Risk: $risk\n${args.text}', action: 'Çalıştır')) return;
+    final openLocal = command['localAction'] is String && args.text.trim().isEmpty;
+    final needsConsent = risk != 'read' && !openLocal;
+    final session = widget.controller.snapshot.session(widget.sessionId);
+    if (needsConsent && !await confirm(context, '/${command['name']} çalıştır?', '${command['description'] ?? ''}\n\nOturum: ${session?.name ?? widget.sessionId}\nProje: ${session?.cwd ?? ''}\nEtki: $risk\n${args.text}', action: 'Çalıştır')) return;
     if (!mounted) return;
     setState(() { busy = true; error = null; });
     try {
-      if (command['localAction'] is String) {
+      if (openLocal) {
         await widget.onLocal(command['localAction'] as String);
       } else {
         final result = await widget.controller.executeCommand(widget.sessionId, '${command['id']}', args.text, catalogRevision: catalog!['catalogRevision'], confirmed: needsConsent);
@@ -66,12 +68,13 @@ class _CommandPaletteState extends State<CommandPalette> {
         for (final command in commands) Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: NeoSurface(depth: selected?['id'] == command['id'] ? NeoDepth.inset : NeoDepth.raised, radius: 16, compact: true, borderColor: selected?['id'] == command['id'] ? Theme.of(context).colorScheme.primary : null, child: ListTile(selected: selected?['id'] == command['id'], contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), title: Text('/${command['name']}'), subtitle: Text([command['description'], 'Kaynak: ${command['source']} · Risk: ${command['risk']}', if (strings(command['aliases']).isNotEmpty) 'Takma ad: ${strings(command['aliases']).join(', ')}', if (command['available'] != true) command['unavailableReason'] ?? 'Bu oturumda kullanılamıyor', if (command['requiresIdle'] == true) 'Boşta oturum gerektirir'].join('\n')), isThreeLine: false, trailing: Icon(command['available'] == true ? Icons.chevron_right_rounded : Icons.lock_outline_rounded), onTap: busy ? null : () => setState(() { selected = command; })))),
         if (catalog != null && commands.isEmpty) const Padding(padding: EdgeInsets.all(24), child: Text('Eşleşen komut yok. Bilinmeyen / komutları modele gönderilmez.')),
       ])),
-      if (selected != null) Padding(padding: const EdgeInsets.all(16), child: NeoSurface(padding: const EdgeInsets.all(20), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      if (selected != null) Flexible(child: SingleChildScrollView(padding: const EdgeInsets.all(16), child: NeoSurface(padding: const EdgeInsets.all(20), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         if (selected!['inputHint'] != null) Text('${selected!['inputHint']}'),
-        if (strings(selected!['subcommands']).isNotEmpty) Text('Alt komutlar: ${strings(selected!['subcommands']).join(', ')}'),
-        if (selected!['localAction'] == null) TextField(controller: args, enabled: !busy, minLines: 1, maxLines: 4, decoration: const InputDecoration(labelText: 'Komut argümanları')),
+        if (objects(selected!['subcommands']).isNotEmpty) Text('Alt komutlar: ${objects(selected!['subcommands']).map((item) => item['name']).join(', ')}'),
+        if (selected!['localAction'] != null) const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('Argüman boşsa seçim ekranı açılır; yazılı argüman varsa aynı komut doğrudan çalıştırılır.')),
+        TextField(controller: args, enabled: !busy, minLines: 1, maxLines: 4, decoration: const InputDecoration(labelText: 'Komut argümanları (isteğe bağlı)')),
         const SizedBox(height: 12), FilledButton.icon(onPressed: selected!['available'] == true && !busy && widget.controller.connection.connected ? execute : null, icon: const Icon(Icons.play_arrow_rounded), label: Text(busy ? 'İletiliyor…' : '/${selected!['name']} çalıştır')),
-      ]))),
+      ])))),
     ])));
   }
 }
@@ -147,9 +150,19 @@ class _OperationOutputState extends State<OperationOutput> {
   Widget build(BuildContext context) {
     final op = widget.operation;
     final result = object(op['result']);
+    final phoneAction = object(object(result['data'])['action']);
+    final hostAction = object(result['data'])['hostAction'];
     return Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: NeoSurface(radius: 20, compact: true, child: ExpansionTile(key: PageStorageKey('operation:${op['id']}'), initiallyExpanded: widget.initiallyExpanded, onExpansionChanged: (open) { if (open && output.isEmpty) load(); }, tilePadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4), childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16), expandedCrossAxisAlignment: CrossAxisAlignment.stretch, shape: const Border(), collapsedShape: const Border(), title: Text('${op['action']} · ${op['status']}'), subtitle: Text('${op['id']}\n${op['updatedAt'] ?? op['createdAt'] ?? ''}'), children: [
       if (result.isNotEmpty) Padding(padding: const EdgeInsets.only(bottom: 12), child: NeoSurface(depth: NeoDepth.inset, radius: 12, padding: const EdgeInsets.all(16), child: SelectableText(controlText(result), key: PageStorageKey('operation:${op['id']}:result'), style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontFamily: 'monospace', height: 1.5)))),
       if (output.isNotEmpty) NeoSurface(depth: NeoDepth.inset, radius: 12, padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [for (final row in output) Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: SelectableText('${row['kind']}: ${row['text']}', key: PageStorageKey('operation:${op['id']}:output:${row['sequence']}'), style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontFamily: 'monospace', height: 1.5)))])),
+      if (phoneAction['kind'] == 'clipboard' && phoneAction['text'] is String) OutlinedButton.icon(onPressed: () => copyText(context, phoneAction['text'] as String), icon: const Icon(Icons.copy_rounded), label: const Text('Seçilen içeriği kopyala')),
+      if (phoneAction['kind'] == 'open_url' && phoneAction['url'] is String) OutlinedButton.icon(onPressed: () async { final url = phoneAction['url'] as String; if (await confirm(context, 'Bağlantıyı telefonda aç?', url, action: 'Tarayıcıda aç')) { await widget.controller.openExternalUrl(url); } }, icon: const Icon(Icons.open_in_browser_rounded), label: const Text('Bağlantıyı telefonda aç')),
+      if (hostAction == 'close' || hostAction == 'restart') OutlinedButton.icon(onPressed: () async {
+        final session = widget.controller.snapshot.session('${op['sessionId']}');
+        if (session == null || !await confirm(context, hostAction == 'close' ? 'Bu OMP oturumunu kapat?' : 'Bu OMP oturumunu yeniden aç?', 'Oturum: ${session.name}\nProje: ${session.cwd}\n\nDiğer oturumlar ve Omputer bağlantısı kapanmaz.', action: hostAction == 'close' ? 'Kaydet ve kapat' : 'Kaydet ve yeniden aç')) return;
+        if (!context.mounted) return;
+        await perform(context, () async { await widget.controller.hostAction(session.id, hostAction as String); widget.controller.refreshInBackground(); });
+      }, icon: Icon(hostAction == 'close' ? Icons.power_settings_new_rounded : Icons.restart_alt_rounded), label: Text(hostAction == 'close' ? 'Kaydet ve kapat' : 'Kaydet ve yeniden aç')),
       if (error != null) ErrorNotice(error!),
       Wrap(spacing: 8, children: [TextButton.icon(onPressed: busy ? null : load, icon: const Icon(Icons.refresh_rounded), label: Text(busy ? 'Alınıyor…' : hasMore ? 'Sonraki çıktıyı yükle' : 'Yeni çıktı ve durumu al')), TextButton.icon(onPressed: () => copyText(context, [controlText(result), ...output.map((r) => '${r['kind']}: ${r['text']}')].join('\n')), icon: const Icon(Icons.copy_rounded), label: const Text('Çıktıyı kopyala'))]),
     ])));

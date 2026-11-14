@@ -63,6 +63,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/sessions/{id}/commands", get(session_commands))
         .route("/v1/sessions/{id}/operations", get(operations))
         .route("/v1/sessions/{id}/messages", get(messages))
+        .route("/v1/interactions/{id}/context", get(interaction_context))
         .route("/v1/projects/{id}/files", get(file))
         .route("/v1/projects/{id}/tree", get(project_tree))
         .route("/v1/projects/{id}/changes", get(project_changes))
@@ -302,6 +303,10 @@ async fn file(
 async fn diagnostics(State(app): State<Arc<App>>) -> Result<Json<Value>, ApiError> {
     Ok(Json(crate::backup::diagnosis(&app).await?))
 }
+async fn interaction_context(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, ApiError> {
+    let context = app.interaction_context(&id)?;
+    Ok(([(axum::http::header::CACHE_CONTROL, "no-store")], Json(context)).into_response())
+}
 async fn operation(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -524,13 +529,20 @@ async fn command(
         .as_str()
         .context("Command id is required")?
         .to_owned();
+    let secret = app.store.secret_response(&request)? || request["action"] == "session.command" && matches!(request["payload"]["commandId"].as_str(), Some("builtin:settings" | "builtin:login" | "builtin:setup" | "builtin:logout"));
     if let Some(result) = app.store.begin_command(&id, &request)? {
         return Ok(command_response(result));
     }
     // This task owns the command, never the lifetime of the HTTP connection.
     let executor = app.clone();
     let mut task = spawn_command(app.clone(), id.clone(), async move {
-        executor.command(&request).await
+        let outcome = executor.command(&request).await;
+        if secret {
+            match outcome {
+                Ok(_) => Ok(if request["action"] == "interaction.respond" { json!({"interactionId":request["payload"]["interactionId"],"status":if request["payload"]["cancelled"] == true { "cancelled" } else { "resolved" },"secret":true}) } else { json!({"commandId":request["payload"]["commandId"],"secret":true}) }),
+                Err(error) => Err(crate::runtime::CommandError { code: crate::runtime::error_code(&error).to_owned(), message: "Secret response could not be confirmed; inspect the operation status".into() }.into()),
+            }
+        } else { outcome }
     });
     match tokio::time::timeout(Duration::from_secs(10), &mut task).await {
         Ok(Ok(Ok(result))) => Ok(command_response(result)),
@@ -736,6 +748,43 @@ mod pairing_tests {
                 bridge: Default::default(),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn private_context_route_requires_authentication_and_never_falls_back_to_stored_prompt() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let app = app();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let service = app.clone();
+        let server = tokio::spawn(async move { axum::serve(listener, router(service)).await.unwrap() });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client.write_all(b"GET /v1/interactions/private/context HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();
+        let mut response = String::new(); client.read_to_string(&mut response).await.unwrap();
+        server.abort();
+        assert!(response.starts_with("HTTP/1.1 401"));
+        app.store.put("interaction", "private", &json!({"id":"private","sessionId":"s","status":"pending","sensitiveContext":true,"title":"raw-private-url","message":"raw-private-url"}), Some("interaction.pending")).unwrap();
+        assert!(interaction_context(State(app.clone()), Path("private".into())).await.is_err());
+        assert!(!serde_json::to_string(&app.store.snapshot().unwrap()).unwrap().contains("raw-private-url"));
+    }
+    #[tokio::test]
+    async fn secret_response_command_never_echoes_answer_even_on_failure_or_replay() {
+        let app = app();
+        app.store.put("interaction", "secret", &json!({"id":"secret","sessionId":"missing","status":"pending","method":"input","secret":true}), None).unwrap();
+        let request = json!({"id":uuid::Uuid::new_v4(),"sessionId":"missing","action":"interaction.respond","payload":{"interactionId":"secret","value":"private-api-token","secret":false}});
+        for _ in 0..2 {
+            let response = command(State(app.clone()), Json(request.clone())).await.unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+            let result: Value = serde_json::from_slice(&body).unwrap();
+            assert!(!result.to_string().contains("private-api-token"));
+            assert_eq!(result["id"], request["id"]);
+            assert_eq!(result["success"], false);
+        }
+        let journal = app.store.journal(0, 100).unwrap();
+        assert!(!serde_json::to_string(&journal).unwrap().contains("private-api-token"));
+        let mut different = request.clone();
+        different["payload"]["value"] = json!("different-token");
+        assert!(command(State(app), Json(different)).await.is_err());
     }
 
     #[tokio::test]
