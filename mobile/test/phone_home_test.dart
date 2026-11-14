@@ -18,6 +18,7 @@ import 'package:omputer/settings.dart';
 
 class AppearanceNative implements NativeAdapter {
   String theme='system';bool fail=false;
+  String colorTheme = 'omputer';
   final calls=<String>[];
   final data=<String,dynamic>{'projects':[
     {'id':'one','name':'Birinci proje','goal':'Gerçek hedef'},
@@ -33,18 +34,19 @@ class AppearanceNative implements NativeAdapter {
     switch(method){
       case 'connection':case 'connect':return {'paired':true,'connected':true,'serverName':'Omputer'};
       case 'snapshot':return data;
-      case 'preferences':return {'theme':theme};
+      case 'preferences':return {'theme':theme,'colorTheme':colorTheme};
       case 'localState':return {'identity':'test','sections':{}};
       case 'operationList':case 'sharedImages':return [];
       case 'draftLoad':return null;
       case 'theme':if(fail)throw PlatformException(code:'storage',message:'Kayıt yazılamadı');theme=args!['mode'];return null;
+      case 'colorTheme':if(fail)throw PlatformException(code:'storage',message:'Kayıt yazılamadı');colorTheme=args!['id'];return null;
       default:throw StateError('Unexpected $method');
     }
   }
 }
 OmputerController homeController(AppearanceNative native)=>OmputerController(adapter:native)
   ..snapshot=Snapshot.fromJson(native.data)..connection=ConnectionState.fromJson({'paired':true,'connected':true,'serverName':'Omputer'});
-Widget home(OmputerController c,{double scale=1})=>ListenableBuilder(listenable:c,builder:(context,_)=>MaterialApp(theme:omputerTheme(c.theme=='light'?Brightness.light:Brightness.dark),home:MediaQuery(data:MediaQueryData(textScaler:TextScaler.linear(scale),disableAnimations:true),child:HomeScreen(controller:c))));
+Widget home(OmputerController c,{double scale=1})=>ListenableBuilder(listenable:c,builder:(context,_)=>MaterialApp(theme:omputerTheme(c.theme=='light'?Brightness.light:Brightness.dark,colorTheme:c.colorTheme),home:MediaQuery(data:MediaQueryData(textScaler:TextScaler.linear(scale),disableAnimations:true),child:HomeScreen(controller:c))));
 
 void main(){
   setUp(()=>TestWidgetsFlutterBinding.instance.platformDispatcher.accessibilityFeaturesTestValue=FakeAccessibilityFeatures(disableAnimations:true));

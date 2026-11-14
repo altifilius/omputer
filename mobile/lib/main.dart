@@ -127,7 +127,8 @@ class _OmputerAppState extends State<OmputerApp> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) => ListenableBuilder(listenable: widget.controller, builder: (context, _) => MaterialApp(
     title: 'Omputer', navigatorKey: navigator, debugShowCheckedModeBanner: false,
-    theme: omputerTheme(Brightness.light), darkTheme: omputerTheme(Brightness.dark),
+    theme: omputerTheme(Brightness.light, colorTheme: widget.controller.colorTheme),
+    darkTheme: omputerTheme(Brightness.dark, colorTheme: widget.controller.colorTheme),
     themeMode: switch (widget.controller.theme) { 'light' => ThemeMode.light, 'dark' => ThemeMode.dark, _ => ThemeMode.system },
     locale: const Locale('tr'), supportedLocales: const [Locale('tr'), Locale('en')],
     localizationsDelegates: GlobalMaterialLocalizations.delegates,

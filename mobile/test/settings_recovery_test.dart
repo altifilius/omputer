@@ -37,6 +37,8 @@ void main() {
     await tester.pumpWidget(MaterialApp(theme: omputerTheme(Brightness.dark), home: Scaffold(body: SettingsScreen(controller: controller))));
     final toggle = find.byType(SwitchListTile);
     await tester.scrollUntilVisible(toggle, 250, scrollable: find.byType(Scrollable).first);
+    await Scrollable.ensureVisible(tester.element(toggle), alignment: .5);
+    await tester.pumpAndSettle();
     await tester.tap(toggle);
     await tester.pumpAndSettle();
     expect(native.calls.where((method) => method == 'background'), isEmpty);
@@ -68,7 +70,7 @@ void main() {
     expect(native.calls.where((call) => call == 'localStateSet'), hasLength(1));
     await tester.pumpWidget(const SizedBox.shrink()); controller.dispose();
   });
-  testWidgets('appearance menu retains exact choices and persists the selected theme', (tester) async {
+  testWidgets('appearance changes independently from the selected color palette', (tester) async {
     final native = PermissionNative();
     final controller = OmputerController(adapter: native)
       ..connection = ConnectionState.fromJson({'paired': true, 'connected': true});
@@ -78,13 +80,13 @@ void main() {
     await tester.tap(theme);
     await tester.pumpAndSettle();
     expect(find.text('Sistemle aynı'), findsWidgets);
-    expect(find.text('Açık · sis grisi'), findsOneWidget);
-    expect(find.text('Koyu · grafit'), findsOneWidget);
-    await tester.tap(find.text('Koyu · grafit'));
+    expect(find.text('Aydınlık'), findsOneWidget);
+    expect(find.text('Karanlık'), findsOneWidget);
+    await tester.tap(find.text('Karanlık'));
     await tester.pumpAndSettle();
     expect(controller.theme, 'dark');
     expect(native.calls.where((call) => call == 'theme'), hasLength(1));
-    expect(find.text('Koyu · grafit'), findsOneWidget);
+    expect(find.text('Karanlık'), findsOneWidget);
     expect(find.text('Yazı boyutu ve Animasyonları kaldır tercihi Android erişilebilirlik ayarlarından izlenir.'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink()); controller.dispose();
   });

@@ -4,6 +4,7 @@ import 'ui.dart';
 import 'models.dart';
 import 'diagnostics.dart';
 import 'neumorphic.dart';
+import 'theme_palettes.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key, required this.controller});
@@ -13,6 +14,14 @@ class SettingsScreen extends StatefulWidget {
 }
 class _SettingsScreenState extends State<SettingsScreen> {
   bool busy = false;
+  bool paletteExpanded = false;
+  final paletteToggleStates = WidgetStatesController();
+  @override
+  void dispose() { paletteToggleStates.dispose(); super.dispose(); }
+  void togglePalette() {
+    setState(() => paletteExpanded = !paletteExpanded);
+    paletteToggleStates.update(WidgetState.selected, paletteExpanded);
+  }
   Future<void> run(Future<void> Function() action) async {
     if (busy) return;
     setState(() => busy = true);
@@ -24,6 +33,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final c = widget.controller;
     final connection = c.connection;
     return ListView(padding: const EdgeInsets.only(bottom: 40), children: [
+      const SectionHeading('Görünüm'),
+      _SettingsPanel(children: [
+        Padding(padding: const EdgeInsets.all(8), child: Semantics(
+          key: const PageStorageKey('settings-color-theme'),
+          container: true, excludeSemantics: true,
+          label: 'Renk teması', value: c.colorTheme.label,
+          button: true, expanded: paletteExpanded, enabled: !busy,
+          onTap: busy ? null : togglePalette,
+          child: OutlinedButton(
+            statesController: paletteToggleStates,
+            onPressed: busy ? null : togglePalette,
+            style: neoButtonStyle().copyWith(padding: const WidgetStatePropertyAll(EdgeInsets.all(16))),
+            child: Row(children: [
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Renk teması', style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(height: 4),
+                Text(c.colorTheme.label, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+              ])),
+              const SizedBox(width: 12),
+              Icon(paletteExpanded ? Icons.expand_less_rounded : Icons.expand_more_rounded),
+            ]),
+          ),
+        )),
+        if (paletteExpanded) Padding(padding: const EdgeInsets.fromLTRB(8, 4, 8, 8), child: RadioGroup<AppColorTheme>(
+          groupValue: c.colorTheme,
+          onChanged: (value) { if (!busy && value != null) run(() => c.setColorTheme(value)); },
+          child: Column(children: [for (final theme in AppColorTheme.values) Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: NeoSurface(
+              depth: c.colorTheme == theme ? NeoDepth.inset : NeoDepth.flat,
+              radius: 16, compact: true,
+              color: c.colorTheme == theme ? null : NeoPalette.of(context).raised,
+              borderColor: c.colorTheme == theme ? Theme.of(context).colorScheme.outlineVariant : null,
+              child: RadioListTile<AppColorTheme>(
+                key: ValueKey('color-theme-${theme.id}'), value: theme, enabled: !busy,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                title: Text(theme.label),
+                subtitle: Padding(padding: const EdgeInsets.only(top: 8, bottom: 4), child: ExcludeSemantics(child: SizedBox(
+                  height: 16,
+                  child: ClipRRect(borderRadius: BorderRadius.circular(4), child: Row(children: [
+                    for (final color in theme.swatches) Expanded(child: ColoredBox(color: color, child: const SizedBox.expand())),
+                  ])),
+                ))),
+              ),
+            ),
+          )]),
+        )),
+        const Padding(padding: EdgeInsets.fromLTRB(8, 12, 8, 16), child: Text('Renk teması, aydınlık ve karanlık görünümde korunur.')),
+        Padding(padding: const EdgeInsets.all(8), child: DropdownButtonFormField<String>(key: ValueKey(c.theme), initialValue: c.theme, isExpanded: true, itemHeight: null, borderRadius: BorderRadius.circular(16), decoration: const InputDecoration(labelText: 'Aydınlık / karanlık'), items: const [DropdownMenuItem(value: 'system', child: Text('Sistemle aynı')), DropdownMenuItem(value: 'light', child: Text('Aydınlık')), DropdownMenuItem(value: 'dark', child: Text('Karanlık'))], onChanged: busy ? null : (value) { if (value != null) run(() => c.setTheme(value)); })),
+        const Padding(padding: EdgeInsets.all(8), child: Text('Yazı boyutu ve Animasyonları kaldır tercihi Android erişilebilirlik ayarlarından izlenir.')),
+      ]),
       const SectionHeading('Senin bilgisayarın'),
       _SettingsPanel(children: [
         ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8), leading: Icon(connection.connected ? Icons.link_rounded : Icons.link_off_rounded), title: Text(connection.serverName.isEmpty ? 'Eşleştirilmiş bilgisayar' : connection.serverName), subtitle: Text('${connection.connected ? 'Bağlı' : 'Çevrimdışı · kaydedilmiş görünüm · otomatik yeniden bağlanıyor'}\n${connection.url}')),
@@ -49,11 +109,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _SettingsPanel(children: [
         CheckboxListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8), title: const Text('Karar bildirimlerini göster'), subtitle: const Text('Bu bilgisayar ve bu telefon eşleştirmesine özel tercih.'), value: object(object(c.localState['sections'])['notificationPreferences'])['global'] != false, onChanged: busy ? null : (value) => run(() => c.updateLocalState('notificationPreferences', 'global', value == true))),
         for (final project in c.snapshot.projects) CheckboxListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8), title: Text(project.name), subtitle: const Text('Bu projenin karar bildirimleri'), value: object(object(c.localState['sections'])['notificationPreferences'])['project:${project.id}'] != false, onChanged: busy ? null : (value) => run(() => c.updateLocalState('notificationPreferences', 'project:${project.id}', value == true))),
-      ]),
-      const SectionHeading('Görünüm'),
-      _SettingsPanel(children: [
-        Padding(padding: const EdgeInsets.all(8), child: DropdownButtonFormField<String>(key: ValueKey(c.theme), initialValue: c.theme, isExpanded: true, itemHeight: null, borderRadius: BorderRadius.circular(16), decoration: const InputDecoration(labelText: 'Tema'), items: const [DropdownMenuItem(value: 'system', child: Text('Sistemle aynı')), DropdownMenuItem(value: 'light', child: Text('Açık · sis grisi')), DropdownMenuItem(value: 'dark', child: Text('Koyu · grafit'))], onChanged: busy ? null : (value) { if (value != null) run(() => c.setTheme(value)); })),
-        const Padding(padding: EdgeInsets.all(8), child: Text('Yazı boyutu ve Animasyonları kaldır tercihi Android erişilebilirlik ayarlarından izlenir.')),
       ]),
       const SectionHeading('Yetkili cihazlar'),
       if (c.snapshot.devices.isEmpty) const Padding(padding: EdgeInsets.symmetric(horizontal: 24), child: Text('Cihaz listesi henüz alınmadı. Bağlantıyı yenile.')),

@@ -5,26 +5,37 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'controller.dart';
 import 'models.dart';
 import 'neumorphic.dart';
+import 'theme_palettes.dart';
 
 
-ThemeData omputerTheme(Brightness brightness) {
+final _themeCache = <(AppColorTheme, Brightness), ThemeData>{};
+
+ThemeData omputerTheme(Brightness brightness, {AppColorTheme colorTheme = AppColorTheme.omputer}) =>
+    _themeCache.putIfAbsent((colorTheme, brightness), () => _buildOmputerTheme(brightness, colorTheme));
+
+ThemeData _buildOmputerTheme(Brightness brightness, AppColorTheme colorTheme) {
   final dark = brightness == Brightness.dark;
-  final neo = NeoPalette.forBrightness(brightness);
-  final foreground = dark ? const Color(0xfff1f3f5) : const Color(0xff252c35);
-  final secondary = dark ? const Color(0xffc0c6cf) : const Color(0xff505b68);
-  final accent = dark ? const Color(0xfff3ca68) : const Color(0xff292e37);
-  final scheme = ColorScheme.fromSeed(seedColor: dark ? const Color(0xffa87920) : accent, brightness: brightness).copyWith(
-    primary: accent, onPrimary: dark ? const Color(0xff272016) : Colors.white,
-    primaryContainer: dark ? const Color(0xff463c28) : const Color(0xffd5dde8),
-    onPrimaryContainer: dark ? const Color(0xffffe3a2) : const Color(0xff23272f),
+  final original = colorTheme == AppColorTheme.omputer;
+  final colors = colorTheme.colors(brightness);
+  final neo = original ? NeoPalette.forBrightness(brightness) : colors.surfaces(brightness);
+  final foreground = colors.ink;
+  final secondary = original
+      ? dark ? const Color(0xffc0c6cf) : const Color(0xff505b68)
+      : Color.lerp(neo.base, foreground, dark ? .72 : .90)!;
+  final accent = colors.primary;
+  final scheme = ColorScheme.fromSeed(seedColor: original && dark ? const Color(0xffa87920) : accent, brightness: brightness).copyWith(
+    primary: accent, onPrimary: colors.onPrimary,
+    primaryContainer: colors.primaryContainer, onPrimaryContainer: colors.onPrimaryContainer,
     secondary: secondary, onSecondary: neo.base,
     secondaryContainer: neo.inset, onSecondaryContainer: foreground,
-    tertiary: accent, onTertiary: neo.base,
+    tertiary: colors.tertiary, onTertiary: colors.onTertiary,
+    tertiaryContainer: colors.tertiaryContainer, onTertiaryContainer: colors.onTertiaryContainer,
     surface: neo.base, onSurface: foreground, onSurfaceVariant: secondary,
     surfaceContainerLowest: neo.inset, surfaceContainerLow: neo.raised,
     surfaceContainer: neo.base, surfaceContainerHigh: neo.raised, surfaceContainerHighest: neo.inset,
-    outline: dark ? const Color(0xff8e98a5) : const Color(0xff677482),
-    outlineVariant: dark ? const Color(0xff454e5b) : const Color(0xffbdc7d1),
+    outline: original ? dark ? const Color(0xff8e98a5) : const Color(0xff677482) : Color.lerp(neo.base, foreground, dark ? .58 : .74),
+    outlineVariant: original ? dark ? const Color(0xff454e5b) : const Color(0xffbdc7d1) : Color.lerp(neo.base, foreground, .21),
+    inverseSurface: foreground, onInverseSurface: neo.base,
     shadow: neo.shadow,
   );
   final border = NeoInputBorder(palette: neo, borderSide: BorderSide(color: scheme.outlineVariant));

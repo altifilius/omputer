@@ -284,13 +284,17 @@ internal object LocalConnection {
     fun preferences(): Map<String, Any?> {
         val info = context.packageManager.getPackageInfo(context.packageName, 0)
         val build = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else @Suppress("DEPRECATION") info.versionCode.toLong()
-        return mapOf("theme" to vault.theme, "appVersion" to info.versionName, "buildNumber" to build.toString(), "protocol" to 1,
+        return mapOf("theme" to vault.theme, "colorTheme" to vault.colorTheme, "appVersion" to info.versionName, "buildNumber" to build.toString(), "protocol" to 1,
             "identity" to runCatching { localIdentity() }.getOrNull(), "lastSyncAt" to vault.lastSyncAt, "cacheFresh" to connected,
             "components" to currentSnapshot.optJSONObject("components")?.asMap())
     }
     fun setTheme(mode: String) {
         require(mode in setOf("system", "dark", "light")) { "Geçersiz görünüm tercihi." }
         vault.theme = mode
+    }
+    fun setColorTheme(id: String) {
+        require(id in setOf("omputer", "sage", "coast", "forest", "midnight", "cherry", "terracotta", "coral")) { "Geçersiz renk teması." }
+        vault.colorTheme = id
     }
     fun isBackground() = vault.background
     fun setBackground(enabled: Boolean) {

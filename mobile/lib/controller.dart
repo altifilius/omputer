@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 import 'models.dart';
+import 'theme_palettes.dart';
 
 typedef HistoryFence = ({int revision, String? epoch});
 
@@ -106,6 +107,7 @@ class OmputerController extends ChangeNotifier {
   ConnectionState connection = ConnectionState.empty();
   bool ready = false;
   String theme = 'system';
+  AppColorTheme colorTheme = AppColorTheme.omputer;
   String? appVersion, buildNumber;
   int? protocol;
   String? error;
@@ -210,6 +212,7 @@ class OmputerController extends ChangeNotifier {
       _acceptSnapshot(cached);
       final preferences = object(await _guard(() => native.invoke('preferences')));
       theme = preferences['theme'] as String? ?? 'system';
+      colorTheme = AppColorTheme.fromId(preferences['colorTheme']);
       appVersion = preferences['appVersion']?.toString();
       buildNumber = preferences['buildNumber']?.toString();
       protocol = (preferences['protocol'] as num?)?.toInt();
@@ -1067,6 +1070,11 @@ class OmputerController extends ChangeNotifier {
   Future<void> setTheme(String mode) async {
     await _guard(() => native.invoke('theme', {'mode': mode}));
     theme = mode;
+    notifyListeners();
+  }
+  Future<void> setColorTheme(AppColorTheme value) async {
+    await _guard(() => native.invoke('colorTheme', {'id': value.id}));
+    colorTheme = value;
     notifyListeners();
   }
   Future<void> forget() async {

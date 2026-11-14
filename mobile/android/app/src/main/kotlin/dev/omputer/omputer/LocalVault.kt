@@ -191,6 +191,9 @@ internal class LocalVault(context: Context) {
     var theme: String
         get() = preferences.getString("theme", "system") ?: "system"
         set(value) { check(preferences.edit().putString("theme", value).commit()) }
+    var colorTheme: String
+        get() = preferences.getString("colorTheme", "omputer") ?: "omputer"
+        set(value) { check(preferences.edit().putString("colorTheme", value).commit()) }
 
     @Synchronized fun forget() {
         durable.clear()

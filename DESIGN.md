@@ -1,6 +1,6 @@
 ---
 name: Omputer Android
-description: A local-first native working companion in graphite and fog neumorphic materials.
+description: A local-first native working companion with selectable light/dark palettes and a shared neumorphic material system.
 colors:
   scheme-seed: "#a87920"
   dark-base: "#23272f"
@@ -88,15 +88,27 @@ components:
 
 ## Overview
 
-**Creative North Star: Graphite workbench.** The explicitly requested neumorphic system uses graphite in dark mode, fog in light mode and consistent top-left lighting. Dark action/focus keeps amber; light action/focus now uses the dark scheme's navy-graphite raised tone. The user-supplied Sisyphus artwork defines the Android launcher and working indicator. The product remains a Turkish-first, local-first native companion for paired-PC work and human decisions, not a marketing surface.
+**Creative North Star: A personal workbench.** The explicitly requested neumorphic system retains native Roboto, consistent top-left lighting, raised/recessed hierarchy and the supplied Sisyphus artwork. Seven user-supplied palettes add distinct color choices without replacing layout, navigation or material geometry. The original graphite/fog Omputer appearance remains the default and can be restored. The product stays a Turkish-first, local-first native companion for paired-PC work and human decisions, not a marketing surface.
 
-`mobile/lib/neumorphic.dart` owns `NeoPalette`, `NeoSurface`, `NeoInputBorder` and native button backgrounds. `mobile/lib/ui.dart` owns the Material theme, semantic roles and route transitions; screen-specific composition remains in the native screen files. All dimensions here are logical dp; text follows Android system scaling, expressed in sp terms. This is source-derived documentation, not native visual acceptance. Acceptance and historical evidence belong in [the canonical implementation report](Raporlar/2026-11-13-butunsel-neumorphic-ui.md); earlier screenshots do not establish acceptance of this redesign.
+`mobile/lib/theme_palettes.dart` owns stable palette IDs, source swatches and explicitly composed light/dark color roles. `mobile/lib/neumorphic.dart` owns `NeoPalette`, `NeoSurface`, `NeoInputBorder` and native button backgrounds. `mobile/lib/ui.dart` resolves and caches the shared theme by palette/brightness. All dimensions here are logical dp; text follows Android system scaling. This is a source-derived design record. Current theme verification and limits are in [VERIFICATION.md](VERIFICATION.md#november-14--android-131-selectable-palettes-and-neumorphic-selector); local device reports and images are not part of source publication.
 
 ## Colors
 
-The frontmatter records authored constants. `ColorScheme.fromSeed` uses `#a87920` in dark appearance and `#292e37` in light appearance; `ui.dart` overrides the recorded roles. No wallpaper-derived Dynamic Color is implemented. Foregrounds resolve through the active semantic pairs. Primary/primary-container in light appearance use navy and a cool muted container, not the former brown/amber pair. Dark semantic pairs are unchanged.
+The frontmatter records the unchanged default Omputer constants. The palette catalog is the source of truth for additional schemes. Light appearances author independent base, raised, inset, highlight and shadow values: no common near-white interpolation washes them into one material. Dark appearances retain their previous composed canvas and tonal depth. This is not wallpaper-derived Dynamic Color and not a direct light/dark inversion.
 
-Base/raised/inset share the existing neutral ramp. Primary means action, selection or focus, never an all-screen wash. Error notices retain generated `errorContainer`/`onErrorContainer` and explanatory words. Card depth uses neutral surface steps and offset shadows, not accent-filled status tiles.
+| Setting label | Stable ID | User-supplied palette |
+|---|---|---|
+| Adaçayı | `sage` | `ccd5ae-e9edc9-fefae0-faedcd-d4a373` |
+| Okyanus | `coast` | `8ecae6-219ebc-023047-ffb703-fb8500` |
+| Orman | `forest` | `01161e-124559-598392-aec3b0-eff6e0` |
+| Gece mavisi | `midnight` | `000814-001d3d-003566-ffc300-ffd60a` |
+| Vişne | `cherry` | `ef233c-d5f2e3-73ba9b-003e1f-d90429` |
+| Kiremit | `terracotta` | `562c2c-f2542d-f5dfbb-0e9594-127475` |
+| Mercan | `coral` | `e63946-f1faee-a8dadc-457b9d-1d3557` |
+
+Original source colors remain exact in Settings swatches. Action/text shades adapt for contrast; each light material now has its own relationships: sage parchment/olive inset, coast powder-blue/navy, forest moss/cream, midnight yellow-paper/navy, cherry powder-rose/burgundy, terracotta sand/clay and coral seafoam/navy with coral support. Primary means action, selection or focus, not an all-screen wash. Error roles retain their Material semantics and explanatory words. Text/action pairs require4.5:1 and outline/focus requires3:1 on base, raised and inset. Secondary/outline light ink is stronger to remain readable on the more distinct recessed surfaces. A regression compares mean CIELABΔE76 across base/raised/inset, requiring≥8for every pair of the seven new light themes; this is a guardrail, not a substitute for native visual judgment.
+
+Settings starts with Görünüm. Renk teması is the existing native OutlinedButton themed through `neoButtonStyle`: raised when collapsed, inset when expanded/pressed, clear focus,48dp minimum,16dp radius. One explicitly bounded widget Semantics container exposes label/current palette/button/expanded/tap, with native keyboard/focus retained and inner duplicate semantics excluded. Widget semantic tests cover the single owner; native Android XML may still aggregate parent roles, and full TalkBack acceptance is not claimed. Radio rows keep exact swatches; selected row recessed, inactive quiet. Collapse removes choices from focus traversal without clearing selection. Appearance stays separate and Home's sun/moon stays in place; preferences persist independently, no extra animation.
 
 ## Application mark
 
@@ -133,11 +145,11 @@ Use 12dp for chips/text buttons, 16dp for fields/buttons/rows/menus, default 20d
 
 ## Components
 
-Filled/outlined/icon buttons preserve native callbacks, focus, ink and text/icon foreground inheritance through NeoSurface. Minimum52dp primary and48dp compact targets remain. Resting raised/pressed inset/disabled flat backgrounds use the existing builder. Enabled filled foreground uses onPrimary against dark amber or light navy with at least4.5:1 contrast. Focus and disabled roles stay explicit; no local label-color overrides.
+Filled/outlined/icon buttons preserve native callbacks, focus, ink and text/icon foreground inheritance through NeoSurface. Minimum52dp primary and48dp compact targets remain. Resting raised/pressed inset/disabled flat backgrounds use the existing builder. Enabled filled foreground uses the active onPrimary against its primary with at least4.5:1 contrast. Focus and disabled roles stay explicit; no local label-color overrides.
 
 Fields use true NeoInputBorder inset painting,16dp padding/radius, resting outline-variant and2dp primary focus borders. Native labels, accessibility, editing/IME/selection/validation stay unchanged. Cursor/handles use the active primary and selection alpha.24; the persistent message-editor name and draft boundaries remain.
 
-Navigation uses inset indicators and the current primary selected label/icon. Chips, menus/dialogs/sheets/snackbars retain shared native roles, surfaces and dismissals. The existing native sun/moon control is preserved; light navy is not a replacement visual system.
+Navigation uses inset indicators and the current primary selected label/icon. Chips, menus/dialogs/sheets/snackbars retain shared native roles, surfaces and dismissals. The existing native sun/moon control is preserved and independent of Settings color selection.
 
 **First valid response and trust.** The first valid desktop or phone answer wins. Requests are actionable only while pending, connected, valid and not submitting. Closed/expired requests stay read-only; offline answers are not silently queued. Tool decisions retain command/context warnings and separate approve/reject actions; cancellation uses native confirmation. Status, freshness, saved/offline state and failure are conveyed in words, not color alone.
 

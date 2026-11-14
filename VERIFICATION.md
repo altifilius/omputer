@@ -1,5 +1,15 @@
 # Verification record
 
+## November 14 — Android 1.3.1 selectable palettes and neumorphic selector
+
+The user reported similar light palettes and a selector inconsistent with the existing neumorphic system. Seven supplied palettes now have authored light/dark schemes; each light material owns base, raised, inset, highlight and shadow roles. The original Omputer theme remains available. Settings selection commits through native storage before display changes; palette and system/light/dark appearance persist independently and the Home sun/moon control stays in place.
+
+Scoped analyzer checks passed. During refinement, 25 distinct targeted scenarios passed across serial gates, not a full-suite run. Coverage includes all 16 palette/brightness contrast matrices, at least 4.5:1 body/secondary/action contrast and 3:1 outline on base/raised/inset, mean CIELAB DeltaE76 of at least 8 between each pair of new light materials, palette persistence/storage failure, native disclosure Tab/Space and expanded/collapsed semantics, hidden-choice removal, large-text radio selection and header behavior. The final bounded-semantic correction passed three overlapping disclosure/app-selection/large-text scenarios; these are not added again to the unique total.
+
+Actual physical-phone review inspected seven distinct light materials, light/dark raised-closed and recessed-open selector states, selected inset rows, collapse/reopen selection and a real application process restart retaining the chosen palette/appearance. Captured canvas samples matched authored colors. The original appearance was restored after inspection; pairing, application data and device settings were preserved and app-scoped errors were empty. Native Android XML may aggregate parent roles, so full TalkBack acceptance is not claimed. No emulator, model/provider request, permission grant or PC/host activation was used for this theme work.
+
+Local device reports, screenshots and generated APKs are excluded from source publication. The source tree is not claimed to reproduce an accepted APK byte-for-byte; physical accessibility breadth, performance, OEM background/battery behavior and remote-network acceptance remain unverified.
+
 ## November 14 — local controls, queued prompts and safe resume
 
 The user-reported busy prompt rejection is the reproduction. Normal native prompts now carry `streamingBehavior: "steer"`; bridge admission requires `onPromptAdmitted` and rejects dropped input. Pinned OMP 18.20.0 exports actual local controls. A compiled-runtime + Rust daemon + Unix bridge smoke returned 94 commands, with only `share`, `collab`, `join`, `leave` unavailable; a read command, close/resume with the same journal and explicit relocation preserved original bytes without a model request.

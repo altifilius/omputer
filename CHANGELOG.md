@@ -6,6 +6,15 @@
 - Describe local IPC without publishing its filesystem endpoint or credential paths. Runtime code, connection behavior and security checks are unchanged.
 - Preserve existing signed commits. This cleanup changes the current documentation, not earlier Git history or copies already downloaded.
 
+## Android 1.3.1 (22) — selectable palettes and neumorphic theme selector
+
+- Add Adaçayı, Okyanus, Orman, Gece mavisi, Vişne, Kiremit and Mercan from the supplied palettes, each with light and dark appearances. Preserve original Omputer as the default and restorable theme.
+- Give each light theme distinct base, raised, inset, highlight and shadow roles instead of a shared near-white blend. Keep semantic text/action contrast and the existing material geometry.
+- Add Settings → Görünüm → Renk teması with named native radio choices and exact five-color strips. Use the shared raised/inset native button for disclosure and recess the selected row; retain keyboard focus and bounded expanded-state semantics.
+- Persist palette and appearance independently through native storage. Keep the Home sun/moon control in place, preserve the previous choice on failed storage and cache theme data by palette/brightness.
+
+Scoped analysis and 25 distinct targeted scenarios passed across serial gates; no full-suite claim. Physical-phone review covered all seven light materials, light/dark selector states, collapse/reopen selection and real process-restart persistence. The signed update preserved existing pairing and application data. Full TalkBack, performance and network acceptance remain unclaimed. Local reports, screenshots and generated APKs are not included in source publication. See [verification](VERIFICATION.md#november-14--android-131-selectable-palettes-and-neumorphic-selector).
+
 ## PC 0.3.0 / Android 1.3.0 (21) / bridge 1.2.0 — local controls and queued prompts
 
 - Queue normal phone prompts through terminal-compatible streaming admission; preserve images and literal text. Reject dropped prompts instead of reporting false acceptance.

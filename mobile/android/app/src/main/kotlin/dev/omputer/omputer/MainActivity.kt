@@ -79,6 +79,7 @@ class MainActivity : FlutterActivity() {
                 "snapshot" -> async { LocalConnection.snapshot() }
                 "preferences" -> result.success(LocalConnection.preferences())
                 "theme" -> { LocalConnection.setTheme(call.argument<String>("mode") ?: "system"); result.success(null) }
+                "colorTheme" -> { LocalConnection.setColorTheme(call.argument<String>("id") ?: error("Renk teması eksik.")); result.success(null) }
                 "localState" -> local { LocalConnection.localState() }
                 "localStateSet" -> local { LocalConnection.localStateSet(call.argument<String>("section") ?: error("Bölüm eksik."), call.argument<String>("key") ?: error("Anahtar eksik."), call.argument<Any>("value")) }
                 "draftLoad" -> local { LocalConnection.draftLoad(call.argument<String>("key") ?: error("Anahtar eksik.")) }

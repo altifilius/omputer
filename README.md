@@ -6,7 +6,7 @@ Monitor OMP sessions on your own PC from an Android phone, answer agent question
 
 The current application interface is in Turkish. This README uses English descriptions and includes the existing interface labels where needed.
 
-Current local-controls source: **PC 0.3.0 · Android 1.3.0 (21) · bridge 1.2.0 · OMP 18.20.0**. Normal prompts queue during active work; local administration and explicit safe relocation are available through the phone. Hosted sharing/collaboration remains disabled. Implementation artifacts and targeted checks passed, but package preparation does not activate new code inside old processes. Preserve active hosts and apply the PC update only through the normal safe-update boundary. Concurrent palette/theme work and local reports/evidence are excluded from this source publication.
+Current source: **PC 0.3.0 · Android 1.3.1 (22) · bridge 1.2.0 · OMP 18.20.0**. Android adds seven selectable light/dark color palettes, distinct light surface materials and a shared neumorphic theme selector. Existing local controls and queued prompts are retained; hosted sharing/collaboration stays disabled. Physical-phone theme checks preserved pairing and application data. Source publication does not distribute the APK or activate code in existing PC/host processes; use the normal safe-update boundary. Local reports and device evidence remain separate.
 
 **Terminal-question compatibility:** bridge1.1.2 introduced HTML-form asks from terminal OMP18.20.0 through the host's sequential field mode; bridge1.2.0 retains that route. Already-open old terminal processes require their own normal restart at a safe stopping point. See [question delivery report](Raporlar/2026-11-13-omp-soru-iletimi.md).
 
@@ -62,6 +62,15 @@ Open the newer PC package to stage it. **Apply update** (`Güncellemeyi uygula`)
 The automatic listener retains a private saved port (8787 on fresh installs, or an explicit existing override). LAN route changes replace only the HTTPS listener/discovery inside the same daemon; pairing identity, local IPC and owned sessions survive. If the port is occupied or a firewall blocks the phone, the app reports the condition rather than silently selecting a different firewall target. It does not weaken firewall policy automatically.
 
 The Android settings footer shows the actual installed version/build. A same-signer `adb install -r` update preserves pairing and private data; do not uninstall or clear data to update. External pairing links always require explicit PC identity/fingerprint and replacement confirmation before changing that trust.
+
+### Color themes and appearance
+
+In **Ayarlar → Görünüm → Renk teması**, choose Adaçayı, Okyanus, Orman, Gece mavisi, Vişne, Kiremit or Mercan. Each has a light and dark appearance; the five-color strips preview the supplied palette. **Omputer** restores the original graphite/fog theme. Selection applies immediately after successful phone-local storage and is available offline.
+
+Light palettes use distinct parchment, powder-blue, moss, yellow-paper, powder-rose, sand and seafoam materials across base, raised and recessed surfaces. The selector follows the existing neumorphic controls: raised when closed, recessed when expanded or pressed, with a recessed selected radio row. Keyboard focus and expanded-state semantics remain.
+
+The Home sun/moon control stays in place and changes only appearance, not palette. **Aydınlık / karanlık** in Settings retains **Sistemle aynı**. Both preferences persist independently across application restarts and pairing changes; they do not change permissions, project data or running work. See the [theme verification record](VERIFICATION.md#november-14--android-131-selectable-palettes-and-neumorphic-selector).
+
 
 Offline project data and recently opened pages use a bounded disposable cache, not a second authoritative history store. Reconnect loads a fresh authenticated snapshot and reloads open conversations. A process death can lose the newest debounced cache checkpoint; PC history and committed credentials are unaffected. The PC coalesces superseded full message revisions but retains unique history, decisions and command outcomes; total PC history is not arbitrarily capped.
 
