@@ -42,9 +42,7 @@ Eklenen iki bridge regresyonu connected/disconnected/restoration, managed RPC ve
 
 `1d9b58b330239b115ab543d0d06c68b70a3224f69b3dd7a224d1f9f4c999945a`
 
-Aynı PC binary/runtime + yeni bridge ile yan yana, özel izinli kurulum oluşturuldu:
-
-`~/.local/share/omputer/app/releases/2d0ac4bf3a26d3ef488cab1f76b0ac6b63c1bbef36cbc3edaab69fd151db12e0`
+Aynı PC binary/runtime + yeni bridge ile yan yana, özel izinli kurulum oluşturuldu. Makineye özgü kurulum yolu kamuya açık rapordan çıkarıldı.
 
 Release marker, `install.json` ve atomik `app/current` bağlantısı aynı yeni digest’i gösteriyor; tam hash doğrulaması geçti. Kaynak/kurulu `dialogs.ts` aynı. Eski release korundu; daemon hâlâ eski release’in mevcut PID875 binary’siyle çalışıyor. Binary ve runtime byte’ları değişmedi, servis/terminal yeniden başlatılmadı. Sistem servis/desktop/loader managed hash kayıtları korundu.
 
@@ -118,7 +116,7 @@ Eşzamanlı1.2.0/Android/PC çalışma dosyaları ve index’teki ilgisiz kayıt
 
 ### Vault kapanış kaydı
 
-Bu dosya çalışmanın tek kanonik raporudur: `/home/emre/Projects/omputer/Raporlar/2026-11-13-omp-soru-iletimi.md`. Projenin `Raporlar/README.md` indeksi ve vault kökündeki `/home/emre/Projects/README.md` bu kayda bağlanır. İkinci rapor kopyası veya yeni proje dizini oluşturulmadı.
+Bu dosya çalışmanın tek kanonik raporudur. Projenin `Raporlar/README.md` indeksi ve yerel vault ana indeksi bu kayda bağlanır. Makineye özgü mutlak yollar kamuya açık rapordan çıkarıldı. İkinci rapor kopyası veya yeni proje dizini oluşturulmadı.
 
 **Raporlama ve önceki commit/push talebi tamamlandı.** Genel `status: kismi` korunur: eski açık terminal modüllerinin etkinleşmesi ve yeni dağıtım paketi bu işte tamamlanmış gösterilmez. Yerel Obsidian Sync/Publish ayarları, üretim servisleri, telefon ve diğer oturumların çalışmaları değiştirilmedi. Bu son vault talebinde yalnız belge/indeks güncellemesi ve bağlantı/kanıt gizliliği kontrolü yapılır; yeni build, test-suite, commit veya push kapsamı açılmaz.
 

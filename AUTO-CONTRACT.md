@@ -9,7 +9,7 @@ Linux desktop app (Rust/egui) launched by double-click: self-contained bundle in
 
 ## Desktop/service local admin
 
-Mode0600 Unix `<stateDir>/admin.sock`; same-user token `<stateDir>/bridge.token`. JSONL one request/response connection `{token,id,action,payload}` -> `{id,success,data?,error?:{code,message}}`. Desktop uses this, never network auth bypass. Actions:
+Owner-only local IPC with a same-user credential; public documentation omits filesystem endpoint and credential locations. JSONL one request/response connection `{token,id,action,payload}` -> `{id,success,data?,error?:{code,message}}`. Desktop uses this, never network auth bypass. Actions:
 - `status` -> `{serverId,serverName,fingerprint,certificate,port,urls,ready,projects,sessions,pendingPairs,devices,discovery,managedRpcSessions,components,update,backups}`; project/session values are counts. Component identity is distinct from staged package metadata.
 - `pair.approve` `{requestId}` -> `{approved:true}`; `pair.deny` `{requestId}` -> `{denied:true}`.
 - `pair.bundle` `{}` -> standard one-use bundle with automatically selected LAN URL; desktop can display real QR.
@@ -29,7 +29,7 @@ Interrupted database cutover recovery restores the original database and can con
 Stable serverId generated once in private state. TLS fingerprint exact pin identity already exists. Mode0700 dir and mode0600 sockets/tokens. Admin not exposed on HTTP. Each action validates and bounds inputs.
 Reopening a newer package stages its byte-verified resources and integrations before activating the existing window. Locally edited/unrelated integrations are preserved and surfaced as warnings; unrelated units are not enabled/restarted. Applying a prepared update targets only the authenticated app-owned service or exact fallback child. Terminal OMP processes load bridge changes on their next normal launch, not through hot module replacement.
 
-The selected port persists in mode-0600 `lan-port`; fresh installations default to 8787, explicit user-service overrides take precedence. Busy-port recovery keeps the saved port. Network route changes rebind only HTTPS/advertisements inside the existing daemon, preserving native ownership, local admin/scanner and pending pairing.
+The selected listener configuration persists in owner-only state; explicit user-service overrides take precedence. Busy-port recovery keeps the saved configuration. Network route changes rebind only HTTPS/advertisements inside the existing daemon, preserving native ownership, local admin/scanner and pending pairing.
 
 
 ## LAN discovery

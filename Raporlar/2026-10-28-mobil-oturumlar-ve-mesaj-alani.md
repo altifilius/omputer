@@ -98,7 +98,7 @@ APK mevcut uygulamanın üzerine aynı imzayla güncellenebilir; kaldırma/veri 
 
 ## Korunan ayarlar, temizlik ve riskler
 
-PC 0.2.0, bridge 1.1.0, model sağlayıcı ayarları, telefon eşleştirmesi, TLS sabitleme, cihaz yetkilendirmeleri, geçmişler, NetBird/VPN ve firewall değiştirilmedi. Üretim servis veya gerçek OMP oturumları durdurulmadı/yeniden başlatılmadı. Üretim veri tabanına yazılmadı. Yalnız mobil kaynak ve paket güncellendi.
+PC 0.2.0, bridge 1.1.0, model sağlayıcı ayarları, telefon eşleştirmesi, TLS sabitleme, cihaz yetkilendirmeleri, geçmişler ve ağ güvenliği ayarları değiştirilmedi. Üretim servis veya gerçek OMP oturumları durdurulmadı/yeniden başlatılmadı. Üretim veri tabanına yazılmadı. Yalnız mobil kaynak ve paket güncellendi.
 
 Sahip olunan emülatör kapatıldı ve özel AVD kaydı silindi. Geçici debug uygulaması/adaptör/sürücüler yayın paketine dahil edilmedi; geçici dosyalar temizlendi. Kalıcı kanıt yalnız yukarıdaki seçilmiş görüntülerdir. Yeni rapor ve kanıt dizinleri `0700`, dosyaları `0600` tutulur; proje kökü veya diğer kaynakların izinleri değiştirilmez.
 

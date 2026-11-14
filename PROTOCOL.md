@@ -78,7 +78,7 @@ Notification: `{id,kind:"question"|"approval"|"turn_done"|"error"|"connection",t
 
 ## Local OMP bridge
 
-Mode-0600 Unix socket `<stateDir>/bridge.sock`; mode-0600 secret `<stateDir>/bridge.token`; owner-only state directory. Register JSONL `{type:"register",token,managed?:bool,managedSessionId?,session:{id,cwd,name,sessionFile?,model?,thinkingLevel?,status,todos,subagents,capabilities}}` -> `{type:"registered",sessionId,projectId,memoryRevision,bindingRevision}`. Registration is authenticated; revision/binding values are daemon-issued. Managed IPC owns extension dialogs/subagent/checkpoints; native RPC owns built-in tool dialogs, session commands and transcript. Terminal IPC owns both. No hosted Collab relay.
+The bridge uses an authenticated owner-only local IPC channel and an owner-only credential. Public documentation omits filesystem endpoint and credential locations. Register JSONL `{type:"register",token,managed?:bool,managedSessionId?,session:{id,cwd,name,sessionFile?,model?,thinkingLevel?,status,todos,subagents,capabilities}}` -> `{type:"registered",sessionId,projectId,memoryRevision,bindingRevision}`. Registration is authenticated; revision/binding values are daemon-issued. Managed IPC owns extension dialogs/subagent/checkpoints; native RPC owns built-in tool dialogs, session commands and transcript. Terminal IPC owns both. No hosted Collab relay.
 
 Bridge -> daemon: `{type:"event",sessionId,event}`, `{type:"state",session}`, `{type:"interaction",sessionId,request}`, `{type:"interaction_end",sessionId,id,status}`, `{type:"response",id,success,data?,error?}`.
 

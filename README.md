@@ -36,7 +36,7 @@ If the network blocks discovery, open **If your phone cannot find the PC** (`Tel
 
 ## Installation and data locations
 
-Installation is limited to the current user account. The application and bundled runtime live in `$XDG_DATA_HOME/omputer/app` (by default, `~/.local/share/omputer/app`), private service data in `$XDG_DATA_HOME/omputer`, and the application-menu entry in `$XDG_DATA_HOME/applications/omputer.desktop`. The user service is installed at `$XDG_CONFIG_HOME/systemd/user/omputer.service`; fallback autostart uses `$XDG_CONFIG_HOME/autostart/omputer.desktop`. Only files recorded as owned by this installation are updated. Unrelated or locally modified integration files are preserved.
+Installation is limited to the current user account. Application resources, private service data and desktop/startup integrations use the operating system's per-user directories. Public documentation omits workstation-specific installation and private-state locations. Only files recorded as owned by this installation are updated. Unrelated or locally modified integration files are preserved.
 
 The PC application selects a private IPv4 LAN interface and an available port. It does not automatically bind to a public Internet address or all interfaces. Without a private network, the service runs on loopback and rebinds when a suitable network becomes available. It does not change router, firewall, or VPN settings. The PC identity and certificate survive restarts; an address change is accepted only after the exact stored certificate has been verified.
 
@@ -97,7 +97,7 @@ Access outside your local network requires your own WireGuard/router VPN or anot
 
 ## Building the Android application
 
-Build requirements: Flutter stable, JDK 17, Android SDK 36, and NDK 28.2.13676358. On the development workstation, isolated tools are stored under `~/.local/share/omputer-tools/`; project and system runtimes are not replaced.
+Build requirements: Flutter stable, JDK 17, Android SDK 36, and NDK 28.2.13676358. Build tools can be installed separately without replacing project or system runtimes.
 
 ```sh
 sh scripts/build-android.sh
@@ -114,7 +114,7 @@ Optimized APK: `mobile/build/app/outputs/flutter-apk/app-release.apk`.
 
 Local distribution files are `dist/omputer-android.apk` (arm64 + x86_64, optimized and signed with the local release key) and `dist/Omputer` (Linux x64 native application with the runtime and bridge embedded). Checksums are stored in `dist/SHA256SUMS`. These generated files are not included in the source repository.
 
-A separate local release-signing identity was created on the development workstation at `~/.local/share/omputer-signing/android-release.p12`. Its directory has mode 0700; key/password files and the ignored `mobile/android/key.properties` have mode 0600. The key is not uploaded to another service. Back up the signing identity securely: if it is lost, updates cannot be installed over the existing application using the same identity. Debug and release signatures differ; switching from a debug installation requires uninstalling it and pairing again.
+Release signing requires a separately protected local identity. Keep its directory owner-only and key/password files, including the ignored `mobile/android/key.properties`, owner-only. The key is not uploaded to another service. Back up the signing identity securely: if it is lost, updates cannot be installed over the existing application using the same identity. Debug and release signatures differ; switching from a debug installation requires uninstalling it and pairing again.
 
 To build a release on another machine, configure `storeFile`, `storePassword`, `keyAlias`, and `keyPassword` in `mobile/android/key.properties`, then run `sh scripts/build-android.sh --release`. A debug key is not silently substituted for a release key.
 
@@ -129,7 +129,7 @@ sh scripts/build-android.sh --release --target-platform android-arm64,android-x6
 
 The desktop packaging script creates the embedded OMP runtime and bridge archive and writes `dist/Omputer`. A plain Cargo build without embedded resources is for development only. Explicit CLI subcommands listed by `omputer --help` are optional diagnostics; launching without a subcommand opens the native application. Use `OMPUTER_STATE_DIR` or `--state-dir` for isolated test data. The old manual service-installation script has been removed; the application owns installation and startup.
 
-The source bootstrap is `sh bridge/bootstrap.sh` against OMP v18.20.0 commit `c308970263ae13744ea15ab67302e3dac840e266`; default source is `~/.local/share/omputer-tools/omp-18.20.0` (override with `OMPUTER_OMP_SOURCE`). It stages every runtime patch target against the pristine baseline before merging and rejects conflicts without overwriting private edits. The old18.10 source tree is not migrated in place. Matching-version native addons and frozen dependencies are required. Packaging pins private Bun1.4.4, bounds resources/deadlines and uses locked Cargo dependencies. Existing host closures cannot be hot-upgraded; load new code only at a normal restart boundary.
+The source bootstrap is `sh bridge/bootstrap.sh` against OMP v18.20.0 commit `c308970263ae13744ea15ab67302e3dac840e266`; select a separate source checkout with `OMPUTER_OMP_SOURCE` when needed. It stages every runtime patch target against the pristine baseline before merging and rejects conflicts without overwriting private edits. The old18.10 source tree is not migrated in place. Matching-version native addons and frozen dependencies are required. Packaging pins private Bun1.4.4, bounds resources/deadlines and uses locked Cargo dependencies. Existing host closures cannot be hot-upgraded; load new code only at a normal restart boundary.
 
 On a workstation running OMP and an Android emulator, build serially rather than starting Rust, Android and runtime compilation together. The October 17 investigation observed `systemd-oomd` terminate the terminal's entire process scope under combined RAM/swap pressure. Recovery builds used separate user services with `CARGO_BUILD_JOBS=1`, explicit memory/swap ceilings and low CPU priority. Finish Android before Rust packaging, and do not retain its Gradle daemon: this project disables the persistent daemon, parallel workers and the separate Kotlin compiler JVM. Do not disable system OOM protection or treat an emulator passing as physical-phone proof.
 The bounded Android build runs Flutter tests with `--concurrency=1`. A previous concurrent run stalled under its memory ceiling; the complete serial run passed. The earlier stall's exact cause is not established, so no product deadlock fix is claimed. Long verification services should also have a service-level deadline, because stopping the `systemd-run` client alone does not reliably retire its child unit.

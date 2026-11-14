@@ -1,5 +1,11 @@
 # Changelog
 
+## Documentation privacy — November 14
+
+- Remove workstation-specific network addresses, listener/client port records, device-routing/access-rule details and private filesystem locations from public documentation.
+- Describe local IPC without publishing its filesystem endpoint or credential paths. Runtime code, connection behavior and security checks are unchanged.
+- Preserve existing signed commits. This cleanup changes the current documentation, not earlier Git history or copies already downloaded.
+
 ## PC 0.3.0 / Android 1.3.0 (21) / bridge 1.2.0 — local controls and queued prompts
 
 - Queue normal phone prompts through terminal-compatible streaming admission; preserve images and literal text. Reject dropped prompts instead of reporting false acceptance.
