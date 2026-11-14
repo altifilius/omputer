@@ -15,9 +15,9 @@ status: kismi
 
 Kullanıcı PC’de üretilen çoktan seçmeli OMP sorularının Android Omputer’e ulaşmadığını bildirdi. Bağlantıyı, soru sözleşmesini ve yanıt dönüşünü inceleyip düzeltmek istedi.
 
-**Kaynak ve kurulu köprü 1.1.2 düzeltildi. Yeni OMP süreçleri düzeltilmiş köprüyü yükler. Fiziksel Samsung üzerinden gerçek yanıt PC’deki AskTool’a döndü. Başlangıçta eski modülü yüklemiş açık terminal süreçlerinin geçişi hâlâ bekliyor:** çalışan işleri kesmemek için yeniden başlatılmadılar. İşleri durulduğunda OMP’nin normal `/restart` komutu gerekir; kayıt/sohbeti yeniden yüklemek kodu yenilemez.
+**Bu rapor 13–14 Kasım’daki bridge 1.1.2 soru iletimi düzeltmesini ve kaynak yayınını kaydeder.** Kaynak düzeltildi, köprü yan yana kuruldu ve fiziksel Samsung’dan yanıt PC’deki AskTool’a döndü. İmzalı kaynak ve yayın-sonucu commit’leri `origin/main` dalına gönderildi. Son işletim kontrolünde eski modülü yüklemiş açık terminal süreçleri yeniden başlatılmamıştı; bu süreçlerde güvenli `/restart` hâlâ gerekliydi. Bu vault güncellemesi süreçlerin sonradan yeniden başlatıldığını doğrulamaz.
 
-Android APK, eşleşme, PC daemon binary ve bundled OMP değiştirilmedi. `dist/Omputer` eski bridge 1.1.1 paketidir; yeni paket üretildiği iddia edilmez.
+Bu çalışma Android APK’sını, eşleşmeyi, PC daemon binary’sini ve bundled OMP’yi değiştirmedi. Çalışmanın tamamlandığı aşamada `dist/Omputer` bridge 1.1.1 paketiydi; bu düzeltme için yeni dağıtım paketi üretilmedi. Daha sonraki eşzamanlı 1.2.0 kontrol/kuyruk çalışması ve Android palet teslimi bu raporun sonucu değildir; kendi raporlarında izlenir.
 
 ## Neden
 
@@ -104,7 +104,7 @@ Ortak dosyaların tümü körlemesine stage edilmez. Kaynak yayını temiz HEAD 
 
 Yayın öncesi HEAD tabanından ayrılan gerçek1.1.2 içeriğinde `bun test bridge/dialogs.test.ts bridge/lifecycle.test.ts` yeniden çalıştı: **10/10**, **74 assertion**, yaklaşık **2,19s**. Bu kontrol eşzamanlı1.2.0 değişikliklerini kullanmaz; önceki fiziksel telefon kabulü tekrar edilmiş gibi sunulmaz.
 
-İki JSON kanıtında kullanıcı konuşması, cihaz/oturum kimliği, özel adres, parola veya token yoktur. Makineye özgü kurulum hash’leri gizli erişim değeri değildir. Ham ekran/XML/log, APK/dist ve imzalama dosyaları yayımlanmaz. Commit/push sonucu gerçekleştikten sonra bu bölümde kanıtlı SHA ve uzak dal sonucu kaydedilir.
+Yayımlanan iki JSON kanıtında kullanıcı konuşması, cihaz/oturum kimliği, özel adres, parola veya token yoktur. Makineye özgü kurulum hash’leri gizli erişim değeri değildir. Ham ekran/XML/log, APK/dist ve imzalama dosyaları bu yayına alınmadı. Gerçekleşen commit/push sonuçları aşağıda kayıtlıdır.
 
 ### Tamamlanan kaynak yayını
 
@@ -112,5 +112,15 @@ Yayın öncesi HEAD tabanından ayrılan gerçek1.1.2 içeriğinde `bun test bri
 
 SSH push **`58ca2ac..d37f7a2` → `origin/main`** başarılı. Bağımsız `git ls-remote origin refs/heads/main` aynı tam SHA’yı verdi; sonuç **14 Kasım 2026 01:13 +03:00** itibarıyla doğrulandı. Force-push, amend veya farklı uzak dal yok. İlk imza denemesi kilitli anahtar/pinentry ortamı nedeniyle zaman aşımına uğradı; HEAD değişmedi ve yalnız o denemenin boş index kilidi kaldırıldı. Mevcut imzalama ayarı kapatılmadan doğru terminal ortamıyla sonraki deneme başarılı oldu; parola alınmadı/kaydedilmedi.
 
-Eşzamanlı1.2.0/Android/PC çalışma dosyaları ve index’teki ilgisiz kayıtlar korunarak yalnız seçili içerik yayımlandı. Bu kaynak yayını üretim daemon’ı, telefon verisi, kurulu APK veya açık OMP süreçlerini değiştirmez. Kaynak commit/push sonucu bu ek belge kaydıyla da yayıma alınır; açık eski terminal süreçleri için `/restart` ve eski `dist/Omputer` sınırları geçerlidir.
+Eşzamanlı1.2.0/Android/PC çalışma dosyaları ve index’teki ilgisiz kayıtlar korunarak yalnız seçili içerik yayımlandı. Bu kaynak yayını üretim daemon’ı, telefon verisi, kurulu APK veya açık OMP süreçlerini değiştirmedi. Açık eski terminal süreçleri için `/restart` ve eski `dist/Omputer` sınırları, son işletim kontrolünün açık kalan maddeleridir.
 
+**[`9ff59d567e83969c78b62224f74177c68cb5f9bb`](https://github.com/altifilius/omputer/commit/9ff59d567e83969c78b62224f74177c68cb5f9bb)** — `docs: record signed question delivery source publication`. Kaynak commit’inin gerçekleşmiş yayın sonucunu aynı rapor ve proje rapor indeksine kaydeden ek belge commit’i. GPG **Good signature** doğrulandı; SSH push **`d37f7a2..9ff59d5` → `origin/main`** başarılı oldu. Push sonrasındaki bağımsız uzak dal sorgusu **01:14 +03:00** itibarıyla bu tam SHA’yla eşleşti. Bu, o andaki yayın kanıtıdır; uzak dalın daha sonra ilerlemediği iddia edilmez.
+
+### Vault kapanış kaydı
+
+Bu dosya çalışmanın tek kanonik raporudur: `/home/emre/Projects/omputer/Raporlar/2026-11-13-omp-soru-iletimi.md`. Projenin `Raporlar/README.md` indeksi ve vault kökündeki `/home/emre/Projects/README.md` bu kayda bağlanır. İkinci rapor kopyası veya yeni proje dizini oluşturulmadı.
+
+**Raporlama ve önceki commit/push talebi tamamlandı.** Genel `status: kismi` korunur: eski açık terminal modüllerinin etkinleşmesi ve yeni dağıtım paketi bu işte tamamlanmış gösterilmez. Yerel Obsidian Sync/Publish ayarları, üretim servisleri, telefon ve diğer oturumların çalışmaları değiştirilmedi. Bu son vault talebinde yalnız belge/indeks güncellemesi ve bağlantı/kanıt gizliliği kontrolü yapılır; yeni build, test-suite, commit veya push kapsamı açılmaz.
+
+
+Vault kayıt kontrolü tamamlandı: rapor ve iki indeksteki bu çalışmaya ait **7 yerel bağlantı/başlık hedefi** mevcut; iki commit’in tam kimliği kayıtlı. İki sentetik JSON kanıtı ayrıştırıldı, hassas belirteç/kişisel adres kontrolü geçti. Rapor ve kanıt dosyalarının `0600`, kanıt dizininin `0700` izinleri korundu. Yeni ürün testi, canlı kurulum/uzak dal sorgusu veya commit/push yapılmadı; önceki doğrulama ve yayın sonuçları tarihsel kanıt olarak tutuldu.
