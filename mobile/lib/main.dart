@@ -30,6 +30,7 @@ class OmputerApp extends StatefulWidget {
 
 class _OmputerAppState extends State<OmputerApp> with WidgetsBindingObserver {
   final navigator = GlobalKey<NavigatorState>();
+  int navigationRevision = 0;
   @override
   void initState() {
     super.initState();
@@ -96,9 +97,11 @@ class _OmputerAppState extends State<OmputerApp> with WidgetsBindingObserver {
     final data = widget.controller.pendingNavigation;
     if (data == null || !widget.controller.ready) return;
     widget.controller.consumeNavigation();
+    final revision = ++navigationRevision;
     final identity = '${widget.controller.localState['identity'] ?? ''}';
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || navigator.currentContext == null || '${widget.controller.localState['identity'] ?? ''}' != identity) return;
+    final epoch = widget.controller.snapshot.journalEpoch;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted || revision != navigationRevision || navigator.currentContext == null || '${widget.controller.localState['identity'] ?? ''}' != identity || widget.controller.snapshot.journalEpoch != epoch) return;
       final controller = widget.controller;
       final ctx = navigator.currentContext!;
       if (data['sharedImages'] == true || data['shareError'] is String) {
@@ -112,7 +115,23 @@ class _OmputerAppState extends State<OmputerApp> with WidgetsBindingObserver {
       } else if (data['interactionId'] is String) {
         openScreen(ctx, InteractionScreen(controller: controller, interactionId: data['interactionId'] as String));
       } else if (data['sessionId'] is String) {
-        openScreen(ctx, SessionScreen(controller: controller, sessionId: data['sessionId'] as String));
+        final sessionId = data['sessionId'] as String;
+        if (data['answer'] == true) {
+          await perform(ctx, () async {
+            final session = controller.snapshot.session(sessionId);
+            if (session == null) throw ControllerFailure('Bildirimin kaynak oturumu bulunamadı. Gelen kutusunu yenile.', 'session_unavailable');
+            Route<dynamic>? route;
+            navigator.currentState!.popUntil((candidate) { route = candidate; return true; });
+            final answer = await controller.firstUnreadAnswer(session);
+            if (!mounted || !ctx.mounted || revision != navigationRevision || route?.isCurrent != true ||
+                '${controller.localState['identity'] ?? ''}' != identity || controller.snapshot.journalEpoch != epoch ||
+                controller.snapshot.session(sessionId)?.answerSummary?.generation != session.answerSummary?.generation) return;
+            final target = answer ?? session.answerSummary?.latest;
+            openScreen(ctx, SessionScreen(controller: controller, sessionId: sessionId, initialMessageId: target?.messageId, initialAnswer: target));
+          });
+        } else {
+          openScreen(ctx, SessionScreen(controller: controller, sessionId: sessionId));
+        }
       }
     });
     WidgetsBinding.instance.ensureVisualUpdate();
@@ -232,7 +251,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       )),
       bottomNavigationBar: SafeArea(top: false, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: NeoJoinedTabs(
         key: const ValueKey('home-bottom-tabs'), panelColor: panelColor, panelAbove: true, selectedId: destination == 1 ? 'inbox' : 'projects',
-        tabs: [const JoinedTab(id: 'projects', label: 'Projeler', icon: Icons.folder_outlined), JoinedTab(id: 'new-session', label: 'Yeni oturum', icon: Icons.add_rounded, action: true, enabled: connected && c.snapshot.projects.isNotEmpty), JoinedTab(id: 'inbox', label: 'Gelen kutusu', icon: Icons.inbox_outlined, count: c.snapshot.pending.length)],
+        tabs: [const JoinedTab(id: 'projects', label: 'Projeler', icon: Icons.folder_outlined), JoinedTab(id: 'new-session', label: 'Yeni oturum', icon: Icons.add_rounded, action: true, enabled: connected && c.snapshot.projects.isNotEmpty), JoinedTab(id: 'inbox', label: 'Gelen kutusu', icon: Icons.inbox_outlined, count: c.snapshot.pending.length + c.unreadAnswerSessions.length)],
         onSelected: (id) {
           if (id == 'new-session') {
             if (c.connection.connected && c.snapshot.projects.isNotEmpty) openScreen(context, NewSessionScreen(controller: c, projectId: selectedProjectId));

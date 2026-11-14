@@ -18,9 +18,15 @@ class InboxScreen extends StatefulWidget {
 class _InboxScreenState extends State<InboxScreen> {
   bool history = false;
   String query = '';
+  final answerOrder = StableActivityOrder();
   @override
   Widget build(BuildContext context) => ListenableBuilder(listenable: widget.controller, builder: (context, _) {
-    final pendingCount = widget.controller.snapshot.pending.length;
+    final c = widget.controller;
+    final pendingCount = c.snapshot.pending.length;
+    final incompleteAnswerTracking = c.snapshot.sessions.any((s) => s.answerSummary == null);
+    final answerSessions = c.unreadAnswerSessions.where((s) => '${s.name} ${c.snapshot.project(s.projectId)?.name ?? ''} ${c.answerPreview(s) ?? ''}'.toLowerCase().contains(query.toLowerCase())).toList();
+    answerOrder.apply(answerSessions, (s) => s.id, (s) => s.answerSummary?.latest?.timestamp);
+    final answerIndices = {for (var index = 0; index < answerSessions.length; index++) answerSessions[index].id: index};
     final items = widget.controller.snapshot.interactions.where((i) => (history || i.pendingAt(DateTime.now())) && '${i.title} ${i.message ?? ''} ${widget.controller.snapshot.project(i.projectId)?.name ?? ''}'.toLowerCase().contains(query.toLowerCase())).toList()..sort((a, b) {
       final ap = a.pendingAt(DateTime.now()), bp = b.pendingAt(DateTime.now());
       if (ap != bp) return ap ? -1 : 1;
@@ -28,13 +34,67 @@ class _InboxScreenState extends State<InboxScreen> {
     });
     return RefreshIndicator(onRefresh: widget.controller.refresh, child: CustomScrollView(physics: const AlwaysScrollableScrollPhysics(), slivers: [
       SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 8), child: Text('Karar bekleyen · $pendingCount', style: Theme.of(context).textTheme.titleLarge))),
-      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(16, 8, 16, 12), child: TextField(onChanged: (value) => setState(() => query = value), decoration: const InputDecoration(labelText: 'Karar veya proje ara', prefixIcon: Icon(Icons.search_rounded))))),
+      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(16, 8, 16, 12), child: TextField(onChanged: (value) => setState(() => query = value), decoration: const InputDecoration(labelText: 'Karar, yanıt veya proje ara', prefixIcon: Icon(Icons.search_rounded))))),
       SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 12), child: NeoSurface(depth: NeoDepth.inset, radius: 16, child: SwitchListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 12), title: const Text('Yanıtlanan ve kapananları göster'), value: history, onChanged: (value) => setState(() => history = value))))),
       if (items.isEmpty) SliverToBoxAdapter(child: EmptyState(icon: Icons.mark_email_read_outlined, title: query.isNotEmpty ? 'Eşleşen karar yok.' : history ? 'Kayıtlı karar yok.' : 'Şimdilik senden bir karar beklenmiyor.', message: query.isNotEmpty ? 'Aramayı değiştir veya yanıtlanan ve kapananları da göster.' : 'OMP bir soru, seçim veya izin istediğinde burada görünür. Çevrimdışı görünüm son alınan kayıtları gösterir.')),
       SliverList.builder(itemCount: items.length, itemBuilder: (context, index) => InteractionRow(controller: widget.controller, interaction: items[index])),
+      SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(16, 24, 16, 8), child: Text(incompleteAnswerTracking ? 'Yeni yanıtlar' : 'Yeni yanıtlar · ${answerSessions.fold<int>(0, (count, session) => count + c.unreadAnswerCount(session))}', style: Theme.of(context).textTheme.titleLarge))),
+      if (incompleteAnswerTracking) const SliverToBoxAdapter(child: Padding(padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Text('Yeni yanıt takibi için bilgisayar uygulamasını güncelle. Eski bağlantıda yalnız mevcut son yanıt önizlemeleri gösterilebilir.'))),
+      if (answerSessions.isEmpty) SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.all(16), child: Text(incompleteAnswerTracking ? 'Okunmamış yanıt bilgisi bu bilgisayarda kullanılamıyor.' : query.isEmpty ? 'Okunmamış yeni yanıt yok.' : 'Aramayla eşleşen yeni yanıt yok.'))),
+      SliverList.builder(itemCount: answerSessions.length, findChildIndexCallback: (key) => key is ValueKey<String> ? answerIndices[key.value] : null, itemBuilder: (context, index) => AnswerInboxRow(key: ValueKey<String>(answerSessions[index].id), controller: c, session: answerSessions[index])),
       const SliverPadding(padding: EdgeInsets.only(bottom: 40)),
     ]));
   });
+}
+
+class AnswerInboxRow extends StatefulWidget {
+  const AnswerInboxRow({super.key, required this.controller, required this.session});
+  final OmputerController controller;
+  final Session session;
+  @override
+  State<AnswerInboxRow> createState() => _AnswerInboxRowState();
+}
+class _AnswerInboxRowState extends State<AnswerInboxRow> {
+  bool opening = false;
+  Future<void> openAnswer() async {
+    if (opening) return;
+    final c = widget.controller, session = widget.session;
+    final identity = c.localState['identity'], epoch = c.snapshot.journalEpoch;
+    final route = ModalRoute.of(context);
+    setState(() => opening = true);
+    await perform(context, () async {
+      final answer = await c.firstUnreadAnswer(session);
+      if (mounted && (route?.isCurrent ?? true) && identity == c.localState['identity'] &&
+          epoch == c.snapshot.journalEpoch && session.answerSummary?.generation == c.snapshot.session(session.id)?.answerSummary?.generation && answer != null) {
+        openScreen(context, SessionScreen(controller: c, sessionId: session.id, initialMessageId: answer.messageId, initialAnswer: answer));
+      }
+    });
+    if (mounted) setState(() => opening = false);
+  }
+  Future<void> markRead() async {
+    final session = widget.session;
+    final latest = session.answerSummary?.latest;
+    if (latest == null || opening) return;
+    setState(() => opening = true);
+    await perform(context, () => widget.controller.markAnswerRead(session, latest));
+    if (mounted) setState(() => opening = false);
+  }
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.controller, s = widget.session;
+    return Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: NeoSurface(child: ListTile(
+      contentPadding: const EdgeInsets.all(16),
+      leading: Icon(Icons.mark_chat_unread_outlined, color: Theme.of(context).colorScheme.primary),
+      title: Text(s.name.isEmpty ? 'Adsız oturum' : s.name),
+      subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('${c.snapshot.project(s.projectId)?.name ?? 'Proje'} · ${dateLabel(s.answerSummary?.latest?.timestamp)}'),
+        Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Text(c.answerPreview(s) ?? '', maxLines: 2, overflow: TextOverflow.ellipsis)),
+        Text('${c.unreadAnswerCount(s)} yeni yanıt', style: Theme.of(context).textTheme.labelLarge),
+      ]),
+      trailing: opening ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)) : IconButton(key: ValueKey('answer-read:${s.id}'), tooltip: 'Okundu işaretle', onPressed: markRead, icon: const Icon(Icons.done_all_rounded)),
+      onTap: opening ? null : openAnswer,
+    )));
+  }
 }
 
 class InteractionRow extends StatelessWidget {

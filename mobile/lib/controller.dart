@@ -129,6 +129,7 @@ class OmputerController extends ChangeNotifier {
   final Set<String> _retiredEpochs = {};
   final Set<String> _startingDrafts = {};
   final Map<String, Json> _catalogs = {};
+  final Map<String, Map<String, AnswerReference>> _answerReferences = {};
   List<Json> get operations => _operations.values.toList()..sort((a, b) => '${b['createdAt'] ?? ''}'.compareTo('${a['createdAt'] ?? ''}'));
   List<Json> operationsFor(String sessionId) => operations.where((entry) => entry['sessionId'] == sessionId).toList();
   StreamSubscription<Object?>? _subscription;
@@ -158,6 +159,7 @@ class OmputerController extends ChangeNotifier {
       _historyRevision++;
       _acceptedResponses.clear(); _acceptedAnswers.clear(); _acceptedAt.clear();
       _catalogs.clear();
+      _answerReferences.clear();
       for (final entry in _transcripts.entries.toList()) {
         entry.value.reset();
         if (entry.value.loading) entry.value.refreshAfterLoad = true;
@@ -174,6 +176,17 @@ class OmputerController extends ChangeNotifier {
       interaction.respondedAt ??= _acceptedAt[interaction.id];
     }
     snapshot = incoming;
+    final currentAnswerKeys = incoming.sessions.where((s) => s.answerSummary != null).map(_answerKey).toSet();
+    _answerReferences.removeWhere((key, _) => !currentAnswerKeys.contains(key));
+    for (final session in incoming.sessions) {
+      final latest = session.answerSummary?.latest;
+      final references = _answerReferences[_answerKey(session)];
+      if (latest != null && references != null) {
+        final old = references[latest.messageId];
+        if (old == null || latest.isAtLeastAsCurrentAs(old)) references[latest.messageId] = latest;
+        _trimAnswerReferences(references);
+      }
+    }
     _catalogs.removeWhere((id, catalog) {
       final session = incoming.session(id);
       return session == null || catalog['journalId'] != session.journalId || catalog['bindingRevision'] != session.bindingRevision;
@@ -304,6 +317,108 @@ class OmputerController extends ChangeNotifier {
   void consumeNavigation() { pendingNavigation = null; }
   void clearError() { error = null; notifyListeners(); }
   Transcript? loadedTranscript(String sessionId) => _transcripts[sessionId];
+  Json answerReadMarker(String sessionId) => object(object(object(localState['sections'])['read'])['session:$sessionId']);
+  int unreadAnswerCount(Session session) => session.answerSummary?.unreadCount(answerReadMarker(session.id), snapshot.journalEpoch) ?? 0;
+  List<Session> get unreadAnswerSessions => snapshot.sessions.where((session) => unreadAnswerCount(session) > 0).toList()
+    ..sort((a, b) => (b.answerSummary?.latest?.timestamp ?? DateTime(1970)).compareTo(a.answerSummary?.latest?.timestamp ?? DateTime(1970)));
+  bool sessionHasUnread(Session session) {
+    if (session.answerSummary != null) return unreadAnswerCount(session) > 0;
+    final transcript = loadedTranscript(session.id);
+    final last = transcript == null || transcript.ids.isEmpty ? null : transcript.messages[transcript.ids.last]?.value;
+    final marker = answerReadMarker(session.id);
+    return last != null && (marker['messageId'] != last.id || marker['revision'] != last.revision);
+  }
+  String? answerPreview(Session session) => session.answerSummary?.latest?.preview ?? session.lastAssistantText;
+  Future<void> markAnswerRead(Session session, AnswerReference answer, {String? expectedEpoch}) => _guard(() async {
+    final identity = _identityRevision;
+    final scope = localState['identity'];
+    final epoch = expectedEpoch ?? snapshot.journalEpoch;
+    final generation = session.answerSummary?.generation;
+    if (generation == null || snapshot.journalEpoch != epoch || snapshot.session(session.id)?.answerSummary?.generation != generation) {
+      throw ControllerFailure('Konuşmanın geçmişi değişti; okuma konumu değiştirilmedi.', 'history_changed');
+    }
+    final state = object(await native.invoke('answerRead', {'sessionId': session.id,
+      'expectedJournalEpoch': epoch, 'generation': generation,
+      'messageId': answer.messageId, 'revision': answer.revision, 'sequence': answer.sequence, 'ordinal': answer.ordinal}));
+    if (_disposed || identity != _identityRevision || scope != localState['identity'] || snapshot.journalEpoch != epoch || snapshot.session(session.id)?.answerSummary?.generation != generation) return;
+    if (state['identity'] != scope) throw ControllerFailure('Bilgisayar eşleştirmesi değişti.', 'connection_changed');
+    final key = 'session:${session.id}';
+    final incoming = object(object(object(state['sections'])['read'])[key]);
+    final current = answerReadMarker(session.id);
+    final currentOrdinal = (current['ordinal'] as num?)?.toInt() ?? 0;
+    final incomingOrdinal = (incoming['ordinal'] as num?)?.toInt() ?? 0;
+    if (current['journalEpoch'] == epoch && current['generation'] == generation &&
+        (currentOrdinal > incomingOrdinal || currentOrdinal == incomingOrdinal &&
+        (current['revision'] as num? ?? 0) > (incoming['revision'] as num? ?? 0))) return;
+    final sections = object(localState['sections']);
+    localState = {...localState, 'sections': {...sections, 'read': {...object(sections['read']), key: incoming}}};
+    notifyListeners();
+  });
+  Future<AnswerReference?> firstUnreadAnswer(Session session) async {
+    final summary = session.answerSummary;
+    if (summary != null && snapshot.session(session.id)?.answerSummary?.generation != summary.generation) {
+      throw ControllerFailure('Konuşmanın geçmişi değişti. Gelen kutusunu yenile.', 'history_changed');
+    }
+    if (summary == null || unreadAnswerCount(session) == 0) return null;
+    final marker = answerReadMarker(session.id);
+    final ordinal = summary.matchesMarker(marker, snapshot.journalEpoch)
+        ? ((marker['ordinal'] as num?)?.toInt() ?? 0).clamp(0, summary.count) : 0;
+    if (ordinal >= summary.count) return summary.latest;
+    final answers = await answerReferences(session, after: ordinal);
+    if (answers.isEmpty) throw ControllerFailure('Okunmamış yanıtın kaynağı alınamadı. Bağlantıyı yenile.', 'answer_unavailable');
+    return answers.first;
+  }
+  String _answerKey(Session session) => jsonEncode([session.id, snapshot.journalEpoch, session.answerSummary?.generation]);
+  void _trimAnswerReferences(Map<String, AnswerReference> references) {
+    while (references.length > 256) { references.remove(references.keys.first); }
+    while (_answerReferences.length > 8) { _answerReferences.remove(_answerReferences.keys.first); }
+  }
+  AnswerReference? cachedAnswerReference(Session session, String messageId) {
+    final latest = session.answerSummary?.latest;
+    final cached = _answerReferences[_answerKey(session)]?[messageId];
+    return latest?.messageId == messageId && (cached == null || latest!.isAtLeastAsCurrentAs(cached)) ? latest : cached;
+  }
+  Future<List<AnswerReference>> answerReferences(Session session, {int after = 0, bool refresh = false}) async {
+    final summary = session.answerSummary;
+    if (summary != null && snapshot.session(session.id)?.answerSummary?.generation != summary.generation) {
+      throw ControllerFailure('Konuşmanın geçmişi değişti. Gelen kutusunu yenile.', 'history_changed');
+    }
+    if (summary == null || after >= summary.count) return [];
+    final key = _answerKey(session), epoch = snapshot.journalEpoch;
+    final cached = _answerReferences[key]?.values.where((ref) => ref.ordinal > after).toList()
+      ?..sort((a, b) => a.ordinal.compareTo(b.ordinal));
+    if (!refresh && cached != null && cached.isNotEmpty && cached.first.ordinal == after + 1) {
+      var contiguous = 1;
+      while (contiguous < cached.length && cached[contiguous].ordinal == after + contiguous + 1) { contiguous++; }
+      return cached.sublist(0, contiguous);
+    }
+    if (!refresh && summary.latest?.ordinal == after + 1) return [summary.latest!];
+    final page = await request('GET', '/v1/sessions/${Uri.encodeComponent(session.id)}/answers?generation=${Uri.encodeQueryComponent(summary.generation)}&after=$after&limit=100');
+    if (_disposed || snapshot.journalEpoch != epoch || page['generation'] != summary.generation || snapshot.session(session.id)?.answerSummary?.generation != summary.generation) {
+      throw ControllerFailure('Konuşmanın geçmişi değişti. Gelen kutusunu yenile.', 'history_changed');
+    }
+    final answers = objects(page['answers']).map(AnswerReference.fromJson).toList();
+    final count = (page['count'] as num?)?.toInt() ?? 0;
+    final identities = <String>{};
+    for (var index = 0; index < answers.length; index++) {
+      final answer = answers[index];
+      if (answer.ordinal != after + index + 1 || answer.ordinal > count ||
+          answer.messageId.isEmpty || !identities.add(answer.messageId) || answer.revision <= 0 || answer.sourceRevision < answer.revision || answer.sequence <= 0 ||
+          index > 0 && answer.sequence <= answers[index - 1].sequence) {
+        throw ControllerFailure('Okunmamış yanıtın kaynak sırası eksik veya değişmiş. Görünümü yenile.', 'answer_unavailable');
+      }
+    }
+    final references = _answerReferences.putIfAbsent(key, () => {});
+    for (final answer in answers) {
+      final old = references[answer.messageId];
+      if (old == null || answer.isAtLeastAsCurrentAs(old)) references[answer.messageId] = answer;
+    }
+    final latest = snapshot.session(session.id)?.answerSummary?.latest;
+    if (latest != null && (references[latest.messageId] == null || latest.isAtLeastAsCurrentAs(references[latest.messageId]!))) references[latest.messageId] = latest;
+    final merged = answers.map((answer) => references[answer.messageId]!).toList();
+    _trimAnswerReferences(references);
+    return merged;
+  }
   Transcript transcript(String sessionId) {
     final store = _transcripts.putIfAbsent(sessionId, Transcript.new);
     _transcriptAccess[sessionId] = ++_accessClock;
@@ -390,6 +505,7 @@ class OmputerController extends ChangeNotifier {
     _acceptedAnswers.clear(); _acceptedAt.clear();
     _responding.clear();
     _operations.clear(); _operationWrites.clear(); _catalogs.clear();
+    _answerReferences.clear();
     _draftWrites = Future.value();
     draftChanges.value = null;
     _reconciliation = null;
@@ -451,10 +567,31 @@ class OmputerController extends ChangeNotifier {
     }
   }
 
+  // Complete the shared load even when its route has gone away. A route-owned
+  // gap may refresh only for a currently retained reader, never just its cache.
+  void finishTranscriptLoad(String sessionId, Transcript store, {required bool requireReader}) {
+    if (_disposed || _transcripts[sessionId] != store) return;
+    store.loading = false;
+    store.notifyListeners();
+    if (store.refreshAfterLoad && (!requireReader || (_readers[sessionId] ?? 0) > 0)) {
+      store.refreshAfterLoad = false;
+      unawaited(loadMessages(sessionId));
+    }
+    _evictTranscripts(protect: sessionId);
+  }
+
   Future<void> loadMessages(String sessionId, {bool older = false}) async {
+    if (_disposed) return;
     final store = transcript(sessionId);
-    if (store.loading || (older && !store.hasMore)) return;
+    if (store.loading) {
+      // A replacement reader can arrive after a reset while the old route's
+      // page still owns loading. Queue latest without admitting a second load.
+      if (!older && !store.loaded) store.refreshAfterLoad = true;
+      return;
+    }
+    if (older && !store.hasMore) return;
     store.loading = true;
+    store.refreshAfterLoad = false;
     store.error = null;
     store.notifyListeners();
     final generation = store.generation;
@@ -467,17 +604,7 @@ class OmputerController extends ChangeNotifier {
       store.loaded = true;
       if (older || !hadHistory) store.hasMore = result['hasMore'] == true;
     } catch (e) { if (generation == store.generation && !_disposed && _transcripts[sessionId] == store) store.error = '$e'; }
-    finally {
-      store.loading = false;
-      if (!_disposed && _transcripts[sessionId] == store) {
-        store.notifyListeners();
-        if (store.refreshAfterLoad) {
-          store.refreshAfterLoad = false;
-          unawaited(loadMessages(sessionId));
-        }
-      }
-      _evictTranscripts(protect: sessionId);
-    }
+    finally { finishTranscriptLoad(sessionId, store, requireReader: false); }
   }
 
   bool _finalOperation(Json value) => value['status'] == 'succeeded' || value['status'] == 'failed';
@@ -947,7 +1074,12 @@ class OmputerController extends ChangeNotifier {
     }
   }
   Future<void> updateLocalState(String section, String key, Object? value) async {
-    localState = object(await _localCall('localStateSet', {'section': section, 'key': key, 'value': value}));
+    final state = object(await _localCall('localStateSet', {'section': section, 'key': key, 'value': value}));
+    final sections = object(localState['sections']);
+    final values = object(sections[section]);
+    final saved = object(object(state['sections'])[section]);
+    if (saved.containsKey(key)) { values[key] = saved[key]; } else { values.remove(key); }
+    localState = {...localState, 'identity': state['identity'], 'sections': {...sections, section: values}};
     notifyListeners();
   }
   Future<List<Json>> pickImages({bool camera = false}) async => objects(await _localCall('pickImages', {'camera': camera}));

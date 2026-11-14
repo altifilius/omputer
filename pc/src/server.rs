@@ -38,6 +38,8 @@ impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         if e.is::<crate::store::MemoryConflict>() {
             Self::new(StatusCode::CONFLICT, "memory_conflict", e)
+        } else if e.is::<crate::store::StaleAnswerGeneration>() {
+            Self::new(StatusCode::CONFLICT, "stale_generation", e)
         } else {
             Self::new(StatusCode::BAD_REQUEST, "request_rejected", e)
         }
@@ -63,6 +65,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/sessions/{id}/commands", get(session_commands))
         .route("/v1/sessions/{id}/operations", get(operations))
         .route("/v1/sessions/{id}/messages", get(messages))
+        .route("/v1/sessions/{id}/answers", get(answers))
         .route("/v1/interactions/{id}/context", get(interaction_context))
         .route("/v1/projects/{id}/files", get(file))
         .route("/v1/projects/{id}/tree", get(project_tree))
@@ -282,6 +285,25 @@ async fn messages(
         page.before.unwrap_or(i64::MAX),
         page.limit.unwrap_or(50).clamp(1, 200),
     )?))
+}
+#[derive(Deserialize)]
+struct AnswerPage {
+    generation: Option<String>,
+    after: Option<i64>,
+    limit: Option<usize>,
+}
+async fn answers(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(page): Query<AnswerPage>,
+) -> Result<Json<Value>, ApiError> {
+    let after = page.after.unwrap_or(0);
+    let generation = page.generation.as_deref().filter(|value| !value.is_empty() && value.len() <= 128);
+    if after < 0 || generation.is_none() {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid_answer_cursor", "A history generation and nonnegative answer ordinal are required"));
+    }
+    app.store.get("session", &id)?;
+    Ok(Json(app.store.answers(&id, generation.unwrap(), after, page.limit.unwrap_or(50))?))
 }
 #[derive(Deserialize)]
 struct FileQuery {
@@ -748,6 +770,73 @@ mod pairing_tests {
                 bridge: Default::default(),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn answers_route_authenticates_pages_exact_refs_and_rejects_stale_generation() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let app = app();
+        app.store.put("session", "s", &json!({"id":"s"}), None).unwrap();
+        for id in ["a", "b", "c"] {
+            app.store.message("s", id, &json!({"id":id,"role":"assistant","stopReason":"stop","content":"same answer"})).unwrap();
+        }
+        let generation = app.store.snapshot().unwrap()["sessions"][0]["answerSummary"]["generation"].as_str().unwrap().to_owned();
+        let device = app.store.issue_device("phone").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let service = app.clone();
+        let server = tokio::spawn(async move { axum::serve(listener, router(service)).await.unwrap() });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client.write_all(format!("GET /v1/snapshot HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n", device["token"].as_str().unwrap()).as_bytes()).await.unwrap();
+        let mut snapshot_response = String::new();
+        client.read_to_string(&mut snapshot_response).await.unwrap();
+        let (headers, body) = snapshot_response.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200"));
+        let snapshot: Value = serde_json::from_str(body).unwrap();
+        let summary = &snapshot["sessions"][0]["answerSummary"];
+        assert_eq!(summary["generation"], generation);
+        assert_eq!(summary["count"], 3);
+        assert_eq!(summary["latest"]["messageId"], "c");
+        assert_eq!(summary["latest"]["preview"], "same answer");
+        for (query, authorized, expected_status, expected_code) in [
+            (format!("generation={generation}&after=0&limit=2"), false, 401, Some("unauthorized")),
+            (format!("generation={generation}&after=0&limit=2"), true, 200, None),
+            (format!("generation={generation}&after=2&limit=1000000"), true, 200, None),
+            ("generation=retired&after=0&limit=2".into(), true, 409, Some("stale_generation")),
+            (format!("generation={generation}&after=-1"), true, 400, Some("invalid_answer_cursor")),
+            ("after=0&limit=2".into(), true, 400, Some("invalid_answer_cursor")),
+        ] {
+            let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+            let authorization = if authorized { format!("Authorization: Bearer {}\r\n", device["token"].as_str().unwrap()) } else { String::new() };
+            client.write_all(format!("GET /v1/sessions/s/answers?{query} HTTP/1.1\r\nHost: localhost\r\n{authorization}Connection: close\r\n\r\n").as_bytes()).await.unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).await.unwrap();
+            let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with(&format!("HTTP/1.1 {expected_status}")), "{response}");
+            let body: Value = serde_json::from_str(body).unwrap();
+            if let Some(code) = expected_code {
+                assert_eq!(body["error"]["code"], code);
+            } else {
+                assert_eq!(body["generation"], generation);
+                assert_eq!(body["count"], 3);
+                if query.contains("after=0") {
+                    assert_eq!(body["answers"].as_array().unwrap().len(), 2);
+                    assert_eq!(body["answers"][0]["messageId"], "a");
+                    assert_eq!(body["answers"][0]["ordinal"], 1);
+                    assert_eq!(body["answers"][0]["preview"], "same answer");
+                    assert_eq!(body["answers"][1]["messageId"], "b");
+                    assert_eq!(body["hasMore"], true);
+                } else {
+                    assert_eq!(body["answers"].as_array().unwrap().len(), 1);
+                    assert_eq!(body["answers"][0]["messageId"], "c");
+                    assert_eq!(body["hasMore"], false);
+                    let page = app.store.messages("s", i64::MAX, 50).unwrap();
+                    assert_eq!(body["answers"][0]["sequence"], page["messages"][2]["sequence"]);
+                    assert_eq!(body["answers"][0]["revision"], page["messages"][2]["revision"]);
+                }
+            }
+        }
+        server.abort();
     }
 
     #[tokio::test]

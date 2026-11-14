@@ -33,6 +33,42 @@ fn message_text(value: &Value) -> String {
         })
         .unwrap_or_default()
 }
+// Keep this projection aligned with mobile/lib/compact_turn.dart. In
+// particular, textSignature is phase metadata, never itself visible text.
+fn answer_phase(block: &Value) -> Option<&'static str> {
+    match block["phase"].as_str() {
+        Some("commentary") => return Some("commentary"),
+        Some("final_answer") => return Some("final_answer"),
+        _ => {}
+    }
+    let signature: Value = serde_json::from_str(block["textSignature"].as_str()?).ok()?;
+    if signature["v"] != 1 || !signature["id"].is_string() { return None; }
+    match signature["phase"].as_str() {
+        Some("commentary") => Some("commentary"),
+        Some("final_answer") => Some("final_answer"),
+        _ => None,
+    }
+}
+fn readable_answer_text(message: &Value) -> Option<String> {
+    // Called only at a definitive completion/history boundary. Missing stop
+    // reasons are legacy answers, not permission to admit live partial text.
+    if message["role"] != "assistant" || !(message["stopReason"] == "stop" || message["stopReason"].is_null()) || message["isError"] == true {
+        return None;
+    }
+    if let Some(text) = message["content"].as_str() {
+        return (!text.trim().is_empty()).then(|| text.trim().to_owned());
+    }
+    let blocks = message["content"].as_array()?;
+    let progress = blocks.iter().any(|block| matches!(block["type"].as_str(), Some("toolCall" | "tool_use")));
+    let text = blocks.iter().filter_map(|block| {
+        let ty = block["type"].as_str().unwrap_or(if block["text"].is_string() { "text" } else { "unknown" });
+        if ty != "text" { return None; }
+        let phase = answer_phase(block);
+        if phase == Some("commentary") || (progress && phase != Some("final_answer")) { return None; }
+        block["text"].as_str().filter(|text| !text.trim().is_empty())
+    }).collect::<Vec<_>>().join("\n");
+    (!text.trim().is_empty()).then(|| text.trim().to_owned())
+}
 fn redact_export(text: &str) -> String {
     let mut private_key = false;
     text.lines()
@@ -75,6 +111,14 @@ impl std::fmt::Display for MemoryConflict {
     }
 }
 impl std::error::Error for MemoryConflict {}
+#[derive(Debug)]
+pub struct StaleAnswerGeneration;
+impl std::fmt::Display for StaleAnswerGeneration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stale_generation: session history changed; reload its answer summary")
+    }
+}
+impl std::error::Error for StaleAnswerGeneration {}
 pub struct Store {
     db: Mutex<Connection>,
     pub server_name: String,
@@ -106,6 +150,14 @@ impl Store {
                 "ALTER TABLE messages ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
+        }
+        let has_completion = db.prepare("PRAGMA table_info(messages)")?.query_map([], |row| row.get::<_,String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|column| column == "answer_complete");
+        if !has_completion {
+            db.execute("ALTER TABLE messages ADD COLUMN answer_complete INTEGER NOT NULL DEFAULT 1", [])?;
+            // Old live rows lack a lifecycle bit. Do not promote the uncertain
+            // running tail on upgrade; an actual end/history refresh will admit
+            // it, without inventing a new message or losing earlier history.
+            db.execute("UPDATE messages SET answer_complete=0 WHERE sequence IN (SELECT (SELECT sequence FROM messages WHERE session_id=objects.id ORDER BY sequence DESC LIMIT 1) FROM objects WHERE kind='session' AND json_extract(body,'$.transport') IS NOT 'archive' AND (json_extract(body,'$.isStreaming')=1 OR json_extract(body,'$.status')='running' OR json_extract(body,'$.workState')='running')) AND json_extract(body,'$.role')='assistant'", [])?;
         }
         let has_last_seen = db
             .prepare("PRAGMA table_info(devices)")?
@@ -146,6 +198,10 @@ impl Store {
             CREATE TRIGGER IF NOT EXISTS transcript_search_delete AFTER DELETE ON messages BEGIN DELETE FROM transcript_search WHERE rowid=old.sequence; END;
             CREATE TRIGGER IF NOT EXISTS transcript_search_update AFTER UPDATE OF body ON messages BEGIN DELETE FROM transcript_search WHERE rowid=old.sequence; INSERT INTO transcript_search(rowid,text) VALUES(new.sequence,new.body); END;
             CREATE TABLE IF NOT EXISTS store_migrations(name TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS session_answer_state(session_id TEXT PRIMARY KEY,generation TEXT NOT NULL,summary TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS answer_index(session_id TEXT NOT NULL,id TEXT NOT NULL,sequence INTEGER NOT NULL,revision INTEGER NOT NULL,source_revision INTEGER NOT NULL,ordinal INTEGER NOT NULL,preview TEXT NOT NULL,timestamp TEXT,text_hash TEXT NOT NULL,PRIMARY KEY(session_id,id));
+            CREATE INDEX IF NOT EXISTS answer_index_ordinal ON answer_index(session_id,ordinal);
+            CREATE INDEX IF NOT EXISTS answer_index_sequence ON answer_index(session_id,sequence);
             UPDATE objects SET body=json_set(body,'$.memoryRevision',0) WHERE kind='project' AND json_type(body,'$.memoryRevision') IS NULL;")?;
         // Upgrade existing transcripts once; all later writes maintain the FTS index transactionally.
         if db.query_row(
@@ -157,6 +213,13 @@ impl Store {
             db.execute_batch("BEGIN IMMEDIATE; DELETE FROM transcript_search; INSERT INTO transcript_search(rowid,text) SELECT sequence,body FROM messages; INSERT INTO store_migrations VALUES('transcript_search_v1'); COMMIT;")?;
         }
         let tx = db.transaction()?;
+        let has_source_revision = tx.prepare("PRAGMA table_info(answer_index)")?.query_map([], |row| row.get::<_,String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|column| column == "source_revision");
+        if !has_source_revision {
+            // Preserve existing readable identity and hashes; only populate the
+            // newly separated source version from the authoritative messages.
+            tx.execute("ALTER TABLE answer_index ADD COLUMN source_revision INTEGER NOT NULL DEFAULT 0", [])?;
+            tx.execute("UPDATE answer_index SET source_revision=COALESCE((SELECT revision FROM messages WHERE messages.session_id=answer_index.session_id AND messages.id=answer_index.id),revision)", [])?;
+        }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS journal_state(id INTEGER PRIMARY KEY CHECK(id=1),epoch TEXT NOT NULL);")?;
         if tx
             .query_row("SELECT epoch FROM journal_state WHERE id=1", [], |r| {
@@ -169,6 +232,31 @@ impl Store {
                 "INSERT INTO journal_state(id,epoch) VALUES(1,?1)",
                 [Uuid::new_v4().to_string()],
             )?;
+        }
+        if tx.query_row("SELECT count(*) FROM store_migrations WHERE name='completed_answers_v1'", [], |row| row.get::<_,i64>(0))? == 0 {
+            // One streaming migration over all persisted history, never a
+            // latest-page cutoff or a transcript scan on each token/update.
+            let mut sessions = tx.prepare("SELECT id FROM objects WHERE kind='session'")?;
+            for id in sessions.query_map([], |row| row.get::<_,String>(0))? {
+                Self::ensure_answer_state(&tx, &id?)?;
+            }
+            let mut messages = tx.prepare("SELECT session_id,id,body,sequence,revision FROM messages WHERE answer_complete=1 ORDER BY sequence")?;
+            let rows = messages.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,row.get::<_,i64>(4)?)))?;
+            for row in rows {
+                let (session,id,body,sequence,revision) = row?;
+                Self::index_answer(&tx, &session, &id, &serde_json::from_str(&body)?, sequence, revision)?;
+            }
+            let mut states = tx.prepare("SELECT session_id FROM session_answer_state")?;
+            for id in states.query_map([], |row| row.get::<_,String>(0))? {
+                Self::publish_answer_summary(&tx, &id?)?;
+            }
+            tx.execute("INSERT INTO store_migrations VALUES('completed_answers_v1')", [])?;
+        }
+        if !has_source_revision {
+            let mut states = tx.prepare("SELECT session_id FROM session_answer_state")?;
+            for id in states.query_map([], |row| row.get::<_,String>(0))? {
+                Self::publish_answer_summary(&tx, &id?)?;
+            }
         }
         let stamp = now();
         let pending = tx
@@ -215,6 +303,79 @@ impl Store {
         let rows = stmt.query_map([kind], |r| r.get::<_, String>(0))?;
         rows.map(|s| Ok(serde_json::from_str(&s?)?)).collect()
     }
+    fn ensure_answer_state(db: &Connection, session: &str) -> Result<()> {
+        if db.query_row("SELECT 1 FROM session_answer_state WHERE session_id=?1", [session], |_| Ok(())).optional()?.is_none() {
+            let generation = Uuid::new_v4().to_string();
+            let summary = json!({"generation":generation,"count":0,"latest":null});
+            db.execute("INSERT INTO session_answer_state(session_id,generation,summary) VALUES(?1,?2,?3)", params![session,generation,summary.to_string()])?;
+        }
+        Ok(())
+    }
+    fn answer_summary_db(db: &Connection, session: &str) -> Result<Option<Value>> {
+        let body: Option<String> = db.query_row("SELECT summary FROM session_answer_state WHERE session_id=?1", [session], |row| row.get(0)).optional()?;
+        body.map(|body| serde_json::from_str(&body).map_err(Into::into)).transpose()
+    }
+    fn answer_reference(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+        let mut reference = json!({"messageId":row.get::<_,String>(0)?,"revision":row.get::<_,i64>(1)?,"sequence":row.get::<_,i64>(2)?,"ordinal":row.get::<_,i64>(3)?,"preview":row.get::<_,String>(4)?});
+        if let Some(timestamp) = row.get::<_,Option<String>>(5)? {
+            reference["timestamp"] = json!(timestamp);
+        }
+        let source_revision = row.get::<_,i64>(6)?;
+        if source_revision != row.get::<_,i64>(1)? {
+            reference["sourceRevision"] = json!(source_revision);
+        }
+        Ok(reference)
+    }
+    fn publish_answer_summary(db: &Connection, session: &str) -> Result<()> {
+        let previous = Self::answer_summary_db(db, session)?.context("Answer state missing")?;
+        let generation: String = db.query_row("SELECT generation FROM session_answer_state WHERE session_id=?1", [session], |row| row.get(0))?;
+        let latest = db.query_row("SELECT id,revision,sequence,ordinal,preview,timestamp,source_revision FROM answer_index WHERE session_id=?1 ORDER BY ordinal DESC LIMIT 1", [session], Self::answer_reference).optional()?.unwrap_or(Value::Null);
+        let summary = json!({"generation":generation,"count":latest["ordinal"].as_i64().unwrap_or(0),"latest":latest});
+        if summary == previous { return Ok(()); }
+        db.execute("UPDATE session_answer_state SET summary=?2 WHERE session_id=?1", params![session,summary.to_string()])?;
+        let body: Option<String> = db.query_row("SELECT body FROM objects WHERE kind='session' AND id=?1", [session], |row| row.get(0)).optional()?;
+        if let Some(body) = body {
+            let value: Value = serde_json::from_str(&body)?;
+            Self::append(db, "session.updated", Some(session), value["projectId"].as_str(), &value)?;
+        }
+        Ok(())
+    }
+    fn index_answer(db: &Connection, session: &str, id: &str, message: &Value, sequence: i64, revision: i64) -> Result<()> {
+        let Some(text) = readable_answer_text(message) else {
+            let ordinal: Option<i64> = db.query_row("SELECT ordinal FROM answer_index WHERE session_id=?1 AND id=?2", params![session,id], |row| row.get(0)).optional()?;
+            if let Some(ordinal) = ordinal {
+                Self::rebase_answer_generation(db, session)?;
+                db.execute("DELETE FROM answer_index WHERE session_id=?1 AND id=?2", params![session,id])?;
+                db.execute("UPDATE answer_index SET ordinal=ordinal-1 WHERE session_id=?1 AND ordinal>?2", params![session,ordinal])?;
+            }
+            return Ok(());
+        };
+        Self::ensure_answer_state(db, session)?;
+        let hash = security::hash(&text);
+        let previous: Option<String> = db.query_row("SELECT text_hash FROM answer_index WHERE session_id=?1 AND id=?2", params![session,id], |row| row.get(0)).optional()?;
+        if previous.as_deref() == Some(hash.as_str()) {
+            // Read/delivery identity follows readable text, not hidden usage or
+            // commentary changes. Track the exact rendered source separately.
+            db.execute("UPDATE answer_index SET source_revision=?3 WHERE session_id=?1 AND id=?2 AND source_revision!=?3", params![session,id,revision])?;
+            return Ok(());
+        }
+        if db.query_row("SELECT 1 FROM answer_index WHERE session_id=?1 AND sequence>?2 LIMIT 1", params![session,sequence], |_| Ok(())).optional()?.is_some() {
+            // Only latest revisions fit in a read marker. Rebase when an older
+            // answer changes so a read-through latest cannot hide corrections.
+            Self::rebase_answer_generation(db, session)?;
+        }
+        let ordinal = db.query_row("SELECT ordinal+1 FROM answer_index WHERE session_id=?1 AND sequence<?2 ORDER BY sequence DESC LIMIT 1", params![session,sequence], |row| row.get::<_,i64>(0)).optional()?.unwrap_or(1);
+        if previous.is_none() {
+            db.execute("UPDATE answer_index SET ordinal=ordinal+1 WHERE session_id=?1 AND ordinal>=?2", params![session,ordinal])?;
+        }
+        db.execute("INSERT INTO answer_index(session_id,id,sequence,revision,source_revision,ordinal,preview,timestamp,text_hash) VALUES(?1,?2,?3,?4,?4,?5,?6,?7,?8) ON CONFLICT(session_id,id) DO UPDATE SET revision=excluded.revision,source_revision=excluded.source_revision,preview=excluded.preview,timestamp=excluded.timestamp,text_hash=excluded.text_hash", params![session,id,sequence,revision,ordinal,utf8_prefix(&text,512),message["timestamp"].as_str(),hash])?;
+        Ok(())
+    }
+    fn rebase_answer_generation(db: &Connection, session: &str) -> Result<()> {
+        // At most one rebase per batch; publish installs the new baseline.
+        db.execute("UPDATE session_answer_state SET generation=?2 WHERE session_id=?1 AND generation=json_extract(summary,'$.generation')", params![session,Uuid::new_v4().to_string()])?;
+        Ok(())
+    }
     fn append(
         db: &Connection,
         ty: &str,
@@ -226,6 +387,12 @@ impl Store {
             db.query_row("SELECT epoch FROM journal_state WHERE id=1", [], |r| {
                 r.get(0)
             })?;
+        let mut enriched;
+        let data = if ty == "session.updated" && let Some(session) = session && let Some(summary) = Self::answer_summary_db(db, session)? {
+            enriched = data.clone();
+            enriched["answerSummary"] = summary;
+            &enriched
+        } else { data };
         let event = json!({"journalEpoch":epoch,"type":ty,"sessionId":session,"projectId":project,"data":data,"createdAt":now()});
         db.execute("INSERT INTO journal(body) VALUES(?1)", [event.to_string()])?;
         let mut event = event;
@@ -309,6 +476,19 @@ impl Store {
     pub fn put(&self, kind: &str, id: &str, body: &Value, event_type: Option<&str>) -> Result<()> {
         let mut db = self.db.lock();
         let tx = db.transaction()?;
+        if kind == "session" { Self::ensure_answer_state(&tx, id)?; }
+        if kind == "session" {
+            let previous: Option<String> = tx.query_row("SELECT body FROM objects WHERE kind='session' AND id=?1", [id], |row| row.get(0)).optional()?;
+            if let Some(previous) = previous {
+                let previous: Value = serde_json::from_str(&previous)?;
+                let old = previous["journalId"].as_str().or(previous["runtimeSessionId"].as_str());
+                let new = body["journalId"].as_str().or(body["runtimeSessionId"].as_str());
+                if matches!((old,new), (Some(old),Some(new)) if old != new) {
+                    Self::rebase_answer_generation(&tx, id)?;
+                    Self::publish_answer_summary(&tx, id)?;
+                }
+            }
+        }
         let mut redacted;
         let body = if kind == "interaction" && (body["secret"] == true || body["sensitiveContext"] == true) {
             redacted = body.clone();
@@ -656,7 +836,8 @@ impl Store {
             db.query_row("SELECT COALESCE(MAX(sequence),0) FROM journal", [], |r| {
                 r.get(0)
             })?;
-        let sessions = Self::objects(&db, "session")?;
+        let mut statement = db.prepare("SELECT json_set(objects.body,'$.answerSummary',json(state.summary)) FROM objects JOIN session_answer_state AS state ON state.session_id=objects.id WHERE kind='session' ORDER BY objects.id")?;
+        let sessions = statement.query_map([], |row| row.get::<_,String>(0))?.map(|row| Ok(serde_json::from_str::<Value>(&row?)?)).collect::<Result<Vec<_>>>()?;
         let interactions = Self::objects(&db, "interaction")?;
         let mut projects = Self::objects(&db, "project")?;
         for p in &mut projects {
@@ -700,6 +881,11 @@ impl Store {
         .collect()
     }
     pub fn message(&self, session: &str, id: &str, message: &Value) -> Result<Value> {
+        self.message_with_completion(session, id, message, true)
+    }
+    /// Live ingestion must pass false for message_start/message_update; many
+    /// providers already put stopReason=stop on incomplete accumulating frames.
+    pub fn message_with_completion(&self, session: &str, id: &str, message: &Value, complete: bool) -> Result<Value> {
         let mut db = self.db.lock();
         let tx = db.transaction()?;
         let serialized = message.to_string();
@@ -716,9 +902,15 @@ impl Store {
             let mut value = message.clone();
             value["sequence"] = json!(sequence);
             value["revision"] = json!(revision);
+            tx.execute("UPDATE messages SET answer_complete=?3 WHERE session_id=?1 AND id=?2 AND answer_complete!=?3", params![session,id,complete])?;
+            if complete {
+                Self::index_answer(&tx, session, id, &value, *sequence, *revision)?;
+                if Self::answer_summary_db(&tx, session)?.is_some() { Self::publish_answer_summary(&tx, session)?; }
+            }
+            tx.commit()?;
             return Ok(value);
         }
-        tx.execute("INSERT INTO messages(session_id,id,body,revision) VALUES(?1,?2,?3,1) ON CONFLICT(session_id,id) DO UPDATE SET body=excluded.body,revision=messages.revision+1",params![session,id,serialized])?;
+        tx.execute("INSERT INTO messages(session_id,id,body,revision,answer_complete) VALUES(?1,?2,?3,1,?4) ON CONFLICT(session_id,id) DO UPDATE SET body=excluded.body,revision=messages.revision+1,answer_complete=excluded.answer_complete",params![session,id,serialized,complete])?;
         let (seq, revision): (i64, i64) = tx.query_row(
             "SELECT sequence,revision FROM messages WHERE session_id=?1 AND id=?2",
             params![session, id],
@@ -728,6 +920,10 @@ impl Store {
         message["sequence"] = json!(seq);
         message["revision"] = json!(revision);
         Self::append(&tx, "message.upsert", Some(session), None, &message)?;
+        if complete {
+            Self::index_answer(&tx, session, id, &message, seq, revision)?;
+            if Self::answer_summary_db(&tx, session)?.is_some() { Self::publish_answer_summary(&tx, session)?; }
+        }
         tx.commit()?;
         Ok(message)
     }
@@ -739,8 +935,9 @@ impl Store {
         Ok(())
     }
     fn replace_messages_db(tx: &Connection, session: &str, messages: &[Value]) -> Result<()> {
+        Self::ensure_answer_state(tx, session)?;
         let mut statement = tx.prepare(
-            "SELECT id,body,sequence,revision FROM messages WHERE session_id=?1 ORDER BY sequence",
+            "SELECT id,body,sequence,revision,answer_complete FROM messages WHERE session_id=?1 ORDER BY sequence",
         )?;
         let previous = statement
             .query_map([session], |row| {
@@ -749,6 +946,7 @@ impl Store {
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, bool>(4)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -766,18 +964,22 @@ impl Store {
             && previous
                 .iter()
                 .zip(messages)
-                .all(|((id, _, _, _), message)| message["id"].as_str() == Some(id.as_str()))
+                .all(|((id, _, _, _, _), message)| message["id"].as_str() == Some(id.as_str()))
         {
             for (index, message) in messages.iter().enumerate() {
                 let body = message.to_string();
                 let id = message["id"].as_str().unwrap();
-                let (sequence, revision) = if let Some((_, old, sequence, revision)) =
+                let (sequence, revision) = if let Some((_, old, sequence, revision, complete)) =
                     previous.get(index)
                 {
                     if old == &body {
+                        if !complete {
+                            tx.execute("UPDATE messages SET answer_complete=1 WHERE session_id=?1 AND id=?2", params![session,id])?;
+                            Self::index_answer(tx, session, id, message, *sequence, *revision)?;
+                        }
                         continue;
                     }
-                    tx.execute("UPDATE messages SET body=?3,revision=revision+1 WHERE session_id=?1 AND id=?2", params![session,id,body])?;
+                    tx.execute("UPDATE messages SET body=?3,revision=revision+1,answer_complete=1 WHERE session_id=?1 AND id=?2", params![session,id,body])?;
                     (*sequence, revision + 1)
                 } else {
                     tx.execute(
@@ -790,9 +992,13 @@ impl Store {
                 view["sequence"] = json!(sequence);
                 view["revision"] = json!(revision);
                 Self::append(tx, "message.upsert", Some(session), None, &view)?;
+                Self::index_answer(tx, session, id, message, sequence, revision)?;
             }
+            Self::publish_answer_summary(tx, session)?;
             return Ok(());
         }
+        tx.execute("DELETE FROM answer_index WHERE session_id=?1", [session])?;
+        tx.execute("UPDATE session_answer_state SET generation=?2 WHERE session_id=?1", params![session,Uuid::new_v4().to_string()])?;
         tx.execute("DELETE FROM messages WHERE session_id=?1", [session])?;
         Self::append(
             tx,
@@ -807,11 +1013,14 @@ impl Store {
                 "INSERT INTO messages(session_id,id,body,revision) VALUES(?1,?2,?3,1)",
                 params![session, id, message.to_string()],
             )?;
+            let sequence = tx.last_insert_rowid();
             let mut view = message.clone();
-            view["sequence"] = json!(tx.last_insert_rowid());
+            view["sequence"] = json!(sequence);
             view["revision"] = json!(1);
             Self::append(tx, "message.upsert", Some(session), None, &view)?;
+            Self::index_answer(tx, session, id, message, sequence, 1)?;
         }
+        Self::publish_answer_summary(tx, session)?;
         Ok(())
     }
     pub(crate) fn refresh_archive_status(&self, expected: &Value) -> Result<()> {
@@ -922,15 +1131,13 @@ impl Store {
                 .to_owned());
         }
         Self::replace_messages_db(&tx, id, messages)?;
-        tx.execute("INSERT INTO objects(kind,id,body) VALUES('session',?1,?2) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body", params![id,session.to_string()])?;
-        Self::append(
-            &tx,
-            "session.updated",
-            Some(id),
-            session["projectId"].as_str(),
-            session,
-        )?;
-        Self::refresh_projects(&tx)?;
+        let previous: Option<String> = tx.query_row("SELECT body FROM objects WHERE kind='session' AND id=?1", [id], |row| row.get(0)).optional()?;
+        let body = session.to_string();
+        if previous.as_deref() != Some(body.as_str()) {
+            tx.execute("INSERT INTO objects(kind,id,body) VALUES('session',?1,?2) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body", params![id,body])?;
+            Self::append(&tx, "session.updated", Some(id), session["projectId"].as_str(), session)?;
+            Self::refresh_projects(&tx)?;
+        }
         tx.commit()?;
         Ok(id.to_owned())
     }
@@ -956,6 +1163,20 @@ impl Store {
         messages.truncate(limit);
         messages.reverse();
         Ok(json!({"messages":messages,"hasMore":more}))
+    }
+    pub fn answers(&self, session: &str, generation: &str, after: i64, limit: usize) -> Result<Value> {
+        if after < 0 { bail!("Answer ordinal must be nonnegative"); }
+        let db = self.db.lock();
+        let summary = Self::answer_summary_db(&db, session)?.context("Unknown session answer history")?;
+        if summary["generation"].as_str() != Some(generation) {
+            return Err(StaleAnswerGeneration.into());
+        }
+        let limit = limit.clamp(1, 100);
+        let mut statement = db.prepare("SELECT id,revision,sequence,ordinal,preview,timestamp,source_revision FROM answer_index WHERE session_id=?1 AND ordinal>?2 ORDER BY ordinal LIMIT ?3")?;
+        let mut answers = statement.query_map(params![session,after,limit+1], Self::answer_reference)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let more = answers.len() > limit;
+        answers.truncate(limit);
+        Ok(json!({"generation":summary["generation"],"count":summary["count"],"answers":answers,"hasMore":more}))
     }
     pub fn create_pair(&self) -> Result<(String, String)> {
         let code = security::secret();
@@ -1559,6 +1780,430 @@ mod tests {
         Store::open(Path::new(":memory:"), "test".into()).unwrap()
     }
     #[test]
+    fn answer_summary_is_available_without_opening_transcript() {
+        let store = store();
+        store.put("session", "s", &json!({"id":"s","transport":"rpc","status":"idle"}), None).unwrap();
+        let message = json!({"id":"answer","role":"assistant","stopReason":"stop","content":[{"type":"text","text":"Completed answer"}],"timestamp":"2026-11-14T10:00:00Z"});
+        let saved = store.message("s", "answer", &message).unwrap();
+        let snapshot = store.snapshot().unwrap();
+        let summary = &snapshot["sessions"][0]["answerSummary"];
+        assert_eq!(summary["count"], 1, "unopened sessions must expose completed answers");
+        assert!(summary["generation"].as_str().is_some_and(|value| !value.is_empty()));
+        assert_eq!(summary["latest"], json!({"messageId":"answer","revision":saved["revision"],"sequence":saved["sequence"],"ordinal":1,"preview":"Completed answer","timestamp":"2026-11-14T10:00:00Z"}));
+        let event = store.journal(0, 100).unwrap().into_iter().find(|event| event["type"] == "session.updated").expect("summary changes must reach unopened sessions incrementally");
+        assert_eq!(event["data"]["answerSummary"], *summary);
+    }
+    #[test]
+    fn answer_summary_excludes_commentary_signatures_and_tool_progress() {
+        let store = store();
+        store.put("session", "s", &json!({"id":"s"}), None).unwrap();
+        for (id, content, stop) in [
+            ("commentary", json!([{"type":"text","phase":"commentary","text":"private progress"}]), "stop"),
+            ("signature", json!([{"type":"text","textSignature":"{\"v\":1,\"id\":\"part\",\"phase\":\"commentary\"}","text":"signed progress"}]), "stop"),
+            ("thinking", json!([{"type":"thinking","thinking":"private thoughts"}]), "stop"),
+            ("tools", json!([{"type":"text","text":"tool progress"},{"type":"toolCall","arguments":{"secret":"payload"}}]), "stop"),
+            ("tool-use", json!([{"type":"text","text":"tool progress"}]), "toolUse"),
+            ("error", json!([{"type":"text","text":"failed"}]), "error"),
+            ("aborted", json!([{"type":"text","text":"interrupted"}]), "aborted"),
+            ("length", json!([{"type":"text","text":"truncated"}]), "length"),
+        ] {
+            store.message("s", id, &json!({"id":id,"role":"assistant","content":content,"stopReason":stop})).unwrap();
+        }
+        assert_eq!(store.snapshot().unwrap()["sessions"][0]["answerSummary"]["count"], 0);
+        let message = json!({"id":"safe","role":"assistant","stopReason":"stop","content":[
+            {"type":"text","text":"commentary","phase":"commentary"},
+            {"type":"thinking","thinking":"thoughts"},
+            {"type":"toolCall","arguments":{"secret":"payload"}},
+            {"type":"text","text":"unmarked progress"},
+            {"type":"text","textSignature":"{\"v\":1,\"id\":\"part\",\"phase\":\"final_answer\"}","text":"Only final answer"}
+        ]});
+        store.message("s", "safe", &message).unwrap();
+        let summary = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_eq!(summary["count"], 1);
+        assert_eq!(summary["latest"]["preview"], "Only final answer");
+        let mut metadata_only = message.clone();
+        metadata_only["content"][0]["text"] = json!("different commentary");
+        let saved = store.message("s", "safe", &metadata_only).unwrap();
+        let changed = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_eq!(changed["count"], summary["count"]);
+        assert_eq!(changed["generation"], summary["generation"]);
+        assert_eq!(changed["latest"]["preview"], summary["latest"]["preview"]);
+        assert_eq!(changed["latest"]["ordinal"], summary["latest"]["ordinal"]);
+        assert_eq!(changed["latest"]["revision"], summary["latest"]["revision"], "commentary must not invalidate read or notification delivery identity");
+        assert_eq!(changed["latest"]["sourceRevision"], saved["revision"]);
+        let page = store.answers("s", changed["generation"].as_str().unwrap(), 0, 50).unwrap();
+        let messages = store.messages("s", i64::MAX, 50).unwrap();
+        let source = messages["messages"].as_array().unwrap().iter().find(|message| message["id"] == "safe").unwrap();
+        assert_eq!(page["answers"][0], changed["latest"]);
+        assert_eq!(page["answers"][0].get("sourceRevision").unwrap_or(&page["answers"][0]["revision"]), &source["revision"]);
+        let cursor = store.snapshot().unwrap()["sequence"].as_i64().unwrap();
+        store.message("s", "safe", &metadata_only).unwrap();
+        assert!(store.journal(cursor, 100).unwrap().is_empty());
+    }
+    #[test]
+    fn answer_latest_metadata_only_change_preserves_read_revision_and_tracks_source_revision() {
+        let store = store();
+        store.put("session", "s", &json!({"id":"s"}), None).unwrap();
+        let mut answer = json!({"id":"a","role":"assistant","stopReason":"stop","content":"Completed answer","usage":{"input":10,"output":20}});
+        let first = store.message_with_completion("s", "a", &answer, true).unwrap();
+        let summary = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_eq!(first["revision"], 1);
+        answer["usage"]["output"] = json!(25);
+        let saved = store.message_with_completion("s", "a", &answer, true).unwrap();
+        assert_eq!(saved["revision"], 2, "only the changed source body advances its revision");
+        let source = store.messages("s", i64::MAX, 50).unwrap()["messages"][0].clone();
+        assert_eq!(source["usage"], answer["usage"]);
+        assert_eq!(source["revision"], saved["revision"]);
+        let changed = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_eq!(changed["count"], summary["count"]);
+        assert_eq!(changed["generation"], summary["generation"]);
+        let mut expected = summary["latest"].clone();
+        expected["sourceRevision"] = source["revision"].clone();
+        assert_eq!(changed["latest"], expected, "metadata-only source changes must not make the readable answer unread again");
+        assert_eq!(changed["latest"]["revision"], 1);
+        assert_eq!(changed["latest"]["sourceRevision"], 2);
+        let page = store.answers("s", changed["generation"].as_str().unwrap(), 0, 50).unwrap();
+        assert_eq!(page["answers"][0], changed["latest"]);
+        assert_eq!(page["answers"][0]["sourceRevision"], source["revision"]);
+        let latest_update = store.journal(0, 100).unwrap().into_iter().filter(|event| event["type"] == "session.updated").last().unwrap();
+        assert_eq!(latest_update["data"]["answerSummary"], changed);
+        let cursor = store.snapshot().unwrap()["sequence"].as_i64().unwrap();
+        assert_eq!(store.message_with_completion("s", "a", &answer, true).unwrap()["revision"], saved["revision"]);
+        assert!(store.journal(cursor, 100).unwrap().is_empty());
+        // A subsequent readable amendment uses its actual source revision,
+        // rather than a separate sequential counter, and invalidates read/delivery.
+        answer["content"] = json!("Amended completed answer");
+        let amended_source = store.message_with_completion("s", "a", &answer, true).unwrap();
+        assert_eq!(amended_source["revision"], 3);
+        let amended = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        let mut expected = summary["latest"].clone();
+        expected["revision"] = amended_source["revision"].clone();
+        expected["preview"] = answer["content"].clone();
+        assert_eq!(amended["latest"], expected);
+        assert_eq!(amended["count"], summary["count"]);
+        assert_eq!(amended["generation"], summary["generation"]);
+        let page = store.answers("s", amended["generation"].as_str().unwrap(), 0, 50).unwrap();
+        assert_eq!(page["answers"][0], amended["latest"]);
+        assert_eq!(page["answers"][0].get("sourceRevision").unwrap_or(&page["answers"][0]["revision"]), &amended_source["revision"]);
+    }
+    #[test]
+    fn answer_older_metadata_only_change_tracks_source_revision_without_invalidating_later_read() {
+        let store = store();
+        store.put("session", "s", &json!({"id":"s"}), None).unwrap();
+        let mut history = [json!({"id":"a","role":"assistant","stopReason":"stop","content":"First answer","usage":{"output":20}}), json!({"id":"b","role":"assistant","stopReason":"stop","content":"Latest answer"})];
+        store.replace_messages("s", &history).unwrap();
+        let summary = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        let generation = summary["generation"].as_str().unwrap();
+        let read_latest = summary["latest"].clone();
+        let before = store.answers("s", generation, 0, 50).unwrap();
+        history[0]["usage"]["output"] = json!(25);
+        store.replace_messages("s", &history).unwrap();
+        // A later read-through remains valid: only older source metadata changed.
+        assert_eq!(store.snapshot().unwrap()["sessions"][0]["answerSummary"], summary);
+        let page = store.answers("s", generation, 0, 50).unwrap();
+        let messages = store.messages("s", i64::MAX, 50).unwrap();
+        let source = &messages["messages"][0];
+        assert_eq!(source["usage"], history[0]["usage"]);
+        assert_eq!(source["revision"], 2);
+        assert_eq!(page["answers"][0]["revision"], 1, "older metadata must preserve readable revision as well as history generation");
+        assert_eq!(page["answers"][0]["sourceRevision"], source["revision"]);
+        let mut expected = before["answers"][0].clone();
+        expected["sourceRevision"] = source["revision"].clone();
+        assert_eq!(page["answers"][0], expected);
+        assert_eq!(page["answers"][1], read_latest);
+        assert_eq!(store.answers("s", generation, read_latest["ordinal"].as_i64().unwrap(), 50).unwrap()["answers"], json!([]));
+        let cursor = store.snapshot().unwrap()["sequence"].as_i64().unwrap();
+        store.replace_messages("s", &history).unwrap();
+        assert_eq!(store.messages("s", i64::MAX, 50).unwrap(), messages);
+        assert!(store.journal(cursor, 100).unwrap().is_empty());
+    }
+    #[test]
+    fn answer_history_counts_distinct_replies_and_keeps_append_amend_identity() {
+        let store = store();
+        store.put("session", "s", &json!({"id":"s"}), None).unwrap();
+        let first = json!({"id":"a","role":"assistant","content":"Same answer","stopReason":"stop"});
+        let second = json!({"id":"b","role":"assistant","content":"Same answer","stopReason":"stop"});
+        let third = json!({"id":"c","role":"assistant","content":"Legacy answer"});
+        let mut history = vec![first, second, third];
+        store.replace_messages("s", &history).unwrap();
+        let summary = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_eq!(summary["count"], 3);
+        assert_eq!(summary["latest"]["messageId"], "c");
+        assert_eq!(summary["latest"]["ordinal"], 3);
+        let cursor = store.snapshot().unwrap()["sequence"].as_i64().unwrap();
+        store.replace_messages("s", &history).unwrap();
+        assert!(store.journal(cursor, 100).unwrap().is_empty());
+        history[2]["content"] = json!("Amended final");
+        history.push(json!({"id":"user","role":"user","content":"Next request"}));
+        store.replace_messages("s", &history).unwrap();
+        let amended = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_eq!(amended["generation"], summary["generation"]);
+        assert_eq!(amended["count"], 3);
+        assert_eq!(amended["latest"]["ordinal"], 3);
+        assert_eq!(amended["latest"]["sequence"], summary["latest"]["sequence"]);
+        assert_eq!(amended["latest"]["revision"], 2);
+        assert_eq!(amended["latest"]["preview"], "Amended final");
+        store.replace_messages("s", &history[..2]).unwrap();
+        let reset = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_ne!(reset["generation"], summary["generation"]);
+        assert_eq!(reset["count"], 2);
+        assert_eq!(reset["latest"]["messageId"], "b");
+    }
+    #[test]
+    fn answer_backfill_is_complete_idempotent_and_preserves_generation_on_reopen() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("answers.sqlite");
+        {
+            let store = Store::open(&path, "test".into()).unwrap();
+            store.put("session", "s", &json!({"id":"s","transport":"archive","status":"closed"}), None).unwrap();
+            let db = store.db.lock();
+            for index in 0..305 {
+                let id = format!("answer-{index}");
+                let message = json!({"id":id,"role":"assistant","content":"ş🦀".repeat(200)});
+                db.execute("INSERT INTO messages(session_id,id,body,revision) VALUES('s',?1,?2,7)", params![id,message.to_string()]).unwrap();
+            }
+            db.execute("DELETE FROM session_answer_state", []).unwrap();
+            db.execute("DELETE FROM answer_index", []).unwrap();
+            db.execute("DELETE FROM store_migrations WHERE name='completed_answers_v1'", []).unwrap();
+        }
+        let store = Store::open(&path, "test".into()).unwrap();
+        let snapshot = store.snapshot().unwrap();
+        let summary = snapshot["sessions"][0]["answerSummary"].clone();
+        assert_eq!(summary["count"], 305, "backfill must not use a latest-page cutoff");
+        assert_eq!(summary["latest"]["messageId"], "answer-304");
+        assert_eq!(summary["latest"]["revision"], 7);
+        assert!(summary["latest"]["preview"].as_str().unwrap().len() <= 512);
+        drop(store);
+        let reopened = Store::open(&path, "test".into()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap()["sessions"][0]["answerSummary"], summary);
+        assert_eq!(reopened.snapshot().unwrap()["sequence"], snapshot["sequence"]);
+    }
+    #[test]
+    fn answer_source_revision_migrates_existing_index_without_resetting_readable_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("answer-source-migration.sqlite");
+        let mut answer = json!({"id":"a","role":"assistant","stopReason":"stop","content":"Persisted readable answer","usage":{"output":20}});
+        let (baseline, text_hash) = {
+            let store = Store::open(&path, "test".into()).unwrap();
+            store.put("session", "s", &json!({"id":"s","transport":"archive","status":"closed"}), None).unwrap();
+            store.message("s", "a", &answer).unwrap();
+            let baseline = store.snapshot().unwrap();
+            let db = store.db.lock();
+            let text_hash: String = db.query_row("SELECT text_hash FROM answer_index WHERE session_id='s' AND id='a'", [], |row| row.get(0)).unwrap();
+            // Model the existing feature schema: the indexed readable answer
+            // is revision 1, while its actual stored metadata is revision 2.
+            db.execute_batch("ALTER TABLE answer_index DROP COLUMN source_revision").unwrap();
+            answer["usage"]["output"] = json!(25);
+            db.execute("UPDATE messages SET body=?1,revision=2 WHERE session_id='s' AND id='a'", [answer.to_string()]).unwrap();
+            (baseline, text_hash)
+        };
+        let store = Store::open(&path, "test".into()).unwrap();
+        let snapshot = store.snapshot().unwrap();
+        let summary = &snapshot["sessions"][0]["answerSummary"];
+        let mut expected = baseline["sessions"][0]["answerSummary"].clone();
+        expected["latest"]["sourceRevision"] = json!(2);
+        assert_eq!(*summary, expected, "upgrade must retain readable revision, generation, ordinal, preview and count");
+        let page = store.answers("s", summary["generation"].as_str().unwrap(), 0, 50).unwrap();
+        let source = store.messages("s", i64::MAX, 50).unwrap()["messages"][0].clone();
+        assert_eq!(page["answers"][0], summary["latest"]);
+        assert_eq!(page["answers"][0]["sourceRevision"], source["revision"]);
+        let indexed: (i64, i64, String) = store.db.lock().query_row("SELECT revision,source_revision,text_hash FROM answer_index WHERE session_id='s' AND id='a'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(indexed, (1, 2, text_hash));
+        let updates = store.journal(baseline["sequence"].as_i64().unwrap(), 100).unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["type"], "session.updated");
+        assert_eq!(updates[0]["data"]["answerSummary"], *summary);
+        let cursor = snapshot["sequence"].as_i64().unwrap();
+        store.replace_messages("s", &[answer]).unwrap();
+        assert!(store.journal(cursor, 100).unwrap().is_empty());
+        drop(store);
+        let reopened = Store::open(&path, "test".into()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap(), snapshot, "reopen must not repeat migration or discard source revisions");
+        assert_eq!(reopened.answers("s", summary["generation"].as_str().unwrap(), 0, 50).unwrap(), page);
+    }
+    #[test]
+    fn answer_summary_retracts_no_longer_readable_completed_messages() {
+        let store = store();
+        store.put("session", "s", &json!({"id":"s"}), None).unwrap();
+        for id in ["a", "b", "c"] {
+            store.message("s", id, &json!({"id":id,"role":"assistant","stopReason":"stop","content":"answer"})).unwrap();
+        }
+        let summary = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        store.message("s", "b", &json!({"id":"b","role":"assistant","stopReason":"stop","content":[{"type":"text","phase":"commentary","text":"no longer an answer"}]})).unwrap();
+        let changed = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_eq!(changed["count"], 2);
+        assert_eq!(changed["latest"]["messageId"], "c");
+        assert_eq!(changed["latest"]["ordinal"], 2);
+        assert_ne!(changed["generation"], summary["generation"]);
+    }
+    #[test]
+    fn answer_older_revision_rebases_generation_so_read_latest_cannot_hide_amendment() {
+        let store = store();
+        store.put("session", "s", &json!({"id":"s"}), None).unwrap();
+        let history = [json!({"id":"a","role":"assistant","stopReason":"stop","content":"First answer"}), json!({"id":"b","role":"assistant","stopReason":"stop","content":"Latest answer"})];
+        store.replace_messages("s", &history).unwrap();
+        let summary = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        let generation = summary["generation"].as_str().unwrap();
+        let mut amended = history.clone();
+        amended[0]["content"] = json!("Corrected first answer");
+        store.replace_messages("s", &amended).unwrap();
+        let changed = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_ne!(changed["generation"], summary["generation"], "a latest-only read marker cannot observe older answer revisions without a generation fence");
+        assert_eq!(changed["count"], 2, "amendments are not extra answers");
+        assert_eq!(changed["latest"], summary["latest"]);
+        assert!(store.answers("s", generation, 0, 50).unwrap_err().is::<StaleAnswerGeneration>());
+        let page = store.answers("s", changed["generation"].as_str().unwrap(), 0, 50).unwrap();
+        assert_eq!(page["answers"][0]["preview"], "Corrected first answer");
+        assert_eq!(page["answers"][0]["ordinal"], 1);
+        assert_eq!(page["answers"][0]["revision"], 2);
+        assert_eq!(page["answers"][1]["ordinal"], 2);
+        let cursor = store.snapshot().unwrap()["sequence"].as_i64().unwrap();
+        store.replace_messages("s", &amended).unwrap();
+        assert_eq!(store.snapshot().unwrap()["sessions"][0]["answerSummary"], changed);
+        assert!(store.journal(cursor, 100).unwrap().is_empty());
+    }
+    #[test]
+    fn answer_lifecycle_does_not_admit_provider_stop_defaults_until_message_end() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("lifecycle.sqlite");
+        let store = Store::open(&path, "test".into()).unwrap();
+        store.put("session", "s", &json!({"id":"s","transport":"rpc","status":"running","isStreaming":true}), None).unwrap();
+        let partial = json!({"id":"live","role":"assistant","content":"Provider uses stop on partial frames","stopReason":"stop"});
+        let saved = store.message_with_completion("s", "live", &partial, false).unwrap();
+        assert_eq!(store.snapshot().unwrap()["sessions"][0]["answerSummary"]["count"], 0);
+        drop(store);
+        let store = Store::open(&path, "test".into()).unwrap();
+        assert_eq!(store.snapshot().unwrap()["sessions"][0]["answerSummary"]["count"], 0, "restart cannot promote incomplete frames");
+        let completed = store.message_with_completion("s", "live", &partial, true).unwrap();
+        assert_eq!(completed["revision"], saved["revision"], "completion metadata alone must not fabricate transcript revisions");
+        assert_eq!(completed["sequence"], saved["sequence"]);
+        assert_eq!(store.snapshot().unwrap()["sessions"][0]["answerSummary"]["count"], 1);
+        let cursor = store.snapshot().unwrap()["sequence"].as_i64().unwrap();
+        store.message_with_completion("s", "live", &partial, true).unwrap();
+        assert!(store.journal(cursor, 100).unwrap().is_empty());
+        let legacy = json!({"id":"legacy","role":"assistant","content":"Legacy final without stop"});
+        store.message_with_completion("s", "legacy", &legacy, false).unwrap();
+        assert_eq!(store.snapshot().unwrap()["sessions"][0]["answerSummary"]["count"], 1);
+        store.message_with_completion("s", "legacy", &legacy, true).unwrap();
+        assert_eq!(store.snapshot().unwrap()["sessions"][0]["answerSummary"]["count"], 2);
+    }
+    #[test]
+    fn answer_history_can_finalize_identical_incomplete_row_without_revision_noise() {
+        let store = store();
+        store.put("session", "s", &json!({"id":"s"}), None).unwrap();
+        let answer = json!({"id":"a","role":"assistant","stopReason":"stop","content":"complete now"});
+        let saved = store.message_with_completion("s", "a", &answer, false).unwrap();
+        store.replace_messages("s", &[answer.clone()]).unwrap();
+        let summary = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_eq!(summary["count"], 1);
+        assert_eq!(summary["latest"]["revision"], saved["revision"]);
+        assert_eq!(summary["latest"]["sequence"], saved["sequence"]);
+        let cursor = store.snapshot().unwrap()["sequence"].as_i64().unwrap();
+        store.replace_messages("s", &[answer]).unwrap();
+        assert!(store.journal(cursor, 100).unwrap().is_empty());
+    }
+    #[test]
+    fn answer_legacy_migration_does_not_promote_last_running_assistant_frame() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("old-schema.sqlite");
+        {
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch("CREATE TABLE objects(kind TEXT,id TEXT,body TEXT,PRIMARY KEY(kind,id)); CREATE TABLE messages(sequence INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT,id TEXT,body TEXT,revision INTEGER DEFAULT 0,UNIQUE(session_id,id));").unwrap();
+            db.execute("INSERT INTO objects VALUES('session','s',?1)", [json!({"id":"s","transport":"rpc","status":"running","writerConnected":true,"isStreaming":true}).to_string()]).unwrap();
+            for (id,text) in [("old","Earlier completed answer"),("partial","Partial stop default")] {
+                db.execute("INSERT INTO messages(session_id,id,body,revision) VALUES('s',?1,?2,1)", params![id,json!({"id":id,"role":"assistant","stopReason":"stop","content":text}).to_string()]).unwrap();
+            }
+        }
+        let store = Store::open(&path, "test".into()).unwrap();
+        let summary = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_eq!(summary["count"], 1, "pre-upgrade running tail has no trustworthy completion metadata");
+        assert_eq!(summary["latest"]["messageId"], "old");
+        let partial = json!({"id":"partial","role":"assistant","stopReason":"stop","content":"Partial stop default"});
+        store.message_with_completion("s", "partial", &partial, true).unwrap();
+        assert_eq!(store.snapshot().unwrap()["sessions"][0]["answerSummary"]["count"], 2);
+    }
+    #[test]
+    fn answer_archive_reimport_keeps_summary_and_reset_replaces_generation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("archive.sqlite");
+        let store = Store::open(&path, "test".into()).unwrap();
+        let session = json!({"id":"archive","transport":"archive","status":"closed","sessionFile":temporary.path().join("fixture.jsonl")});
+        let history = [json!({"id":"a","role":"assistant","content":"Archived answer","stopReason":"stop"})];
+        store.import_archive(&session, &history).unwrap();
+        let summary = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        let before_replay = store.snapshot().unwrap()["sequence"].as_i64().unwrap();
+        store.import_archive(&session, &history).unwrap();
+        assert_eq!(store.snapshot().unwrap()["sessions"][0]["answerSummary"], summary);
+        assert!(store.journal(before_replay, 100).unwrap().is_empty(), "an identical archive replay is not a new answer or session update");
+        let latest_update = store.journal(0, 100).unwrap().into_iter().filter(|event| event["type"] == "session.updated").last().unwrap();
+        assert_eq!(latest_update["data"]["answerSummary"], summary);
+        store.replace_messages("archive", &[]).unwrap();
+        let reset = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_ne!(reset["generation"], summary["generation"]);
+        assert_eq!(reset["count"], 0);
+        assert!(reset["latest"].is_null());
+        let cursor = store.snapshot().unwrap()["sequence"].as_i64().unwrap();
+        store.replace_messages("archive", &[]).unwrap();
+        assert!(store.journal(cursor, 100).unwrap().is_empty());
+        drop(store);
+        let reopened = Store::open(&path, "test".into()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap()["sessions"][0]["answerSummary"], reset);
+    }
+    #[test]
+    fn answer_pages_clamp_limits_and_cover_every_ordinal() {
+        let store = store();
+        store.put("session", "s", &json!({"id":"s"}), None).unwrap();
+        let history: Vec<_> = (0..205).map(|index| json!({"id":format!("a-{index}"),"role":"assistant","content":"same text","stopReason":"stop"})).collect();
+        store.replace_messages("s", &history).unwrap();
+        let summary = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        let generation = summary["generation"].as_str().unwrap();
+        let mut all = Vec::new();
+        let mut after = 0;
+        loop {
+            let page = store.answers("s", generation, after, usize::MAX).unwrap();
+            assert_eq!(page["count"], 205);
+            let answers = page["answers"].as_array().unwrap();
+            assert!(answers.len() <= 100);
+            all.extend(answers.iter().cloned());
+            if page["hasMore"] == false { break; }
+            after = answers.last().unwrap()["ordinal"].as_i64().unwrap();
+        }
+        assert_eq!(all.len(), 205);
+        let messages = store.messages("s", i64::MAX, 300).unwrap();
+        for (index, answer) in all.iter().enumerate() {
+            assert_eq!(answer["ordinal"], index + 1);
+            assert_eq!(answer["messageId"], history[index]["id"]);
+            assert_eq!(answer["sequence"], messages["messages"][index]["sequence"]);
+            assert_eq!(answer.get("sourceRevision").unwrap_or(&answer["revision"]), &messages["messages"][index]["revision"]);
+        }
+        assert_eq!(store.answers("s", generation, 0, 0).unwrap()["answers"].as_array().unwrap().len(), 1);
+        assert_eq!(store.answers("s", generation, i64::MAX, 10).unwrap()["answers"], json!([]));
+        assert!(store.answers("s", generation, -1, 10).is_err());
+    }
+    #[test]
+    fn answer_generation_fences_new_source_journal_but_not_writer_or_provider_rebinds() {
+        let store = store();
+        let mut session = json!({"id":"s","journalId":"original","providerSessionId":"provider-one","bindingRevision":"writer-one"});
+        store.put("session", "s", &session, None).unwrap();
+        let history = [json!({"id":"a","role":"assistant","stopReason":"stop","content":"Copied prefix"})];
+        store.replace_messages("s", &history).unwrap();
+        let summary = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        session["providerSessionId"] = json!("provider-two");
+        session["bindingRevision"] = json!("writer-two");
+        store.put("session", "s", &session, Some("session.updated")).unwrap();
+        assert_eq!(store.snapshot().unwrap()["sessions"][0]["answerSummary"], summary);
+        session["journalId"] = json!("fork");
+        store.put("session", "s", &session, Some("session.updated")).unwrap();
+        store.replace_messages("s", &history).unwrap();
+        let fork = store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_ne!(fork["generation"], summary["generation"]);
+        assert_eq!(fork["count"], 1);
+        assert_eq!(fork["latest"], summary["latest"]);
+        assert!(store.answers("s", summary["generation"].as_str().unwrap(), 0, 50).unwrap_err().is::<StaleAnswerGeneration>());
+        let latest_update = store.journal(0, 100).unwrap().into_iter().filter(|event| event["type"] == "session.updated").last().unwrap();
+        assert_eq!(latest_update["data"]["answerSummary"], fork);
+    }
+    #[test]
     fn streaming_revision_changes_without_moving_history_position() {
         let store = store();
         let partial =
@@ -2019,11 +2664,13 @@ mod continuity_tests {
         assert_eq!(
             events
                 .iter()
+                .filter(|event| event["type"] == "message.upsert")
                 .map(|event| event["data"]["id"].as_str().unwrap())
                 .collect::<Vec<_>>(),
             ["answer", "next"]
         );
-        assert!(events.iter().all(|event| event["type"] == "message.upsert"));
+        assert_eq!(events.iter().filter(|event| event["type"] == "session.updated").count(), 1);
+        assert!(events.iter().all(|event| event["type"] == "message.upsert" || event["type"] == "session.updated"));
     }
     #[test]
     fn history_replacement_is_atomic_ordered_and_deduplicated() {

@@ -227,6 +227,26 @@ class DurableLocalStateTest {
         assertEquals("succeeded", final.getString("status"))
         assertTrue(final.getJSONObject("result").getBoolean("success"))
     }
+    @Test fun answerReadAndDeliverySurviveRestartSeparatelyAndNeverRegress() {
+        val directory = temporary.newFolder()
+        val summary = AnswerPolicy.Summary("generation", 3,
+            AnswerPolicy.Reference("m3", 1, 30, 3, "Safe final answer"))
+        fun marker(ordinal: Int, revision: Int = 1) = AnswerPolicy.Marker("epoch", "generation",
+            ordinal.toLong(), "m$ordinal", revision.toLong(), ordinal * 10L).json()
+        val state = DurableLocalState(directory)
+        state.commitAnswerRead("pc:phone", "session:s", summary, "epoch", marker(2))
+        state.commitAnswerRead("pc:phone", "session:s", summary, "epoch", marker(1))
+        state.set("pc:phone", "notificationDelivery", "session:s", marker(3))
+        val restarted = DurableLocalState(directory)
+        val sections = restarted.state("pc:phone").getJSONObject("sections")
+        assertEquals(2L, sections.getJSONObject("read").getJSONObject("session:s").getLong("ordinal"))
+        assertEquals(3L, sections.getJSONObject("notificationDelivery").getJSONObject("session:s").getLong("ordinal"))
+        assertEquals(1L, AnswerPolicy.unread(summary, "epoch", sections.getJSONObject("read").getJSONObject("session:s")))
+        assertEquals(0, restarted.state("another:phone").getJSONObject("sections").getJSONObject("read").length())
+        restarted.clear()
+        assertEquals(0, restarted.state("pc:phone").getJSONObject("sections").getJSONObject("notificationDelivery").length())
+    }
+
     @Test fun committedDraftsPreferencesAndUnknownCommandsSurviveRestartWithoutReplay() {
         val directory = temporary.newFolder()
         val first = DurableLocalState(directory)

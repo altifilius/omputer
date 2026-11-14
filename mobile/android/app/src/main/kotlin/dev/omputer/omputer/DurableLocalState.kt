@@ -69,6 +69,18 @@ internal class DurableLocalState(private val directory: File) {
         save(identity, state)
         return state(identity)
     }
+    @Synchronized fun commitAnswerRead(identity: String, key: String, summary: AnswerPolicy.Summary,
+        epoch: String, incoming: JSONObject): JSONObject {
+        validateKey(key)
+        val state = read(identity)
+        val sections = state.getJSONObject("sections")
+        val values = sections.optJSONObject("read") ?: JSONObject().also { sections.put("read", it) }
+        val accepted = AnswerPolicy.acceptRead(summary, epoch, incoming, values.optJSONObject(key))
+        values.put(key, accepted.json())
+        save(identity, state)
+        return state(identity)
+    }
+
     @Synchronized fun draft(identity: String, key: String): JSONObject? { validateKey(key); return read(identity).getJSONObject("drafts").optJSONObject(key) }
     @Synchronized fun drafts(identity: String): JSONObject = read(identity).getJSONObject("drafts")
     @Synchronized fun saveDraft(identity: String, key: String, value: JSONObject) {
@@ -141,7 +153,8 @@ internal class DurableLocalState(private val directory: File) {
             return record.optString("status") != "succeeded" || !unappliedDraft ||
                 (record.isNull("draftSubmission") && record.isNull("branchRestore"))
         }
-        private val SECTIONS = setOf("pins", "read", "lastMode", "notificationPreferences")
+        // notificationDelivery is native-owned: delivered answer refs, never user read state.
+        private val SECTIONS = setOf("pins", "read", "lastMode", "notificationPreferences", "notificationDelivery")
         private fun validateKey(key: String) { require(key.isNotBlank() && key.length <= 512) { "Yerel kayıt anahtarı geçersiz." } }
         private fun validateSize(value: Any?, maximum: Int) { require((value?.toString() ?: "null").toByteArray().size <= maximum) { "Yerel kayıt çok büyük." } }
         private fun equivalent(a: Any?, b: Any?): Boolean = when {

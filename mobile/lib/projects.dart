@@ -21,9 +21,8 @@ class LocalSessionRow extends StatelessWidget {
     final sections = object(controller.localState['sections']);
     final pinned = object(sections['pins'])['session:${session.id}'] == true;
     final marker = object(object(sections['read'])['session:${session.id}']);
-    final transcript = controller.loadedTranscript(session.id);
-    final last = transcript == null || transcript.ids.isEmpty ? null : transcript.messages[transcript.ids.last]?.value;
-    final unread = last != null && (marker['messageId'] != last.id || marker['revision'] != last.revision);
+    final unread = controller.sessionHasUnread(session);
+    final preview = controller.answerPreview(session)?.trim();
     var reference = session.id;
     for (var length = 8; length < session.id.length; length++) {
       final suffix = session.id.substring(session.id.length - length);
@@ -39,9 +38,10 @@ class LocalSessionRow extends StatelessWidget {
     final tile = ListTile(
       contentPadding: compact ? const EdgeInsets.symmetric(horizontal: 12, vertical: 4) : const EdgeInsets.all(16),
       textColor: foreground, iconColor: foreground,
-      leading: working ? TickerMode(enabled: ModalRoute.isCurrentOf(context) ?? true, child: WorkingAvatar(size: compact ? 24 : 36)) : Icon(pinned ? Icons.push_pin_rounded : session.archived && !session.activeUnbridged ? Icons.history_rounded : Icons.chat_bubble_outline_rounded, size: compact ? 20 : 24),
+      leading: Badge(isLabelVisible: unread, backgroundColor: scheme.primary, child: working ? TickerMode(enabled: ModalRoute.isCurrentOf(context) ?? true, child: WorkingAvatar(size: compact ? 24 : 36)) : Icon(pinned ? Icons.push_pin_rounded : session.archived && !session.activeUnbridged ? Icons.history_rounded : Icons.chat_bubble_outline_rounded, size: compact ? 20 : 24)),
       title: Text(session.name.isEmpty ? 'Adsız oturum' : session.name, maxLines: 2, overflow: TextOverflow.ellipsis), subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         if (showProject) Padding(padding: const EdgeInsets.only(bottom: 4), child: Text(project?.name ?? 'Proje bilgisi yok', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: foreground))),
+        if (preview != null && preview.isNotEmpty) Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Text(preview, maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(color: foreground))),
         Text('${session.statusLabel}${unread ? ' · Okunmadı' : marker.isNotEmpty ? ' · Okundu' : ''}${compact ? '' : '\n${dateLabel(session.updatedAt)}'}', maxLines: compact ? 1 : null, overflow: compact ? TextOverflow.ellipsis : null, style: TextStyle(color: foreground)),
         Text('Oturum $reference', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: foreground)),
       ]), onTap: () => openScreen(context, SessionScreen(controller: controller, sessionId: session.id)), trailing: IconButton(tooltip: pinned ? 'Oturum sabitlemesini kaldır' : 'Oturumu sabitle', icon: Icon(pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined), onPressed: () => perform(context, () => controller.updateLocalState('pins', 'session:${session.id}', !pinned))));

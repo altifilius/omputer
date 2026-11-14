@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
@@ -14,14 +15,15 @@ import 'neumorphic.dart';
 import 'compact_turn.dart';
 
 class SessionScreen extends StatefulWidget {
-  const SessionScreen({super.key, required this.controller, required this.sessionId, this.initialMessageId});
+  const SessionScreen({super.key, required this.controller, required this.sessionId, this.initialMessageId, this.initialAnswer});
   final OmputerController controller;
   final String sessionId;
   final String? initialMessageId;
+  final AnswerReference? initialAnswer;
   @override
   State<SessionScreen> createState() => _SessionScreenState();
 }
-class _SessionScreenState extends State<SessionScreen> {
+class _SessionScreenState extends State<SessionScreen> with WidgetsBindingObserver {
   final message = TextEditingController();
   final scroll = ScrollController();
   String mode = 'session.prompt';
@@ -62,24 +64,245 @@ class _SessionScreenState extends State<SessionScreen> {
     setState(() { applyDraft(change.after); draftError = null; });
   }
   String? focusedMessage;
+  final focusedUserTarget = GlobalKey();
+  String? positionedUser;
   bool locating = false;
+  bool targetFailed = false;
+  bool focusedAnswer = false;
+  int? liveWindowStart;
+  bool? liveWindowHasMore;
+  late String? readingEpoch, readingGeneration;
+  late int readingHistory;
   Future<void> loadInitial() async {
-    await widget.controller.loadMessages(widget.sessionId);
-    final target = widget.initialMessageId;
-    if (target == null || !mounted) return;
-    setState(() => locating = true);
-    var pages = 0;
-    while (mounted && !transcript.messages.containsKey(target) && transcript.hasMore && transcript.error == null && pages < 20) {
-      await widget.controller.loadMessages(widget.sessionId, older: true);
-      pages++;
+    final c = widget.controller;
+    final scope = identity, epoch = c.snapshot.journalEpoch, history = transcript.generation;
+    bool valid() => mounted && identity == scope && c.snapshot.journalEpoch == epoch && transcript.generation == history;
+    final target = widget.initialAnswer?.messageId ?? widget.initialMessageId;
+    try {
+      await c.loadMessages(widget.sessionId);
+      if (!valid() || target == null) return;
+      final session = c.snapshot.session(widget.sessionId);
+      var reference = widget.initialAnswer ?? (session == null ? null : c.cachedAnswerReference(session, target));
+      final rendered = transcript.messages[target]?.value;
+      focusedAnswer = reference != null || (rendered != null && rendered.role == 'assistant' && projectCompactTurn([rendered]).answers.isNotEmpty);
+      if (reference == null && focusedAnswer && session?.answerSummary != null && rendered != null) {
+        reference = await findAnswerReference(session!, rendered);
+        if (!valid()) return;
+      }
+      final targetReference = reference;
+      if (!transcript.messages.containsKey(target) && targetReference != null) {
+        final previousStart = transcript.before;
+        final previousHasMore = transcript.hasMore;
+        final page = await c.request('GET', '/v1/sessions/${Uri.encodeComponent(widget.sessionId)}/messages?before=${targetReference.sequence + 1}&limit=50');
+        if (!valid()) return;
+        final messages = objects(page['messages']).map(ChatMessage.fromJson).toList();
+        if (!messages.any((message) => message.id == target && message.sequence == targetReference.sequence)) throw ControllerFailure('Aranan yanıtın kaynağı geçmişte bulunamadı.');
+        transcript.merge(messages);
+        if (previousStart != null && targetReference.sequence < previousStart) {
+          liveWindowStart = previousStart;
+          liveWindowHasMore = previousHasMore;
+          transcript.hasMore = page['hasMore'] == true;
+        }
+      } else {
+        while (valid() && !transcript.messages.containsKey(target) && transcript.hasMore && transcript.error == null) {
+          final before = transcript.before;
+          await c.loadMessages(widget.sessionId, older: true);
+          if (transcript.before == before) break;
+        }
+      }
+      if (!valid()) return;
+      if (!transcript.messages.containsKey(target)) throw ControllerFailure('Aranan mesaj geçmişte bulunamadı. Son mesaja dönerek devam edebilirsin.');
+      setState(() => focusedMessage = target);
+    } catch (error) {
+      if (valid()) setState(() { locating = false; targetFailed = true; readError = '$error'; });
     }
-    if (mounted) setState(() { locating = false; focusedMessage = transcript.messages.containsKey(target) ? target : null; if (focusedMessage == null) draftError = 'Aranan mesaj yüklenen geçmişte bulunamadı. Önceki mesajları yükleyerek devam edebilirsin.'; });
+  }
+  void targetPositioned() {
+    if (!mounted || !locating) return;
+    setState(() => locating = false);
+    scheduleVisibility();
+  }
+  void positionUser(String id) {
+    if (positionedUser == id) return;
+    positionedUser = id;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final target = focusedUserTarget.currentContext;
+      if (!mounted || focusedMessage != id || target == null) return;
+      Scrollable.ensureVisible(target, alignment: .5, duration: Duration.zero);
+      WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && focusedMessage == id) targetPositioned(); });
+      WidgetsBinding.instance.ensureVisualUpdate();
+    });
+  }
+  Future<void> loadOlder() async {
+    if (focusedMessage != null || liveWindowStart == null) return widget.controller.loadMessages(widget.sessionId, older: true);
+    if (transcript.loading) return;
+    final before = liveWindowStart!, epoch = widget.controller.snapshot.journalEpoch, scope = identity, history = transcript.generation;
+    setState(() { transcript.loading = true; transcript.error = null; });
+    try {
+      final page = await widget.controller.request('GET', '/v1/sessions/${Uri.encodeComponent(widget.sessionId)}/messages?before=$before&limit=50');
+      if (!mounted || scope != identity || epoch != widget.controller.snapshot.journalEpoch || history != transcript.generation) return;
+      final messages = objects(page['messages']).map(ChatMessage.fromJson).toList();
+      transcript.merge(messages);
+      if (messages.isNotEmpty) liveWindowStart = messages.map((message) => message.sequence).reduce(math.min);
+      liveWindowHasMore = page['hasMore'] == true;
+    } catch (error) {
+      if (mounted && scope == identity && epoch == widget.controller.snapshot.journalEpoch && history == transcript.generation) transcript.error = '$error';
+    } finally {
+      widget.controller.finishTranscriptLoad(widget.sessionId, transcript, requireReader: true);
+      if (mounted) setState(() {});
+    }
+  }
+  void returnToLatest() {
+    setState(() { focusedMessage = null; targetFailed = false; locating = false; readError = null; });
+    readingEpoch = widget.controller.snapshot.journalEpoch;
+    readingGeneration = widget.controller.snapshot.session(widget.sessionId)?.answerSummary?.generation;
+    readingHistory = transcript.generation;
+    scheduleVisibility();
   }
   late Transcript transcript;
+  final answerViewport = GlobalKey();
+  final answerEnds = <_AnswerEndState>{};
+  static int nextReader = 0;
+  late final readerOwner = 'session-reader:${nextReader++}';
+  bool foreground = false, currentRoute = false, visibilityScheduled = false;
+  Json? readerScope;
+  String? readError;
+  final attemptedReads = <String>{};
+  bool readPending = false;
+  bool referencePending = false;
+  final attemptedReferences = <String>{};
+
+  Future<AnswerReference?> findAnswerReference(Session session, ChatMessage rendered, {bool refresh = false}) async {
+    final c = widget.controller;
+    final epoch = c.snapshot.journalEpoch, scope = identity, generation = session.answerSummary?.generation;
+    var after = 0;
+    while (mounted && epoch == c.snapshot.journalEpoch && scope == identity && c.snapshot.session(session.id)?.answerSummary?.generation == generation) {
+      final page = await c.answerReferences(session, after: after, refresh: refresh);
+      if (!mounted || epoch != c.snapshot.journalEpoch || scope != identity) return null;
+      final match = page.where((answer) => answer.messageId == rendered.id).firstOrNull;
+      if (match != null) return match;
+      if (page.isEmpty || page.last.sequence >= rendered.sequence || page.last.ordinal <= after) return null;
+      after = page.last.ordinal;
+    }
+    return null;
+  }
+
+  void answerEndChanged(_AnswerEndState anchor, bool attached) {
+    if (attached) { answerEnds.add(anchor); } else { answerEnds.remove(anchor); }
+    scheduleVisibility();
+  }
+  void scheduleVisibility() {
+    if (!mounted || visibilityScheduled) return;
+    visibilityScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      visibilityScheduled = false;
+      if (mounted) checkAnswerVisibility();
+    });
+    // Scroll/lifecycle notifications need one frame even with no dirty widget.
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+  bool get readingVisible => foreground && currentRoute && !locating && !targetFailed && identity == attachedIdentity;
+  void updateReader(Session? session, bool atLatest) {
+    final c = widget.controller;
+    final summary = session?.answerSummary;
+    final next = atLatest && summary != null && c.snapshot.journalEpoch != null ? <String, dynamic>{
+      'owner': readerOwner, 'sessionId': widget.sessionId,
+      'expectedJournalEpoch': c.snapshot.journalEpoch, 'generation': summary.generation, 'atLatest': true,
+    } : null;
+    if (jsonEncode(next) == jsonEncode(readerScope)) return;
+    final previous = readerScope;
+    readerScope = next;
+    if (previous != null) unawaited(c.native.invoke('answerReader', {...previous, 'atLatest': false}).then<void>((_) {}, onError: (Object _) {}));
+    if (next != null) unawaited(c.native.invoke('answerReader', next).then<void>((_) {}, onError: (Object error) {
+      if (mounted) setState(() => readError = 'Okuma görünürlüğü bildirilemedi: $error');
+    }));
+  }
+  bool answerEndVisible(_AnswerEndState anchor) {
+    final viewport = answerViewport.currentContext?.findRenderObject();
+    final end = anchor.context.findRenderObject();
+    if (viewport is! RenderBox || end is! RenderBox || !viewport.attached || !end.attached || !viewport.hasSize || !end.hasSize) return false;
+    final visible = viewport.localToGlobal(Offset.zero) & viewport.size;
+    final bounds = end.localToGlobal(Offset.zero) & end.size;
+    return visible.overlaps(bounds);
+  }
+  void checkAnswerVisibility() {
+    final c = widget.controller;
+    final session = c.snapshot.session(widget.sessionId);
+    final summary = session?.answerSummary;
+    if (readingEpoch != c.snapshot.journalEpoch || readingGeneration != summary?.generation || readingHistory != transcript.generation) {
+      updateReader(null, false);
+      readingEpoch = c.snapshot.journalEpoch; readingGeneration = summary?.generation; readingHistory = transcript.generation;
+      attemptedReads.clear(); attemptedReferences.clear(); liveWindowStart = null; liveWindowHasMore = null;
+      if (focusedMessage != null || locating) setState(() { targetFailed = true; locating = false; readError = 'Konuşmanın geçmişi değişti; seçili yanıt yeniden açılmalı. Son mesaja dönebilirsin.'; });
+      scheduleVisibility();
+      return;
+    }
+    final latest = summary?.latest;
+    final visibleEnds = readingVisible ? answerEnds.where((anchor) => anchor.mounted && answerEndVisible(anchor)).toList() : <_AnswerEndState>[];
+    final visibleAnswers = session != null ? visibleEnds.map((anchor) {
+      final rendered = anchor.widget.message;
+      final reference = c.cachedAnswerReference(session, rendered.id);
+      return reference != null && reference.sourceRevision == rendered.revision && reference.sequence == rendered.sequence ? reference : null;
+    }).whereType<AnswerReference>().toList() : <AnswerReference>[];
+    visibleAnswers.sort((a, b) => b.ordinal.compareTo(a.ordinal));
+    final answer = visibleAnswers.firstOrNull;
+    final latestVisible = latest != null && visibleAnswers.any((answer) => answer.messageId == latest.messageId && answer.revision == latest.revision);
+    updateReader(session, latestVisible && focusedMessage == null && scroll.hasClients && scroll.offset <= 80);
+    if (session != null && summary != null) {
+      final missing = visibleEnds.map((anchor) => anchor.widget.message).where((message) {
+        final reference = c.cachedAnswerReference(session, message.id);
+        return reference == null || reference.sourceRevision != message.revision || reference.sequence != message.sequence;
+      }).toList()
+        ..sort((a, b) => b.sequence.compareTo(a.sequence));
+      final keys = missing.map((message) => jsonEncode([identity, c.snapshot.journalEpoch, summary.generation, message.id, message.revision])).toSet();
+      attemptedReferences.retainAll(keys);
+      final unresolved = missing.where((message) => !attemptedReferences.contains(jsonEncode([identity, c.snapshot.journalEpoch, summary.generation, message.id, message.revision]))).firstOrNull;
+      if (!referencePending && unresolved != null) {
+        referencePending = true;
+        attemptedReferences.add(jsonEncode([identity, c.snapshot.journalEpoch, summary.generation, unresolved.id, unresolved.revision]));
+        unawaited(findAnswerReference(session, unresolved, refresh: c.cachedAnswerReference(session, unresolved.id) != null).then<void>((_) {}, onError: (Object error) {
+          if (mounted) setState(() => readError = 'Yanıtın okuma kaynağı alınamadı: $error');
+        }).whenComplete(() { referencePending = false; scheduleVisibility(); }));
+      }
+    }
+    if (answer == null || session == null || summary == null) { attemptedReads.clear(); return; }
+    final key = '${identity}:${c.snapshot.journalEpoch}:${summary.generation}:${answer.messageId}:${answer.revision}';
+    attemptedReads.removeWhere((value) => value != key);
+    final marker = c.answerReadMarker(session.id);
+    if (summary.matchesMarker(marker, c.snapshot.journalEpoch) &&
+        ((marker['ordinal'] as num? ?? 0) > answer.ordinal ||
+         (marker['ordinal'] == answer.ordinal && marker['messageId'] == answer.messageId && (marker['revision'] as num? ?? 0) >= answer.revision))) return;
+    if (readPending || !attemptedReads.add(key)) return;
+    readPending = true;
+    unawaited(c.markAnswerRead(session, answer, expectedEpoch: c.snapshot.journalEpoch).then<void>((_) {
+      if (mounted && readError != null) setState(() => readError = null);
+    }, onError: (Object error) {
+      if (mounted) setState(() => readError = 'Okuma konumu kaydedilemedi: $error');
+    }).whenComplete(() { readPending = false; scheduleVisibility(); }));
+  }
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    currentRoute = ModalRoute.isCurrentOf(context) ?? false;
+    if (!readingVisible) { updateReader(null, false); attemptedReads.clear(); }
+    scheduleVisibility();
+  }
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    foreground = state == AppLifecycleState.resumed;
+    if (!foreground) { updateReader(null, false); attemptedReads.clear(); }
+    scheduleVisibility();
+  }
   @override
   void initState() {
     super.initState();
     transcript = widget.controller.retainTranscript(widget.sessionId);
+    WidgetsBinding.instance.addObserver(this);
+    foreground = WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    readingEpoch = widget.controller.snapshot.journalEpoch;
+    readingGeneration = widget.controller.snapshot.session(widget.sessionId)?.answerSummary?.generation;
+    readingHistory = transcript.generation;
+    locating = widget.initialAnswer != null || widget.initialMessageId != null;
     attachedIdentity = identity;
     final storedMode = object(widget.controller.localState['sections'])['lastMode'];
     final remembered = object(storedMode)['session:${widget.sessionId}'];
@@ -91,10 +314,21 @@ class _SessionScreenState extends State<SessionScreen> {
     loadInitial();
   }
   @override
-  void dispose() { widget.controller.draftChanges.removeListener(controllerDraftChanged); message.removeListener(draftChanged); widget.controller.releaseTranscript(widget.sessionId); message.dispose(); scroll.dispose(); super.dispose(); }
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    updateReader(null, false);
+    widget.controller.draftChanges.removeListener(controllerDraftChanged);
+    message.removeListener(draftChanged);
+    // A deep target merges disjoint pages, but its live paging boundary is
+    // route-local. Do not retain that cache after losing the boundary.
+    if (liveWindowStart != null && transcript.before != null && transcript.before! < liveWindowStart!) transcript.reset();
+    widget.controller.releaseTranscript(widget.sessionId);
+    message.dispose(); scroll.dispose(); super.dispose();
+  }
   void positionChanged() {
     final away = scroll.hasClients && scroll.offset > 80;
     if (away != showLatest && mounted) setState(() => showLatest = away);
+    scheduleVisibility();
   }
   void draftChanged() {
     if (restoringDraft || draftLoading || identity != attachedIdentity) return;
@@ -333,6 +567,7 @@ class _SessionScreenState extends State<SessionScreen> {
   Widget build(BuildContext context) => ListenableBuilder(listenable: widget.controller, builder: (context, _) {
     final c = widget.controller;
     final session = c.snapshot.session(widget.sessionId);
+    scheduleVisibility();
     if (identity != attachedIdentity) {
       attachedIdentity = identity;
       restoringDraft = true; message.clear(); attachments.clear(); fileContext.clear(); restoringDraft = false;
@@ -357,13 +592,14 @@ class _SessionScreenState extends State<SessionScreen> {
       Padding(padding: const EdgeInsets.fromLTRB(24, 4, 24, 12), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Hero(tag: 'checkpoint-thread', child: Icon(Icons.commit_rounded, color: Theme.of(context).colorScheme.primary)), const SizedBox(width: 10), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(c.snapshot.project(session?.projectId ?? '')?.name ?? 'Kaynak konuşma', style: Theme.of(context).textTheme.labelLarge), const SizedBox(height: 4), Text('${session?.statusLabel ?? 'Oturum bilgisi alınamadı'}${c.connection.connected ? '' : ' · Çevrimdışı'}', style: Theme.of(context).textTheme.bodySmall)]))])),
       if (session?.lastError != null) ErrorNotice(session!.lastError!),
       if (session?.turnError != null) ErrorNotice('Tur hatası: ${session!.turnError}. Bağlantı açıksa oturumu yönlendirmeye devam edebilirsin.'),
+      if (readError != null) ErrorNotice(readError!),
       if (pending.isNotEmpty) Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: NeoSurface(borderColor: Theme.of(context).colorScheme.primary.withValues(alpha: .5), child: ListTile(leading: const Icon(Icons.pending_actions_rounded), title: Text(pending.first.title, maxLines: 2, overflow: TextOverflow.ellipsis), subtitle: Text('${pending.length} karar bekliyor'), trailing: const Icon(Icons.arrow_forward_rounded), onTap: () => openScreen(context, InteractionScreen(controller: c, interactionId: pending.first.id))))),
       if (session?.model != null || session?.thinkingLevel != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8), child: Align(alignment: Alignment.centerLeft, child: Text([session?.model?.name, session?.thinkingLevel == null ? null : 'Düşünme: ${session!.thinkingLevel}'].whereType<String>().join(' · '), style: Theme.of(context).textTheme.labelMedium))),
       if (locating) const LinearProgressIndicator(),
-      if (focusedMessage != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: NeoSurface(depth: NeoDepth.inset, child: ListTile(title: const Text('Arama sonucu konumunda okuyorsun'), subtitle: Text(focusedMessage!), trailing: IconButton(tooltip: 'Canlı son mesaja dön', onPressed: () => setState(() => focusedMessage = null), icon: const Icon(Icons.close_rounded))))),
+      if (focusedMessage != null || targetFailed) Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: NeoSurface(depth: NeoDepth.inset, child: ListTile(title: Text(focusedAnswer ? 'Seçili yanıtı okuyorsun' : 'Arama sonucu konumunda okuyorsun'), subtitle: Text(focusedMessage ?? widget.initialAnswer?.messageId ?? widget.initialMessageId ?? ''), trailing: IconButton(tooltip: 'Canlı son mesaja dön', onPressed: returnToLatest, icon: const Icon(Icons.close_rounded))))),
       ]))),
       Expanded(child: LayoutBuilder(builder: (context, constraints) => Column(children: [
-      Expanded(child: ListenableBuilder(listenable: transcript, builder: (context, _) {
+      Expanded(child: SizedBox.expand(key: answerViewport, child: ListenableBuilder(listenable: transcript, builder: (context, _) {
         if (transcript.ids.isEmpty && transcript.loading) return const Center(child: CircularProgressIndicator());
         if (transcript.ids.isEmpty && transcript.error != null) return SingleChildScrollView(child: ErrorNotice(transcript.error!, onRetry: () => c.loadMessages(widget.sessionId)));
         if (transcript.ids.isEmpty) return SingleChildScrollView(child: EmptyState(icon: Icons.forum_outlined, title: live ? 'Konuşma burada başlar.' : 'Henüz mesaj görüntülenemiyor.', message: live ? 'İlk istemi gönder. Canlı mesajlar ve araç sonuçları bilgisayardan geldikçe bu konuşmada görünür. Çevrimdışıysa daha önce açılmamış konuşma geçmişi alınamaz.' : 'Bu konuşma salt okunur. Çevrimdışıysa daha önce açılmamış konuşma geçmişi alınamaz.'));
@@ -371,14 +607,15 @@ class _SessionScreenState extends State<SessionScreen> {
         var visibleEnd = transcript.ids.length;
         if (focusedIndex >= 0) {
           visibleEnd = focusedIndex + 1;
-          while (visibleEnd < transcript.ids.length && transcript.messages[transcript.ids[visibleEnd]]!.value.role != 'user') {
+          while (!focusedAnswer && transcript.messages[focusedMessage]?.value.role != 'user' && visibleEnd < transcript.ids.length && transcript.messages[transcript.ids[visibleEnd]]!.value.role != 'user') {
             visibleEnd++;
           }
         }
-        final ids = visibleEnd == transcript.ids.length ? transcript.ids : transcript.ids.take(visibleEnd).toList();
+        final ids = (focusedMessage == null && liveWindowStart != null ? transcript.ids.where((id) => transcript.messages[id]!.value.sequence >= liveWindowStart!) : transcript.ids.take(visibleEnd)).toList();
+        final hasMore = focusedMessage == null ? liveWindowHasMore ?? transcript.hasMore : transcript.hasMore;
         final entries = compactConversationEntries(ids, transcript.messages);
         return ListView.builder(key: PageStorageKey('transcript:${widget.sessionId}:${focusedMessage ?? 'live'}'), controller: scroll, reverse: true, padding: const EdgeInsets.only(bottom: 24), itemCount: entries.length + 1, itemBuilder: (context, index) {
-          if (index == entries.length) return Column(children: [if (transcript.hasMore) TextButton.icon(onPressed: transcript.loading ? null : () => c.loadMessages(widget.sessionId, older: true), icon: transcript.loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.history_rounded), label: const Text('Önceki mesajları yükle')), if (transcript.error != null) ErrorNotice(transcript.error!, onRetry: () => c.loadMessages(widget.sessionId, older: true))]);
+          if (index == entries.length) return Column(children: [if (hasMore) TextButton.icon(onPressed: transcript.loading ? null : loadOlder, icon: transcript.loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.history_rounded), label: const Text('Önceki mesajları yükle')), if (transcript.error != null) ErrorNotice(transcript.error!, onRetry: loadOlder)]);
           final entry = entries[entries.length - index - 1];
           final notifiers = entry.messageIds.map((id) => transcript.messages[id]!).toList();
           void openFile(String path, int? line) {
@@ -388,13 +625,17 @@ class _SessionScreenState extends State<SessionScreen> {
           final active = index == 0 && visibleEnd == transcript.ids.length && c.connection.connected && session?.writerConnected == true && ['running', 'background', 'human_wait', 'queued'].contains(session?.workState);
           return RepaintBoundary(key: ValueKey(entry.id), child: ListenableBuilder(listenable: Listenable.merge(notifiers), builder: (context, _) {
             final messages = notifiers.map((value) => value.value).toList();
+            final focusUser = entry.isUser && messages.single.id == focusedMessage;
+            if (focusUser) positionUser(messages.single.id);
             return entry.isUser
-              ? UserMessageView(message: messages.single, onOpenFile: openFile)
-              : CompactTurnView(messages: messages, active: active, focusedMessageId: focusedMessage, onOpenFile: openFile);
+              ? KeyedSubtree(key: focusUser ? focusedUserTarget : null, child: UserMessageView(message: messages.single, onOpenFile: openFile))
+              : CompactTurnView(messages: messages, active: active, focusedMessageId: focusedMessage, preferAnswerFocus: focusedAnswer, onOpenFile: openFile,
+                  onFocusPositioned: targetPositioned,
+                  answerEndBuilder: (message) => _AnswerEnd(key: ValueKey('answer-end:${message.id}'), message: message, onChanged: answerEndChanged));
           }));
         });
-      })),
-      if (showLatest && focusedMessage == null) Align(alignment: Alignment.centerRight, child: TextButton.icon(onPressed: () { scroll.jumpTo(0); final id = transcript.ids.lastOrNull; if (id != null) widget.controller.updateLocalState('read', 'session:${widget.sessionId}', {'messageId': id, 'revision': transcript.messages[id]!.value.revision}); }, icon: const Icon(Icons.arrow_downward_rounded), label: const Text('Son mesaja git'))),
+      }))),
+      if (showLatest && focusedMessage == null) Align(alignment: Alignment.centerRight, child: TextButton.icon(onPressed: () => scroll.jumpTo(0), icon: const Icon(Icons.arrow_downward_rounded), label: const Text('Son mesaja git'))),
       if (session != null && !live) ConstrainedBox(constraints: BoxConstraints(maxHeight: constraints.maxHeight * .75), child: SingleChildScrollView(padding: const EdgeInsets.all(16), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(session.activeUnbridged
           ? 'Bu oturum terminalde açık, ancak telefon bağlantısı etkin değil. Konuşmayı burada okuyabilirsin; açık oturum telefondan yeniden başlatılmaz.'
@@ -431,6 +672,25 @@ class _SessionScreenState extends State<SessionScreen> {
       Row(crossAxisAlignment: CrossAxisAlignment.end, children: [Expanded(child: ConstrainedBox(constraints: BoxConstraints(maxHeight: math.min(math.max(0, constraints.maxHeight - 8), math.max(MediaQuery.textScalerOf(context).scale(24) + 48, constraints.maxHeight - 56))), child: NeumorphicMessageInput(controller: message, enabled: !sending && !draftLoading))), const SizedBox(width: 8), IconButton.filled(tooltip: message.text.startsWith('/') ? 'Komut paletini aç' : modeLabel(mode), onPressed: enabled && (message.text.trim().isNotEmpty || attachments.isNotEmpty || fileContext.isNotEmpty) ? () => send(session) : null, icon: sending ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.arrow_upward_rounded), style: IconButton.styleFrom(minimumSize: const Size(52, 52)))])
     ]))));
   }
+}
+
+/// One pixel at the end of this exact rendered source, outside Markdown caches.
+class _AnswerEnd extends StatefulWidget {
+  const _AnswerEnd({super.key, required this.message, required this.onChanged});
+  final ChatMessage message;
+  final void Function(_AnswerEndState, bool) onChanged;
+  @override
+  State<_AnswerEnd> createState() => _AnswerEndState();
+}
+class _AnswerEndState extends State<_AnswerEnd> {
+  @override
+  void initState() { super.initState(); widget.onChanged(this, true); }
+  @override
+  void didUpdateWidget(covariant _AnswerEnd oldWidget) { super.didUpdateWidget(oldWidget); widget.onChanged(this, true); }
+  @override
+  void dispose() { widget.onChanged(this, false); super.dispose(); }
+  @override
+  Widget build(BuildContext context) => const SizedBox(height: 1);
 }
 
 String modeLabel(String mode) => switch (mode) { 'session.steer' => 'Yönlendir (steer)', 'session.follow_up' => 'Takibe ekle (follow-up)', _ => 'İstem gönder (prompt)' };

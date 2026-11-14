@@ -56,6 +56,47 @@ class ModelInfo {
   String get key => '$provider/$id';
 }
 
+class AnswerReference {
+  AnswerReference.fromJson(Json value)
+      : messageId = value['messageId'] as String? ?? '',
+        revision = (value['revision'] as num?)?.toInt() ?? 0,
+        sourceRevision = ((value['sourceRevision'] ?? value['revision']) as num?)?.toInt() ?? 0,
+        sequence = (value['sequence'] as num?)?.toInt() ?? 0,
+        ordinal = (value['ordinal'] as num?)?.toInt() ?? 0,
+        preview = value['preview'] as String? ?? '',
+        timestamp = instant(value['timestamp']);
+  final String messageId, preview;
+  final int revision, sourceRevision, sequence, ordinal;
+  bool isAtLeastAsCurrentAs(AnswerReference other) => revision > other.revision ||
+      revision == other.revision && sourceRevision >= other.sourceRevision;
+  final DateTime? timestamp;
+  Json toJson() => {'messageId': messageId, 'revision': revision, 'sequence': sequence,
+    'ordinal': ordinal, 'preview': preview, if (sourceRevision != revision) 'sourceRevision': sourceRevision,
+    if (timestamp != null) 'timestamp': timestamp!.toUtc().toIso8601String()};
+}
+
+class AnswerSummary {
+  AnswerSummary.fromJson(Json value)
+      : generation = value['generation'] as String? ?? '',
+        count = (value['count'] as num?)?.toInt() ?? 0,
+        latest = value['latest'] is Map ? AnswerReference.fromJson(object(value['latest'])) : null;
+  final String generation;
+  final int count;
+  final AnswerReference? latest;
+  bool matchesMarker(Json marker, String? epoch) => generation.isNotEmpty &&
+      marker['generation'] == generation && marker['journalEpoch'] == epoch;
+  int unreadCount(Json marker, String? epoch) {
+    if (count <= 0 || latest == null) return 0;
+    if (!matchesMarker(marker, epoch)) return count;
+    final ordinal = (marker['ordinal'] as num?)?.toInt() ?? 0;
+    if (ordinal > count || ordinal < 1 || (marker['revision'] as num? ?? 0) < 1 ||
+        marker['messageId'] is! String || '${marker['messageId']}'.isEmpty || marker['sequence'] is! num) return count;
+    if (ordinal < count) return count - ordinal.clamp(0, count);
+    return marker['messageId'] == latest!.messageId && marker['sequence'] == latest!.sequence &&
+        marker['revision'] == latest!.revision ? 0 : 1;
+  }
+}
+
 class Session {
   Session.fromJson(Json j)
       : id = j['id'] as String,
@@ -84,10 +125,12 @@ class Session {
         asyncJobs = objects(j['asyncJobs'] ?? j['jobs']),
         capabilities = strings(j['capabilities']),
         lastAssistantText = j['lastAssistantText'] as String?,
+        answerSummary = j['answerSummary'] is Map ? AnswerSummary.fromJson(object(j['answerSummary'])) : null,
         lastError = j['lastError'] as String?;
   final String id, projectId, name, cwd, transport, status;
   final ModelInfo? model;
   final String? thinkingLevel, sessionFile, lastAssistantText, lastError;
+  final AnswerSummary? answerSummary;
   final String? journalId, providerSessionId, bindingRevision, turnError, reportedWorkState;
   final bool writerConnected, pendingAsyncWork;
   final DateTime? updatedAt;

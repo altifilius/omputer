@@ -1392,7 +1392,7 @@ impl App {
             .put("session", id, &session, Some("session.updated"))?;
         Ok(())
     }
-    fn upsert_message(&self, id: &str, message: &Value, event_id: Option<&str>) -> Result<()> {
+    fn upsert_message(&self, id: &str, message: &Value, event_id: Option<&str>, complete: bool) -> Result<()> {
         if !message["role"].is_string() {
             return Ok(());
         }
@@ -1403,7 +1403,7 @@ impl App {
             .map(str::to_owned)
             .unwrap_or_else(|| message_id(id, message));
         let msg = archive::message_view(message, &mid, &json!(now()));
-        self.store.message(id, &mid, &msg)?;
+        self.store.message_with_completion(id, &mid, &msg, complete)?;
         Ok(())
     }
     fn record_activity(&self, id: &str, message: &Value, final_message: bool) -> Result<()> {
@@ -1623,7 +1623,7 @@ impl App {
             *self.revisions.lock().entry(id.to_owned()).or_default() += 1;
         }
         if matches!(ty, "message_start" | "message_update" | "message_end") {
-            self.upsert_message(id, &event["message"], event["messageId"].as_str())?;
+            self.upsert_message(id, &event["message"], event["messageId"].as_str(), ty == "message_end")?;
             self.record_activity(id, &event["message"], ty == "message_end")?;
         }
         let mut session = self.store.get("session", id)?;
@@ -2494,6 +2494,24 @@ mod tests {
                 bridge: PathBuf::new(),
             },
         )
+    }
+    #[test]
+    fn answer_summary_waits_for_message_end_even_when_partial_has_stop_reason() {
+        let app = app();
+        let message = json!({"role":"assistant","timestamp":6000,"stopReason":"stop","content":[{"type":"text","text":"Not complete until message_end"}]});
+        for ty in ["message_start", "message_update"] {
+            app.process_event("s", &json!({"type":ty,"messageId":"answer","message":message})).unwrap();
+            assert_eq!(app.store.snapshot().unwrap()["sessions"][0]["answerSummary"]["count"], 0);
+        }
+        let before = app.store.messages("s", i64::MAX, 50).unwrap()["messages"][0].clone();
+        app.process_event("s", &json!({"type":"message_end","messageId":"answer","message":message})).unwrap();
+        let summary = app.store.snapshot().unwrap()["sessions"][0]["answerSummary"].clone();
+        assert_eq!(summary["count"], 1);
+        assert_eq!(summary["latest"]["sequence"], before["sequence"]);
+        assert_eq!(summary["latest"]["revision"], before["revision"]);
+        let cursor = app.store.snapshot().unwrap()["sequence"].as_i64().unwrap();
+        app.process_event("s", &json!({"type":"message_end","messageId":"answer","message":message})).unwrap();
+        assert!(app.store.journal(cursor, 100).unwrap().is_empty());
     }
     #[test]
     fn canonical_ids_preserve_same_millisecond_repeats_and_stream_revisions_without_reset() {

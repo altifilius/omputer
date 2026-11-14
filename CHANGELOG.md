@@ -1,5 +1,17 @@
 # Changelog
 
+## PC0.4.0 / Android1.4.0(23) — unread final answers and Inbox
+
+- Index completed readable assistant answers in SQLite and expose bounded exact source references in snapshots and a paged read-only endpoint, including unopened sessions and reconnect catch-up. Exclude live partials, commentary, thinking and tool payloads; preserve no-op identities and invalidate branch/older-correction read baselines.
+- Show two-line last-answer previews and unread markers in session lists. Keep decisions first in Inbox, then one stable card per unread session across all projects with reply count, exact first-unread navigation and explicit read action.
+- Persist epoch/generation/message-revision-aware read positions only after the real answer end is visible or an explicit read gesture. Keep background/covered/history views, stale source pages and late navigation/ACKs from clearing newer replies.
+- Separate readable-answer revision from the current stored source revision, so usage/commentary-only changes neither resurrect read answers nor prevent exact viewport acknowledgement.
+- Generate one grouped native Android answer notification with private lock-screen content, durable delivery deduplication and foreground-reader suppression; dismissing an alert never marks a reply read. Preserve question/permission handling, direct-only transport and Android delivery limits.
+
+Source verification and bounded physical-phone results are recorded in [VERIFICATION.md](VERIFICATION.md#november14-pc040--android14023--unread-completed-answers). Package preparation, installed-phone state and active-PC rollout are separate gates; existing processes are not silently restarted.
+
+Known physical-phone findings remain: the legacy project-card continuation can include commentary, and warm notification navigation can show a false history-change warning while opening the correct answer. These are not claimed fixed in this release.
+
 ## Documentation privacy — November 14
 
 - Remove workstation-specific network addresses, listener/client port records, device-routing/access-rule details and private filesystem locations from public documentation.

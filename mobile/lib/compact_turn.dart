@@ -218,11 +218,15 @@ class CompactSourceAnchor extends StatelessWidget {
 }
 
 class CompactTurnView extends StatefulWidget {
-  const CompactTurnView({super.key, required this.messages, this.active = false, this.focusedMessageId, this.onOpenFile});
+  const CompactTurnView({super.key, required this.messages, this.active = false, this.focusedMessageId, this.preferAnswerFocus = false, this.onOpenFile, this.answerEndBuilder, this.onFocusPositioned});
   final List<ChatMessage> messages;
   final bool active;
   final String? focusedMessageId;
+  final bool preferAnswerFocus;
   final void Function(String, int?)? onOpenFile;
+  /// An anchor after the source's last rendered answer block, not its heading.
+  final Widget Function(ChatMessage)? answerEndBuilder;
+  final VoidCallback? onFocusPositioned;
   @override
   State<CompactTurnView> createState() => _CompactTurnViewState();
 }
@@ -235,6 +239,7 @@ class _CompactTurnViewState extends State<CompactTurnView> {
   void didUpdateWidget(covariant CompactTurnView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if ((oldWidget.active && !widget.active) || oldWidget.messages.firstOrNull?.id != widget.messages.firstOrNull?.id) expanded = false;
+    if (oldWidget.preferAnswerFocus != widget.preferAnswerFocus) positionedFocus = null;
   }
 
   @override
@@ -247,8 +252,8 @@ class _CompactTurnViewState extends State<CompactTurnView> {
     final textTheme = Theme.of(context).textTheme;
     final focused = widget.focusedMessageId;
     final focusedOperation = projection.operations.indexWhere((step) => step.messageIds.contains(focused));
-    final focusOperation = focusedOperation >= 0;
     final focusedAnswer = projection.answers.indexWhere((part) => part.messageId == focused);
+    final focusOperation = focusedOperation >= 0 && !(widget.preferAnswerFocus && focusedAnswer >= 0);
     if (focused == null) positionedFocus = null;
     if (focused != null && positionedFocus != focused && (focusedOperation >= 0 || focusedAnswer >= 0)) {
       positionedFocus = focused;
@@ -256,6 +261,9 @@ class _CompactTurnViewState extends State<CompactTurnView> {
         final target = focusedTarget.currentContext;
         if (mounted && widget.focusedMessageId == focused && target != null) {
           Scrollable.ensureVisible(target, alignment: .5, duration: Duration.zero);
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && widget.focusedMessageId == focused) widget.onFocusPositioned?.call();
+          });
         }
       });
     }
@@ -287,7 +295,7 @@ class _CompactTurnViewState extends State<CompactTurnView> {
             if (firstVisible > 0 && firstVisible < operations.length)
               Padding(padding: const EdgeInsets.fromLTRB(12, 0, 12, 8), child: Text('$firstVisible önceki işlem', style: textTheme.bodySmall)),
             for (var index = firstVisible; index < operations.length; index++)
-              _operation(context, operations[index], index + 1, focusKey: index == focusedOperation ? focusedTarget : null),
+              _operation(context, operations[index], index + 1, focusKey: focusOperation && index == focusedOperation ? focusedTarget : null),
           ])),
           const SizedBox(height: 16),
         ],
@@ -304,10 +312,14 @@ class _CompactTurnViewState extends State<CompactTurnView> {
               ]),
           ]),
           for (var index = 0; index < projection.answers.length; index++)
-            CompactSourceAnchor(key: focusedOperation < 0 && index == focusedAnswer ? focusedTarget : ValueKey('compact-answer:${projection.answers[index].messageId}:${projection.answers[index].blockIndex}'),
+            CompactSourceAnchor(key: !focusOperation && index == focusedAnswer ? focusedTarget : ValueKey('compact-answer:${projection.answers[index].messageId}:${projection.answers[index].blockIndex}'),
               messageIds: [projection.answers[index].messageId], focusedMessageId: focused,
-              child: Padding(padding: const EdgeInsets.only(bottom: 8), child: projection.answers[index].text != null
-                  ? _markdown(context, projection.answers[index].text!) : _image(projection.answers[index].imageData, projection.answers[index].imageReference))),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                Padding(padding: const EdgeInsets.only(bottom: 8), child: projection.answers[index].text != null
+                    ? _markdown(context, projection.answers[index].text!) : _image(projection.answers[index].imageData, projection.answers[index].imageReference)),
+                if (widget.answerEndBuilder != null && !projection.answers.skip(index + 1).any((part) => part.messageId == projection.answers[index].messageId))
+                  widget.answerEndBuilder!(widget.messages.firstWhere((message) => message.id == projection.answers[index].messageId)),
+              ])),
         ] else if (widget.active && !user)
           Text('Yanıt hazırlanıyor', style: textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant)),
       ])));

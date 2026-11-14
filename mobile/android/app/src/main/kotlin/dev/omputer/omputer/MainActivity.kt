@@ -82,6 +82,13 @@ class MainActivity : FlutterActivity() {
                 "colorTheme" -> { LocalConnection.setColorTheme(call.argument<String>("id") ?: error("Renk teması eksik.")); result.success(null) }
                 "localState" -> local { LocalConnection.localState() }
                 "localStateSet" -> local { LocalConnection.localStateSet(call.argument<String>("section") ?: error("Bölüm eksik."), call.argument<String>("key") ?: error("Anahtar eksik."), call.argument<Any>("value")) }
+                "answerRead" -> local { LocalConnection.answerRead(call.arguments as? Map<*, *> ?: error("Yanıt okuma konumu eksik.")) }
+                "answerReader" -> {
+                    LocalConnection.answerReader(call.argument<String>("owner") ?: error("Yanıt okuyucusu kimliği eksik."),
+                        call.argument<String>("sessionId"), call.argument<String>("expectedJournalEpoch"),
+                        call.argument<String>("generation"), call.argument<Boolean>("atLatest") == true)
+                    result.success(null)
+                }
                 "draftLoad" -> local { LocalConnection.draftLoad(call.argument<String>("key") ?: error("Anahtar eksik.")) }
                 "draftList" -> local { LocalConnection.draftList() }
                 "draftSave" -> local { LocalConnection.draftSave(call.argument<String>("key") ?: error("Anahtar eksik."), call.argument<Map<*, *>>("value") ?: error("Taslak eksik.")); null }
@@ -269,12 +276,27 @@ class MainActivity : FlutterActivity() {
         else {
             val session = value.getStringExtra("sessionId")
             val interaction = value.getStringExtra("interactionId")
-            if (session != null || interaction != null) LocalConnection.navigate(mapOf("sessionId" to session, "interactionId" to interaction))
+            if (value.getBooleanExtra("answer", false)) {
+                // Transfer the full native scope before consuming the Intent. Disk cache
+                // may predate the notification's durable delivery receipt after a restart.
+                AnswerNavigation.Target.create(session, value.getStringExtra("answerIdentity"),
+                    value.getStringExtra("answerJournalEpoch"), value.getStringExtra("answerGeneration"))
+                    ?.let(LocalConnection::navigateAnswer)
+            } else if (session != null || interaction != null) LocalConnection.navigate(mapOf("sessionId" to session, "interactionId" to interaction))
         }
         value.data = null
         value.removeExtra("sessionId"); value.removeExtra("interactionId")
+        listOf("answer", "answerIdentity", "answerJournalEpoch", "answerGeneration").forEach(value::removeExtra)
     }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleNavigation(intent) }
+    override fun onResume() {
+        super.onResume()
+        LocalConnection.answerActivityResumed(true)
+    }
+    override fun onPause() {
+        LocalConnection.answerActivityResumed(false)
+        super.onPause()
+    }
     override fun onStart() {
         super.onStart()
         LocalConnection.initialize(applicationContext)
@@ -294,6 +316,7 @@ class MainActivity : FlutterActivity() {
         super.onStop()
     }
     override fun onDestroy() {
+        LocalConnection.answerActivityResumed(false)
         eventListener?.let { LocalConnection.removeListener(it) }; eventListener = null
         notificationResult?.error("activity_closed", "İzin ekranı kapandı.", null); notificationResult = null
         imageResult?.error("activity_closed", "Görsel seçimi kapandı.", null); imageResult = null

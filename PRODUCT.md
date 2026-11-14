@@ -25,7 +25,7 @@ OMP v18.10.2 is installed. The PC app starts and supervises its service automati
 ## Capabilities and Constraints
 
 - Phone navigation through upright layered project cards and a finite rail, automatically stepping only after7seconds idle and stopping at the last. Larger titles and recorded continuation previews lead. Tümü/Sabitlenen retain complete selected-project histories; Canlı aggregates only actual running/background sessions across projects, with project identity. Supplied Sisyphus launcher/work GIF and established native sun/moon control share one neumorphic material system. Settings adds seven user-supplied color themes with independent light/dark versions; original Omputer stays available, and phone-local palette/appearance choices persist separately.
-- Unified inbox for pending questions, selections, confirmations, and tool permissions.
+- Unified inbox with pending questions/selections/confirmations/tool permissions first and grouped unread completed assistant answers below. Unopened sessions expose safe last-answer previews; exact source visibility or an explicit read gesture advances a durable identity/history-scoped read position independently of notification dismissal.
 - Live conversations with readable answers/questions and a compact ordered operation flow; raw transcript/export remains available separately. Todos, subagents, prompt/steer/follow-up/interrupt, model selection, new sessions, and resume.
 - All application data, pairing, notifications, and history stay on the PC and phone.
 - Outside-home access uses a user-owned reachable network route, such as WireGuard on the user's router/PC. No managed VPN control plane or hosted relay is permitted. CGNAT cannot be traversed without another reachable user-owned endpoint.

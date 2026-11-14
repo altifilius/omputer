@@ -69,6 +69,13 @@ internal object LocalConnection {
             var changed = false
             uiEvents.drain(generation).forEach { queued ->
                 if (queued.type != "connection" && listeners.isEmpty()) return@forEach
+                if (queued.type == "navigate" && queued.data is AnswerNavigation.Ticket) {
+                    answerNavigation.deliver(queued.data) { data ->
+                        val event = mapOf("type" to "navigate", "data" to data)
+                        listeners.forEach { it(event) }
+                    }
+                    return@forEach
+                }
                 val data = if (queued.data is JSONObject) queued.data.asMap() else queued.data
                 val event = mapOf("type" to queued.type, "data" to data)
                 listeners.forEach { it(event) }
@@ -104,7 +111,9 @@ internal object LocalConnection {
     @Volatile var activityVisible = false
     private var retrySeconds = 1L
     private var pendingNavigation: Map<String, Any?>? = null
+    private val answerNavigation = AnswerNavigation()
     private val acceptedInteractions = linkedMapOf<String, String>()
+    private val answerReaders = AnswerReaders()
     private val retiredJournalEpochs = linkedSetOf<String>()
     private var journalRevision = 0
     var onConnectionChanged: (() -> Unit)? = null
@@ -116,14 +125,14 @@ internal object LocalConnection {
         currentSnapshot = vault.snapshot()
         notificationDeviceId = try { vault.credentials()?.optString("deviceId") } catch (_: Exception) { null }
         notificationScopedIdentity = try { vault.credentials()?.let { DurableLocalState.identity(it) } } catch (_: Exception) { null }
+        answerNavigation.resetIdentity(notificationScopedIdentity.takeUnless { vault.revoked })
+        answerNavigation.snapshot(currentSnapshot, authenticated = false)
         LocalNotifications.initialize(context)
         val scope = notificationScopedIdentity
-        if (scope != null) execute({ vault.durable.state(scope).getJSONObject("sections").getJSONObject("notificationPreferences") }) { value, error ->
-            if (error == null && scope == notificationScopedIdentity) {
-                notificationPreferences = value as JSONObject
-                execute({ LocalNotifications.reconcile(context, currentSnapshot); null }) { _, _ -> }
-            }
-        }
+        if (scope != null) execute({ withIdentity(scope) {
+            installNotificationState(vault.durable.state(scope))
+            reconcileNotifications(); null
+        } }) { _, _ -> }
         nearby = NearbyComputers(context, { emit("discovery", it) }, ::rediscovered)
         context.getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) = networkChanged()
@@ -137,7 +146,10 @@ internal object LocalConnection {
         listener(mapOf("type" to "connection", "data" to connection()))
         listener(mapOf("type" to "snapshot", "data" to snapshot()))
         listener(mapOf("type" to "discovery", "data" to nearby.state()))
-        synchronized(this) { pendingNavigation?.let { listener(it); pendingNavigation = null } }
+        synchronized(this) {
+            pendingNavigation?.let { listener(it); pendingNavigation = null }
+            publishAnswerNavigation()
+        }
     }
     fun removeListener(listener: (Map<String, Any?>) -> Unit) { listeners.remove(listener) }
     private fun emit(type: String, data: Any?) {
@@ -152,9 +164,17 @@ internal object LocalConnection {
         if (uiScheduled.compareAndSet(false, true)) main.post(uiDrain)
     }
     @Synchronized fun navigate(data: Map<String, Any?>) {
+        answerNavigation.clear()
         val event = mapOf("type" to "navigate", "data" to data)
         if (listeners.isEmpty()) pendingNavigation = event
         emit("navigate", data)
+    }
+    @Synchronized fun navigateAnswer(target: AnswerNavigation.Target) {
+        pendingNavigation = null
+        if (answerNavigation.request(target)) publishAnswerNavigation()
+    }
+    private fun publishAnswerNavigation() {
+        answerNavigation.pendingTicket()?.let { emit("navigate", it) }
     }
     fun snapshot(): Map<String, Any?> = currentSnapshot.asMap()
     @Synchronized fun localIdentity(): String {
@@ -171,12 +191,74 @@ internal object LocalConnection {
     }
     @Synchronized fun localState() = vault.durable.state(localIdentity()).asMap()
     @Synchronized fun localStateSet(section: String, key: String, value: Any?): Map<String, Any?> {
-        val state = vault.durable.set(localIdentity(), section, key, JSONObject.wrap(value)).asMap()
-        if (section == "notificationPreferences") {
-            notificationPreferences = vault.durable.state(localIdentity()).getJSONObject("sections").getJSONObject("notificationPreferences")
-            LocalNotifications.cancelAll(context); LocalNotifications.reconcile(context, currentSnapshot)
+        if (section == "notificationDelivery") throw ApiFailure("native_owned", "Bildirim teslim durumu yerel bağlantı tarafından yönetilir.")
+        if (section == "read" && key.startsWith("session:") && answerSummary(key.removePrefix("session:")) != null)
+            throw ApiFailure("answer_read_required", "Dizinli yanıtlar için doğrulanmış yanıt okuma konumu gerekli.")
+        val state = vault.durable.set(localIdentity(), section, key, JSONObject.wrap(value))
+        installNotificationState(state)
+        if (section in setOf("notificationPreferences", "read")) reconcileNotifications()
+        return state.asMap()
+    }
+
+    @Synchronized fun answerRead(arguments: Map<*, *>): Map<String, Any?> {
+        val value = JSONObject(arguments)
+        val session = value.opt("sessionId") as? String ?: throw ApiFailure("invalid_answer_read", "Oturum kimliği eksik.")
+        val epoch = value.opt("expectedJournalEpoch") as? String ?: throw ApiFailure("history_changed", "Yanıt geçmişi kimliği eksik.")
+        if (epoch != JournalEpoch.value(currentSnapshot)) throw ApiFailure("history_changed", "Yanıt geçmişi değişti.")
+        val summary = answerSummary(session) ?: throw ApiFailure("answer_index_unavailable", "Bu oturumun yanıt dizini kullanılamıyor.")
+        if (value.opt("generation") != summary.generation) throw ApiFailure("history_changed", "Oturumun yanıt geçmişi değişti.")
+        val marker = JSONObject().put("journalEpoch", epoch)
+        listOf("generation", "ordinal", "messageId", "revision", "sequence").forEach { marker.put(it, value.opt(it)) }
+        val state = try { vault.durable.commitAnswerRead(localIdentity(), "session:$session", summary, epoch, marker) }
+        catch (error: IllegalArgumentException) { throw ApiFailure("invalid_answer_read", error.message ?: "Yanıt okuma konumu geçersiz.") }
+        installNotificationState(state)
+        reconcileNotifications()
+        return state.asMap()
+    }
+
+    @Synchronized fun answerReader(owner: String, session: String?, epoch: String?, answerGeneration: String?, atLatest: Boolean) {
+        // Clears must work even after forgetting/restoring; they never require a current pair.
+        answerReaders.update(owner, null, null, null, false)
+        if (atLatest && session != null) {
+            localIdentity()
+            if (epoch == null || epoch != JournalEpoch.value(currentSnapshot) || answerSummary(session)?.generation != answerGeneration)
+                throw ApiFailure("history_changed", "Yanıt okuyucusunun geçmişi değişti.")
+            answerReaders.update(owner, session, epoch, answerGeneration, true)
         }
-        return state
+        reconcileNotifications()
+    }
+    @Synchronized fun answerActivityResumed(resumed: Boolean) {
+        answerReaders.activityResumed(resumed)
+        if (!resumed) reconcileNotifications()
+    }
+    private fun sessionRow(id: String): JSONObject? = currentSnapshot.optJSONArray("sessions")?.let { rows ->
+        (0 until rows.length()).asSequence().mapNotNull { rows.optJSONObject(it) }.firstOrNull { it.optString("id") == id }
+    }
+    @Synchronized fun answerSummary(session: String): AnswerPolicy.Summary? = sessionRow(session)?.let(AnswerPolicy::summary)
+    fun answerVisible(session: String, epoch: String, answerGeneration: String): Boolean = answerReaders.visible(session, epoch, answerGeneration)
+    fun answerReadMarker(session: String): JSONObject? = notificationRead.optJSONObject("session:$session")
+    fun answerDeliveryMarker(session: String): JSONObject? = notificationDelivery.optJSONObject("session:$session")
+    fun answerNotificationsReady(): Boolean = notificationStateReady && answerSnapshotFresh && notificationScopedIdentity != null && !vault.revoked
+    fun answerIdentity(): String? = notificationScopedIdentity
+    fun recordAnswerDelivery(session: String, summary: AnswerPolicy.Summary, epoch: String) {
+        val marker = AnswerPolicy.latestMarker(summary, epoch) ?: return
+        installNotificationState(vault.durable.set(localIdentity(), "notificationDelivery", "session:$session", marker.json()))
+    }
+    private fun installNotificationState(state: JSONObject) {
+        val sections = state.getJSONObject("sections")
+        notificationPreferences = sections.getJSONObject("notificationPreferences")
+        notificationRead = sections.getJSONObject("read")
+        notificationDelivery = sections.getJSONObject("notificationDelivery")
+        notificationStateReady = true
+    }
+    @Synchronized private fun reconcileNotifications() {
+        if (!notificationStateReady || notificationScopedIdentity == null) return
+        try { LocalNotifications.reconcile(context, currentSnapshot) }
+        catch (_: Exception) {
+            // A notification/storage failure must not turn a committed command or read into a failed operation.
+            lastError = "Bildirim durumu güncellenemedi; okunmamış yanıtları uygulamadan kontrol et."
+            publishConnection()
+        }
     }
     @Synchronized fun draftLoad(key: String) = vault.durable.draft(localIdentity(), key)?.asMap()
     @Synchronized fun draftList() = vault.durable.drafts(localIdentity()).asMap()
@@ -328,10 +410,16 @@ internal object LocalConnection {
     fun notificationsAllowed() = context.getSystemService(android.app.NotificationManager::class.java).areNotificationsEnabled() &&
         (Build.VERSION.SDK_INT < 33 || context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
     fun notificationsAuthorized() = !vault.revoked && notificationsAllowed()
-    fun notificationPermissionChanged() { publishConnection(); LocalNotifications.reconcile(context, currentSnapshot) }
+    @Synchronized fun notificationPermissionChanged() { publishConnection(); reconcileNotifications() }
     @Volatile private var notificationScopedIdentity: String? = null
     @Volatile private var notificationDeviceId: String? = null
     @Volatile private var notificationPreferences = JSONObject().put("global", false)
+    private var notificationRead = JSONObject()
+    private var notificationDelivery = JSONObject()
+    private var notificationStateReady = false
+    // Cached snapshots can lag fsynced delivery refs after process death. Reconcile answers
+    // only once this process has installed its pinned authenticated bootstrap baseline.
+    private var answerSnapshotFresh = false
     fun notificationIdentity(): String? = notificationDeviceId
     private fun publishConnection() { emit("connection", connection()) }
 
@@ -531,7 +619,11 @@ internal object LocalConnection {
         uiEvents.resetIdentity(); pendingNavigation = null
         notificationDeviceId = saved.getString("deviceId")
         notificationScopedIdentity = DurableLocalState.identity(saved)
+        answerNavigation.resetIdentity(notificationScopedIdentity)
         notificationPreferences = JSONObject()
+        notificationRead = JSONObject(); notificationDelivery = JSONObject(); notificationStateReady = true
+        answerSnapshotFresh = false
+        answerReaders.clear()
         currentSnapshot = LocalVault.emptySnapshot()
         acceptedInteractions.clear()
         retiredJournalEpochs.clear(); journalRevision++
@@ -715,6 +807,8 @@ internal object LocalConnection {
             JournalEpoch.value(currentSnapshot)?.let { retiredJournalEpochs.add(it) }
             journalRevision++
             acceptedInteractions.clear()
+            answerReaders.clear()
+            LocalNotifications.cancelAll(context)
             uiEvents.resetJournal()
         }
         val interactions = snapshot.optJSONArray("interactions")
@@ -729,9 +823,12 @@ internal object LocalConnection {
             snapshot.put("interactions", next)
         }
         currentSnapshot = snapshot
+        if (authenticatedBootstrap) answerSnapshotFresh = true
+        answerNavigation.snapshot(snapshot, authenticatedBootstrap)
         vault.saveSnapshot(snapshot)
-        LocalNotifications.reconcile(context, snapshot)
+        reconcileNotifications()
         emit("snapshot", snapshot)
+        publishAnswerNavigation()
         return true
     }
     fun pendingInteraction(id: String): JSONObject? {
@@ -839,6 +936,8 @@ internal object LocalConnection {
         retry?.let { main.removeCallbacks(it) }; retry = null
         if (revoked) {
             vault.revoked = true
+            answerNavigation.resetIdentity(null)
+            answerReaders.clear()
             client?.dispatcher?.cancelAll()
             active = false; vault.background = false
             context.stopService(android.content.Intent(context, ConnectionService::class.java))
@@ -866,7 +965,11 @@ internal object LocalConnection {
         uiEvents.resetIdentity(); pendingNavigation = null
         notificationDeviceId = null
         notificationScopedIdentity = null
+        answerNavigation.resetIdentity(null)
         notificationPreferences = JSONObject().put("global", false)
+        notificationRead = JSONObject(); notificationDelivery = JSONObject(); notificationStateReady = false
+        answerSnapshotFresh = false
+        answerReaders.clear()
         currentSnapshot = LocalVault.emptySnapshot()
         acceptedInteractions.clear()
         retiredJournalEpochs.clear(); journalRevision++
@@ -950,6 +1053,8 @@ internal object LocalConnection {
                     snapshot.put("devices", next)
                     if (current) {
                         vault.revoked = true
+                        answerNavigation.resetIdentity(null)
+                        answerReaders.clear()
                         client?.dispatcher?.cancelAll()
                         lastError = "Bu telefonun PC yetkisi kaldırıldı."; vault.background = false
                         context.stopService(android.content.Intent(context, ConnectionService::class.java))
